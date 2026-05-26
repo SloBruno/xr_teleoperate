@@ -1,24 +1,51 @@
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize # dds
-from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorCmds_, MotorStates_                           # idl
-from unitree_sdk2py.idl.default import unitree_go_msg_dds__MotorCmd_
 from teleop.robot_control.hand_retargeting import HandRetargeting, HandType
 import numpy as np
 from enum import IntEnum
 import threading
 import time
 from multiprocessing import Process, Array
+from dataclasses import dataclass
+import cyclonedds.idl as idl
+import cyclonedds.idl.annotations as annotate
+import cyclonedds.idl.types as types
 
 import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
 
 Inspire_Num_Motors = 6
-kTopicInspireDFXCommand = "rt/inspire/cmd"
-kTopicInspireDFXState = "rt/inspire/state"
+kTopicInspireDFXLeftCommand   = "rt/inspire_hand/ctrl/l"
+kTopicInspireDFXRightCommand  = "rt/inspire_hand/ctrl/r"
+kTopicInspireDFXLeftState     = "rt/inspire_hand/state/l"
+kTopicInspireDFXRightState    = "rt/inspire_hand/state/r"
+
+@dataclass
+@annotate.final
+@annotate.autoid("sequential")
+class inspire_hand_ctrl(idl.IdlStruct, typename="inspire.inspire_hand_ctrl"):
+    pos_set: types.sequence[types.int16, 6]
+    angle_set: types.sequence[types.int16, 6]
+    force_set: types.sequence[types.int16, 6]
+    speed_set: types.sequence[types.int16, 6]
+    mode: types.int8
+
+@dataclass
+@annotate.final
+@annotate.autoid("sequential")
+class inspire_hand_state(idl.IdlStruct, typename="inspire.inspire_hand_state"):
+    pos_act: types.sequence[types.int16, 6]
+    angle_act: types.sequence[types.int16, 6]
+    force_act: types.sequence[types.int16, 6]
+    current: types.sequence[types.int16, 6]
+    err: types.sequence[types.uint8, 6]
+    status: types.sequence[types.uint8, 6]
+    temperature: types.sequence[types.uint8, 6]
 
 class Inspire_Controller_DFX:
     def __init__(self, left_hand_array, right_hand_array, dual_hand_data_lock = None, dual_hand_state_array = None,
                        dual_hand_action_array = None, fps = 100.0, Unit_Test = False, simulation_mode = False):
         logger_mp.info("Initialize Inspire_Controller_DFX...")
+
         self.fps = fps
         self.Unit_Test = Unit_Test
         self.simulation_mode = simulation_mode
@@ -27,15 +54,19 @@ class Inspire_Controller_DFX:
         else:
             self.hand_retargeting = HandRetargeting(HandType.INSPIRE_HAND_Unit_Test)
 
+        # initialize hand command publishers (per-hand, using inspire_hand_ctrl type)
+        self.LeftHandCmd_publisher = ChannelPublisher(kTopicInspireDFXLeftCommand, inspire_hand_ctrl)
+        self.LeftHandCmd_publisher.Init()
+        self.RightHandCmd_publisher = ChannelPublisher(kTopicInspireDFXRightCommand, inspire_hand_ctrl)
+        self.RightHandCmd_publisher.Init()
 
-        # initialize handcmd publisher and handstate subscriber
-        self.HandCmb_publisher = ChannelPublisher(kTopicInspireDFXCommand, MotorCmds_)
-        self.HandCmb_publisher.Init()
+        # initialize hand state subscribers (per-hand, using inspire_hand_state type)
+        self.LeftHandState_subscriber = ChannelSubscriber(kTopicInspireDFXLeftState, inspire_hand_state)
+        self.LeftHandState_subscriber.Init()
+        self.RightHandState_subscriber = ChannelSubscriber(kTopicInspireDFXRightState, inspire_hand_state)
+        self.RightHandState_subscriber.Init()
 
-        self.HandState_subscriber = ChannelSubscriber(kTopicInspireDFXState, MotorStates_)
-        self.HandState_subscriber.Init()
-
-        # Shared Arrays for hand states
+        # Shared Arrays for hand states ([0,1] normalized values)
         self.left_hand_state_array  = Array('d', Inspire_Num_Motors, lock=True)  
         self.right_hand_state_array = Array('d', Inspire_Num_Motors, lock=True)
 
@@ -44,11 +75,16 @@ class Inspire_Controller_DFX:
         self.subscribe_state_thread.daemon = True
         self.subscribe_state_thread.start()
 
-        while True:
-            if any(self.right_hand_state_array): # any(self.left_hand_state_array) and 
-                break
+        # Wait for initial DDS messages
+        wait_count = 0
+        while not (any(self.left_hand_state_array) or any(self.right_hand_state_array)):
+            if wait_count % 100 == 0:
+                logger_mp.warning(f"[Inspire_Controller_DFX] Waiting to subscribe to hand states from DDS (L: {any(self.left_hand_state_array)}, R: {any(self.right_hand_state_array)})...")
             time.sleep(0.01)
-            logger_mp.warning("[Inspire_Controller_DFX] Waiting to subscribe dds...")
+            wait_count += 1
+            if wait_count > 500:
+                logger_mp.warning("[Inspire_Controller_DFX] Timeout waiting for initial hand states. Proceeding anyway.")
+                break
         logger_mp.info("[Inspire_Controller_DFX] Subscribe dds ok.")
 
         hand_control_process = Process(target=self.control_process, args=(left_hand_array, right_hand_array,  self.left_hand_state_array, self.right_hand_state_array,
@@ -60,25 +96,43 @@ class Inspire_Controller_DFX:
 
     def _subscribe_hand_state(self):
         while True:
-            hand_msg  = self.HandState_subscriber.Read()
-            if hand_msg is not None:
-                for idx, id in enumerate(Inspire_Left_Hand_JointIndex):
-                    self.left_hand_state_array[idx] = hand_msg.states[id].q
-                for idx, id in enumerate(Inspire_Right_Hand_JointIndex):
-                    self.right_hand_state_array[idx] = hand_msg.states[id].q
+            # Left Hand
+            left_state_msg = self.LeftHandState_subscriber.Read()
+            if left_state_msg is not None:
+                if hasattr(left_state_msg, 'angle_act') and len(left_state_msg.angle_act) == Inspire_Num_Motors:
+                    with self.left_hand_state_array.get_lock():
+                        for i in range(Inspire_Num_Motors):
+                            self.left_hand_state_array[i] = left_state_msg.angle_act[i] / 1000.0
+            # Right Hand
+            right_state_msg = self.RightHandState_subscriber.Read()
+            if right_state_msg is not None:
+                if hasattr(right_state_msg, 'angle_act') and len(right_state_msg.angle_act) == Inspire_Num_Motors:
+                    with self.right_hand_state_array.get_lock():
+                        for i in range(Inspire_Num_Motors):
+                            self.right_hand_state_array[i] = right_state_msg.angle_act[i] / 1000.0
             time.sleep(0.002)
 
-    def ctrl_dual_hand(self, left_q_target, right_q_target):
+    def _send_hand_command(self, left_angle_cmd_scaled, right_angle_cmd_scaled):
         """
-        Set current left, right hand motor state target q
+        Send scaled angle commands [0-1000] to both hands.
         """
-        for idx, id in enumerate(Inspire_Left_Hand_JointIndex):             
-            self.hand_msg.cmds[id].q = left_q_target[idx]         
-        for idx, id in enumerate(Inspire_Right_Hand_JointIndex):             
-            self.hand_msg.cmds[id].q = right_q_target[idx] 
+        left_cmd_msg = inspire_hand_ctrl(
+            pos_set=[0]*6,
+            angle_set=left_angle_cmd_scaled,
+            force_set=[0]*6,
+            speed_set=[0]*6,
+            mode=1
+        )
+        self.LeftHandCmd_publisher.Write(left_cmd_msg)
 
-        self.HandCmb_publisher.Write(self.hand_msg)
-        # logger_mp.debug("hand ctrl publish ok.")
+        right_cmd_msg = inspire_hand_ctrl(
+            pos_set=[0]*6,
+            angle_set=right_angle_cmd_scaled,
+            force_set=[0]*6,
+            speed_set=[0]*6,
+            mode=1
+        )
+        self.RightHandCmd_publisher.Write(right_cmd_msg)
     
     def control_process(self, left_hand_array, right_hand_array, left_hand_state_array, right_hand_state_array,
                               dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None):
@@ -86,15 +140,6 @@ class Inspire_Controller_DFX:
 
         left_q_target  = np.full(Inspire_Num_Motors, 1.0)
         right_q_target = np.full(Inspire_Num_Motors, 1.0)
-
-        # initialize inspire hand's cmd msg
-        self.hand_msg  = MotorCmds_()
-        self.hand_msg.cmds = [unitree_go_msg_dds__MotorCmd_() for _ in range(len(Inspire_Right_Hand_JointIndex) + len(Inspire_Left_Hand_JointIndex))]
-
-        for idx, id in enumerate(Inspire_Left_Hand_JointIndex):
-            self.hand_msg.cmds[id].q = 1.0
-        for idx, id in enumerate(Inspire_Right_Hand_JointIndex):
-            self.hand_msg.cmds[id].q = 1.0
 
         try:
             while self.running:
@@ -136,14 +181,17 @@ class Inspire_Controller_DFX:
                             left_q_target[idx]  = normalize(left_q_target[idx], -0.1, 1.3)
                             right_q_target[idx] = normalize(right_q_target[idx], -0.1, 1.3)
 
+                scaled_left_cmd = [int(np.clip(val * 1000, 0, 1000)) for val in left_q_target]
+                scaled_right_cmd = [int(np.clip(val * 1000, 0, 1000)) for val in right_q_target]
+
                 # get dual hand action
-                action_data = np.concatenate((left_q_target, right_q_target))    
+                action_data = np.concatenate((left_q_target, right_q_target))
                 if dual_hand_state_array and dual_hand_action_array:
                     with dual_hand_data_lock:
                         dual_hand_state_array[:] = state_data
                         dual_hand_action_array[:] = action_data
 
-                self.ctrl_dual_hand(left_q_target, right_q_target)
+                self._send_hand_command(scaled_left_cmd, scaled_right_cmd)
                 current_time = time.time()
                 time_elapsed = current_time - start_time
                 sleep_time = max(0, (1 / self.fps) - time_elapsed)
