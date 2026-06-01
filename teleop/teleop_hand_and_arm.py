@@ -3,6 +3,7 @@ import argparse
 from multiprocessing import Value, Array, Lock
 import threading
 import logging_mp
+import numpy as np
 logging_mp.basicConfig(level=logging_mp.INFO)
 logger_mp = logging_mp.getLogger(__name__)
 
@@ -121,10 +122,16 @@ if __name__ == '__main__':
         logger_mp.debug(f"Camera config: {camera_config}")
         xr_need_local_img = not (args.display_mode == 'pass-through' or camera_config['head_camera']['enable_webrtc'])
 
-        # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
+        # Calculate combined image shape for side-by-side display
+        head_shape = camera_config['head_camera']['image_shape']  # [height, width]
+        wrist_shape = camera_config['left_wrist_camera']['image_shape']  # [height, width]
+        # Combined image will be head_height x (head_width + wrist_width)
+        combined_img_shape = [head_shape[0], head_shape[1] + wrist_shape[1]]
+
+        # televuer_wrapper: obtain hand pose data from the XR device and transmit the combined camera image to the XR device.
         tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand", 
                                      binocular=camera_config['head_camera']['binocular'],
-                                     img_shape=camera_config['head_camera']['image_shape'],
+                                     img_shape=combined_img_shape,
                                      # maybe should decrease fps for better performance?
                                      # https://github.com/unitreerobotics/xr_teleoperate/issues/172
                                      # display_fps=camera_config['head_camera']['fps'] ? args.frequency? 30.0?
@@ -132,13 +139,15 @@ if __name__ == '__main__':
                                      zmq=camera_config['head_camera']['enable_zmq'],
                                      webrtc=camera_config['head_camera']['enable_webrtc'],
                                      webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
-                                     arm_reference_mode="head_yaw"
+                                     arm_reference_mode="head_yaw",
+                                      distance_to_camera=4.0,
+                                      image_height=1
                                      )
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
         if args.motion:
             if args.input_mode == "controller":
-                loco_wrapper = LocoClientWrapper()
+                loco_wrapper = LocoClientWrapper()\
         else:
             motion_switcher = MotionSwitcher()
             status, result = motion_switcher.Enter_Debug_Mode()
@@ -254,10 +263,18 @@ if __name__ == '__main__':
         READY = True                  # now ready to (1) enter START state
         while not START and not STOP: # wait for start or stop signal.
             time.sleep(0.033)
+            head_img = None
+            left_wrist_img = None
             if camera_config['head_camera']['enable_zmq'] and xr_need_local_img:
                 head_img = img_client.get_head_frame()
-                if head_img.bgr is not None:
-                    tv_wrapper.render_to_xr(head_img.bgr)
+                if camera_config['left_wrist_camera']['enable_zmq']:
+                    left_wrist_img = img_client.get_left_wrist_frame()
+                if head_img is not None and head_img.bgr is not None:
+                    if left_wrist_img is not None and left_wrist_img.bgr is not None:
+                        combined_img = np.hstack((head_img.bgr, left_wrist_img.bgr))
+                        tv_wrapper.render_to_xr(combined_img)
+                    else:
+                        tv_wrapper.render_to_xr(head_img.bgr)
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
@@ -269,18 +286,33 @@ if __name__ == '__main__':
         # main loop. robot start to follow VR user's motion
         while not STOP:
             start_time = time.time()
-            # get image
+            # get images
+            head_img = None
+            left_wrist_img = None
+            combined_img = None
+            
             if camera_config['head_camera']['enable_zmq']:
                 if args.record or xr_need_local_img:
                     head_img = img_client.get_head_frame()
-                if xr_need_local_img and head_img.bgr is not None:
-                    tv_wrapper.render_to_xr(head_img.bgr)
+                    
             if camera_config['left_wrist_camera']['enable_zmq']:
                 if args.record:
                     left_wrist_img = img_client.get_left_wrist_frame()
-            if camera_config['right_wrist_camera']['enable_zmq']:
-                if args.record:
-                    right_wrist_img = img_client.get_right_wrist_frame()
+                elif xr_need_local_img and head_img is not None and head_img.bgr is not None:
+                    # For display, we always want the latest wrist image when head image is available
+                    left_wrist_img = img_client.get_left_wrist_frame()
+            
+            # Create combined image for XR display (side-by-side)
+            if xr_need_local_img and head_img is not None and head_img.bgr is not None:
+                if left_wrist_img is not None and left_wrist_img.bgr is not None:
+                    # Combine head and wrist images side by side
+                    combined_img = np.hstack((head_img.bgr, left_wrist_img.bgr))
+                else:
+                    # If no wrist image, just use head image (should not happen in normal operation)
+                    combined_img = head_img.bgr
+                    
+                if combined_img is not None:
+                    tv_wrapper.render_to_xr(combined_img)
 
             # record mode
             if args.record and RECORD_TOGGLE:

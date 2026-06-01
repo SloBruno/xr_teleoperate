@@ -43,7 +43,7 @@ class inspire_hand_state(idl.IdlStruct, typename="inspire.inspire_hand_state"):
 
 class Inspire_Controller_DFX:
     def __init__(self, left_hand_array, right_hand_array, dual_hand_data_lock = None, dual_hand_state_array = None,
-                       dual_hand_action_array = None, fps = 100.0, Unit_Test = False, simulation_mode = False):
+                       dual_hand_action_array = None, fps = 200.0, Unit_Test = False, simulation_mode = False):
         logger_mp.info("Initialize Inspire_Controller_DFX...")
 
         self.fps = fps
