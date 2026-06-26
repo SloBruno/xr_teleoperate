@@ -22,6 +22,7 @@ from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from sshkeyboard import listen_keyboard, stop_listening
+import cv2
 
 # for simulation
 from unitree_sdk2py.core.channel import ChannelPublisher
@@ -126,28 +127,29 @@ if __name__ == '__main__':
         head_shape = camera_config['head_camera']['image_shape']  # [height, width]
         wrist_shape = camera_config['left_wrist_camera']['image_shape']  # [height, width]
         # Combined image will be head_height x (head_width + wrist_width)
-        combined_img_shape = [head_shape[0], head_shape[1] + wrist_shape[1]]
+        GAP_HEIGHT = 30
+        DISPLAY_SCALE = 0.5
+        combined_img_shape = [int((head_shape[0] + GAP_HEIGHT + wrist_shape[0]) * DISPLAY_SCALE),
+                              int(head_shape[1] * DISPLAY_SCALE)]
 
         # televuer_wrapper: obtain hand pose data from the XR device and transmit the combined camera image to the XR device.
         tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand", 
                                      binocular=camera_config['head_camera']['binocular'],
                                      img_shape=combined_img_shape,
-                                     # maybe should decrease fps for better performance?
-                                     # https://github.com/unitreerobotics/xr_teleoperate/issues/172
-                                     # display_fps=camera_config['head_camera']['fps'] ? args.frequency? 30.0?
+                                     display_fps=camera_config['head_camera']['fps'],
                                      display_mode=args.display_mode,
                                      zmq=camera_config['head_camera']['enable_zmq'],
                                      webrtc=camera_config['head_camera']['enable_webrtc'],
                                      webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
-                                     arm_reference_mode="head_yaw",
+                                      arm_reference_mode="head_yaw",
                                       distance_to_camera=4.0,
-                                      image_height=1
+                                      image_height=3
                                      )
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
         if args.motion:
             if args.input_mode == "controller":
-                loco_wrapper = LocoClientWrapper()\
+                loco_wrapper = LocoClientWrapper()
         else:
             motion_switcher = MotionSwitcher()
             status, result = motion_switcher.Enter_Debug_Mode()
@@ -271,8 +273,9 @@ if __name__ == '__main__':
                     left_wrist_img = img_client.get_left_wrist_frame()
                 if head_img is not None and head_img.bgr is not None:
                     if left_wrist_img is not None and left_wrist_img.bgr is not None:
-                        combined_img = np.hstack((head_img.bgr, left_wrist_img.bgr))
-                        tv_wrapper.render_to_xr(combined_img)
+                        gap = np.zeros((GAP_HEIGHT, head_img.bgr.shape[1], 3), dtype=np.uint8)
+                        combined_img = np.vstack((head_img.bgr, gap, left_wrist_img.bgr))
+                        tv_wrapper.render_to_xr(cv2.resize(combined_img, None, fx=DISPLAY_SCALE, fy=DISPLAY_SCALE))
                     else:
                         tv_wrapper.render_to_xr(head_img.bgr)
 
@@ -306,12 +309,14 @@ if __name__ == '__main__':
             if xr_need_local_img and head_img is not None and head_img.bgr is not None:
                 if left_wrist_img is not None and left_wrist_img.bgr is not None:
                     # Combine head and wrist images side by side
-                    combined_img = np.hstack((head_img.bgr, left_wrist_img.bgr))
+                    gap = np.zeros((GAP_HEIGHT, head_img.bgr.shape[1], 3), dtype=np.uint8)
+                    combined_img = np.vstack((head_img.bgr, gap, left_wrist_img.bgr))
                 else:
                     # If no wrist image, just use head image (should not happen in normal operation)
                     combined_img = head_img.bgr
                     
                 if combined_img is not None:
+                    combined_img = cv2.resize(combined_img, None, fx=0.5, fy=0.5)
                     tv_wrapper.render_to_xr(combined_img)
 
             # record mode
