@@ -51,9 +51,81 @@ def test_pressure_extraction_is_side_local_and_invalid_samples_are_zero():
     assert extract_dex3_pressure(HandState([np.nan] * 12)) == 0.0
 
 
-def test_unsupported_session_transport_is_an_explicit_noop():
-    session = object()
-    transport = HapticTransportAdapter(session)
-    assert transport.supported is False
-    assert transport.emit("left", 1.0, duration_ms=100) is False
+def test_pressure_sample_handoff_maps_only_fresh_finite_contact():
+    now = [10.0]
+    mapper = PressureHapticMapper(maximum=10.0, deadband=1.0, max_rate=100.0, max_age=0.25, clock=lambda: now[0])
+    transport = HapticTransportAdapter(None, mapper_by_side={"left": mapper, "right": mapper}, clock=lambda: now[0])
+
+    now[0] = 10.1
+    assert transport.map_pressure("left", np.array([5.0]), sample_timestamp=10.0) == 4.0 / 9.0
+    assert transport.map_pressure("left", np.array([np.nan]), sample_timestamp=9.9) == 0.0
+    assert transport.map_pressure("left", np.array([5.0]), sample_timestamp=9.0) == 0.0
+
+
+def test_motion_controller_haptic_upsert_has_exact_left_payload_and_unique_hash(monkeypatch):
+    elements = []
+
+    class FakeMotionControllers:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeUpsert:
+        def __matmul__(self, element):
+            elements.append(element)
+
+    class FakeSession:
+        upsert = FakeUpsert()
+
+    import teleop.utils.haptics as haptics
+    monkeypatch.setattr(haptics, "MotionControllers", FakeMotionControllers)
+    transport = HapticTransportAdapter(FakeSession(), clock=lambda: 10.0, min_interval=0.0)
+
+    assert transport.emit("left", 0.5, duration_ms=80) is True
+    assert transport.emit("left", 0.75, duration_ms=80) is True
+    assert [element.kwargs for element in elements] == [
+        {
+            "key": "motionControllers", "left": True, "right": True,
+            "pulseLeftStrength": 0.5, "pulseLeftDuration": 80,
+            "puseLeftHash": elements[0].kwargs["puseLeftHash"],
+        },
+        {
+            "key": "motionControllers", "left": True, "right": True,
+            "pulseLeftStrength": 0.75, "pulseLeftDuration": 80,
+            "puseLeftHash": elements[1].kwargs["puseLeftHash"],
+        },
+    ]
+    assert elements[0].kwargs["puseLeftHash"] != elements[1].kwargs["puseLeftHash"]
+
+    elements.clear()
+    assert transport.emit("right", 0.25, duration_ms=90) is True
+    assert elements[0].kwargs == {
+        "key": "motionControllers", "left": True, "right": True,
+        "pulseRightStrength": 0.25, "pulseRightDuration": 90,
+        "puseRightHash": elements[0].kwargs["puseRightHash"],
+    }
+
+
+def test_haptic_upsert_is_suppressed_for_invalid_stale_zero_or_missing_session(monkeypatch):
+    calls = []
+
+    class FakeMotionControllers:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    class FakeUpsert:
+        def __matmul__(self, element):
+            calls.append(element)
+
+    class FakeSession:
+        upsert = FakeUpsert()
+
+    import teleop.utils.haptics as haptics
+    monkeypatch.setattr(haptics, "MotionControllers", FakeMotionControllers)
+    transport = HapticTransportAdapter(FakeSession(), clock=lambda: 10.0, min_interval=0.0)
+    assert transport.emit("left", 0.0, duration_ms=80) is False
+    assert transport.emit("left", np.nan, duration_ms=80) is False
+    assert transport.emit("unknown", 0.5, duration_ms=80) is False
+    assert transport.map_pressure("right", np.array([5.0]), sample_timestamp=9.0) == 0.0
+    assert HapticTransportAdapter(None).emit("left", 0.5, duration_ms=80) is False
+    assert calls == []
     assert transport.limit_duration(5000) == 250

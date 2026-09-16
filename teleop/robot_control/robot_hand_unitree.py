@@ -87,10 +87,11 @@ class Dex3_1_Controller:
         self.left_hand_state_array  = Array('d', Dex3_Num_Motors, lock=True)  
         self.right_hand_state_array = Array('d', Dex3_Num_Motors, lock=True)
         # Verified HandState_ pressure source: press_sensor_state[*].pressure[12].
-        # These values are exposed for an offline/explicitly unsupported haptic
-        # adapter; no robot-side pressure command is issued here.
+        # Timestamped, side-local pressure handoff for the parent/XR process.
         self.left_pressure = Value('d', 0.0, lock=True)
         self.right_pressure = Value('d', 0.0, lock=True)
+        self.left_pressure_timestamp = Value('d', 0.0, lock=True)
+        self.right_pressure_timestamp = Value('d', 0.0, lock=True)
 
         # initialize subscribe thread
         self.subscribe_state_thread = threading.Thread(target=self._subscribe_hand_state)
@@ -122,13 +123,25 @@ class Dex3_1_Controller:
                     self.left_hand_state_array[idx] = left_hand_msg.motor_state[id].q
                 with self.left_pressure.get_lock():
                     self.left_pressure.value = extract_dex3_pressure(left_hand_msg)
+                with self.left_pressure_timestamp.get_lock():
+                    self.left_pressure_timestamp.value = time.monotonic()
             if right_hand_msg is not None:
                 # Update right hand state
                 for idx, id in enumerate(Dex3_1_Right_JointIndex):
                     self.right_hand_state_array[idx] = right_hand_msg.motor_state[id].q
                 with self.right_pressure.get_lock():
                     self.right_pressure.value = extract_dex3_pressure(right_hand_msg)
+                with self.right_pressure_timestamp.get_lock():
+                    self.right_pressure_timestamp.value = time.monotonic()
             time.sleep(0.002)
+
+    def get_pressure_samples(self):
+        """Read the latest timestamped pressure sample for each Dex3 side."""
+        with self.left_pressure.get_lock(), self.left_pressure_timestamp.get_lock():
+            left = (self.left_pressure.value, self.left_pressure_timestamp.value)
+        with self.right_pressure.get_lock(), self.right_pressure_timestamp.get_lock():
+            right = (self.right_pressure.value, self.right_pressure_timestamp.value)
+        return left, right
     
     class _RIS_Mode:
         def __init__(self, id=0, status=0x01, timeout=0):

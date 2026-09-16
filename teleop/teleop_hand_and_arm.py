@@ -451,6 +451,7 @@ if __name__ == '__main__':
                         left_ctrl_trigger_in.value = tele_data.left_ctrl_triggerValue
                     with right_ctrl_trigger_in.get_lock():
                         right_ctrl_trigger_in.value = tele_data.right_ctrl_triggerValue
+                    tv_wrapper.set_pressure_samples(*hand_ctrl.get_pressure_samples())
             elif args.ee == "brainco" and args.input_mode == "controller":
                 with left_gripper_trigger_in.get_lock():
                     left_gripper_trigger_in.value = tele_data.left_ctrl_triggerValue
