@@ -231,8 +231,7 @@ if __name__ == '__main__':
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
         if args.motion:
-            if args.input_mode == "controller":
-                loco_wrapper = LocoClientWrapper()
+            loco_wrapper = LocoClientWrapper()
         else:
             motion_switcher = MotionSwitcher()
             status, result = motion_switcher.Enter_Debug_Mode()

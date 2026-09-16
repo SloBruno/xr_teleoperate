@@ -2,6 +2,7 @@ import math
 import sys
 from pathlib import Path
 import importlib
+import runpy
 import types
 
 import pytest
@@ -150,3 +151,113 @@ def test_terminal_keys_are_the_only_lifecycle_authority(monkeypatch):
     assert (module.START, module.STOP) == (True, False)
     module.on_press("q")
     assert (module.START, module.STOP) == (False, True)
+
+
+def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
+    moves = []
+
+    class StopAfterMove(Exception):
+        pass
+
+    class FakeLocoWrapper:
+        def __init__(self):
+            moves.append("initialized")
+
+        def Move(self, *locomotion):
+            moves.append(locomotion)
+            raise StopAfterMove
+
+    class FakeArmController:
+        def __init__(self, **kwargs):
+            pass
+
+        def speed_gradual_max(self):
+            pass
+
+        def ctrl_waist_yaw(self, *args, **kwargs):
+            pass
+
+        def ctrl_dual_arm_go_home(self):
+            pass
+
+    class FakeArmIK:
+        pass
+
+    class FakeTeleVuerWrapper:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_tele_data(self):
+            return types.SimpleNamespace(
+                head_pose=__import__("numpy").eye(4),
+                controller_sample_timestamp=0.0,
+                left_ctrl_thumbstickValue=(0.0, 0.0),
+                right_ctrl_thumbstickValue=(0.0, 0.0),
+                motion_data_ready=False,
+            )
+
+        def close(self):
+            pass
+
+    class FakeImageClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_cam_config(self):
+            camera = {
+                "enable_webrtc": False,
+                "enable_zmq": False,
+                "image_shape": [2, 2],
+                "binocular": False,
+                "webrtc_port": 0,
+            }
+            return {"head_camera": camera, "left_wrist_camera": camera, "right_wrist_camera": camera}
+
+        def close(self):
+            pass
+
+    class FakeIPCServer:
+        def __init__(self, on_press, get_state):
+            self.on_press = on_press
+
+        def start(self):
+            self.on_press("r")
+
+        def stop(self):
+            pass
+
+    logger = types.SimpleNamespace(debug=lambda *args: None, info=lambda *args: None,
+                                   warning=lambda *args: None, error=lambda *args: None)
+    modules = {
+        "logging_mp": types.SimpleNamespace(basicConfig=lambda **kwargs: None, getLogger=lambda name: logger, INFO=20),
+        "unitree_sdk2py": types.ModuleType("unitree_sdk2py"),
+        "unitree_sdk2py.core": types.ModuleType("unitree_sdk2py.core"),
+        "unitree_sdk2py.core.channel": types.SimpleNamespace(ChannelFactoryInitialize=lambda *args, **kwargs: None, ChannelPublisher=object),
+        "unitree_sdk2py.idl": types.ModuleType("unitree_sdk2py.idl"),
+        "unitree_sdk2py.idl.std_msgs": types.ModuleType("unitree_sdk2py.idl.std_msgs"),
+        "unitree_sdk2py.idl.std_msgs.msg": types.ModuleType("unitree_sdk2py.idl.std_msgs.msg"),
+        "unitree_sdk2py.idl.std_msgs.msg.dds_": types.SimpleNamespace(String_=object),
+        "televuer": types.SimpleNamespace(TeleVuerWrapper=FakeTeleVuerWrapper),
+        "teleimager": types.ModuleType("teleimager"),
+        "teleimager.image_client": types.SimpleNamespace(ImageClient=FakeImageClient),
+        "sshkeyboard": types.SimpleNamespace(listen_keyboard=lambda **kwargs: None, stop_listening=lambda: None),
+        "teleop.robot_control.robot_arm": types.SimpleNamespace(
+            G1_29_ArmController=FakeArmController, G1_23_ArmController=FakeArmController,
+            H1_2_ArmController=FakeArmController, H1_ArmController=FakeArmController, H2_ArmController=FakeArmController),
+        "teleop.robot_control.robot_arm_ik": types.SimpleNamespace(
+            G1_29_ArmIK=FakeArmIK, G1_23_ArmIK=FakeArmIK, H1_2_ArmIK=FakeArmIK, H1_ArmIK=FakeArmIK, H2_ArmIK=FakeArmIK),
+        "teleop.utils.episode_writer": types.SimpleNamespace(EpisodeWriter=object),
+        "teleop.utils.ipc": types.SimpleNamespace(IPC_Server=FakeIPCServer),
+        "teleop.utils.motion_switcher": types.SimpleNamespace(MotionSwitcher=object, LocoClientWrapper=FakeLocoWrapper),
+    }
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(sys, "argv", [
+        "teleop_hand_and_arm.py", "--motion", "--input-mode", "hand", "--camera-layout", "head", "--ipc"
+    ])
+    monkeypatch.setattr("builtins.exit", lambda code: None)
+
+    script = Path(__file__).resolve().parents[1] / "teleop" / "teleop_hand_and_arm.py"
+    runpy.run_path(str(script), run_name="__main__")
+
+    assert moves == ["initialized", (0.0, 0.0, 0.0)]
