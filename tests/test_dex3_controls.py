@@ -7,7 +7,7 @@ import numpy as np
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 
-from teleop.utils.dex3_controls import trigger_to_dex3_targets
+from teleop.utils.dex3_controls import compose_dex3_targets, trigger_to_dex3_targets
 
 
 def test_released_trigger_returns_open_pose_for_all_seven_slots():
@@ -50,6 +50,43 @@ def test_trigger_is_clamped_and_nonfinite_values_fail_open():
     np.testing.assert_allclose(
         trigger_to_dex3_targets(np.nan, open_pose, closed_pose), open_pose
     )
+    np.testing.assert_allclose(
+        trigger_to_dex3_targets(np.inf, open_pose, closed_pose), open_pose
+    )
+    np.testing.assert_allclose(
+        trigger_to_dex3_targets(-np.inf, open_pose, closed_pose), open_pose
+    )
+
+
+def test_released_trigger_preserves_retargeted_vector():
+    base = np.array([0.2, -0.4, 0.6, -0.8, 1.0, -1.2, 1.4])
+    closed = np.arange(1, 8, dtype=float)
+
+    np.testing.assert_allclose(compose_dex3_targets(base, 0.0, closed), base)
+
+
+def test_midpoint_trigger_blends_each_retargeted_slot_toward_closed_pose():
+    base = np.array([0.2, -0.4, 0.6, -0.8, 1.0, -1.2, 1.4])
+    closed = np.arange(1, 8, dtype=float)
+
+    np.testing.assert_allclose(
+        compose_dex3_targets(base, 0.5, closed), (base + closed) / 2.0
+    )
+
+
+def test_full_trigger_commands_closed_pose_for_each_slot():
+    base = np.array([0.2, -0.4, 0.6, -0.8, 1.0, -1.2, 1.4])
+    closed = np.arange(1, 8, dtype=float)
+
+    np.testing.assert_allclose(compose_dex3_targets(base, 1.0, closed), closed)
+
+
+def test_nonfinite_overlay_trigger_preserves_retargeted_vector():
+    base = np.arange(7, dtype=float) + 0.25
+    closed = np.arange(1, 8, dtype=float)
+
+    for trigger in (np.nan, np.inf, -np.inf):
+        np.testing.assert_allclose(compose_dex3_targets(base, trigger, closed), base)
 
 
 def test_dex3_publisher_receives_side_specific_seven_slot_commands(monkeypatch):
@@ -122,3 +159,92 @@ def test_dex3_publisher_receives_side_specific_seven_slot_commands(monkeypatch):
 
     np.testing.assert_allclose(published["left"][0], left_command)
     np.testing.assert_allclose(published["right"][0], right_command)
+
+
+def test_control_step_reads_shared_triggers_and_publishes_distinct_composed_vectors(monkeypatch):
+    # Reuse the module import fakes from the publisher test's shape, but exercise
+    # the controller's one-cycle mapping and publish path.
+    sdk_channel = types.ModuleType("unitree_sdk2py.core.channel")
+    sdk_channel.ChannelPublisher = object
+    sdk_channel.ChannelSubscriber = object
+    sdk_channel.ChannelFactoryInitialize = object
+    sdk_hand = types.ModuleType("unitree_sdk2py.idl.unitree_hg.msg.dds_")
+    sdk_hand.HandCmd_ = object
+    sdk_hand.HandState_ = object
+    sdk_default = types.ModuleType("unitree_sdk2py.idl.default")
+
+    class Motor:
+        def __init__(self):
+            self.q = 0.0
+
+    class Message:
+        def __init__(self):
+            self.motor_cmd = [Motor() for _ in range(7)]
+
+    for name, module in {
+        "unitree_sdk2py": types.ModuleType("unitree_sdk2py"),
+        "unitree_sdk2py.core": types.ModuleType("unitree_sdk2py.core"),
+        "unitree_sdk2py.core.channel": sdk_channel,
+        "unitree_sdk2py.idl": types.ModuleType("unitree_sdk2py.idl"),
+        "unitree_sdk2py.idl.unitree_hg": types.ModuleType("unitree_sdk2py.idl.unitree_hg"),
+        "unitree_sdk2py.idl.unitree_hg.msg": types.ModuleType("unitree_sdk2py.idl.unitree_hg.msg"),
+        "unitree_sdk2py.idl.unitree_hg.msg.dds_": sdk_hand,
+        "unitree_sdk2py.idl.default": sdk_default,
+        "unitree_sdk2py.idl.unitree_go": types.ModuleType("unitree_sdk2py.idl.unitree_go"),
+        "unitree_sdk2py.idl.unitree_go.msg": types.ModuleType("unitree_sdk2py.idl.unitree_go.msg"),
+        "unitree_sdk2py.idl.unitree_go.msg.dds_": types.ModuleType("unitree_sdk2py.idl.unitree_go.msg.dds_"),
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    sdk_default.unitree_hg_msg_dds__HandCmd_ = Message
+    sys.modules["unitree_sdk2py.idl.unitree_go.msg.dds_"].MotorCmds_ = object
+    sys.modules["unitree_sdk2py.idl.unitree_go.msg.dds_"].MotorStates_ = object
+    sdk_default.unitree_go_msg_dds__MotorCmd_ = object
+
+    retargeting = types.ModuleType("teleop.robot_control.hand_retargeting")
+    retargeting.HandRetargeting = object
+    retargeting.HandType = object
+    monkeypatch.setitem(sys.modules, "teleop.robot_control.hand_retargeting", retargeting)
+    logging_mp = types.ModuleType("logging_mp")
+    logging_mp.getLogger = lambda name: types.SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "logging_mp", logging_mp)
+
+    module = importlib.import_module("teleop.robot_control.robot_hand_unitree")
+    published = []
+    controller = module.Dex3_1_Controller.__new__(module.Dex3_1_Controller)
+    controller.left_msg = Message()
+    controller.right_msg = Message()
+    controller.LeftHandCmb_publisher = types.SimpleNamespace(
+        Write=lambda msg: published.append(("left", [motor.q for motor in msg.motor_cmd]))
+    )
+    controller.RightHandCmb_publisher = types.SimpleNamespace(
+        Write=lambda msg: published.append(("right", [motor.q for motor in msg.motor_cmd]))
+    )
+    controller.hand_retargeting = types.SimpleNamespace(
+        left_indices=np.array([[0], [1]]), right_indices=np.array([[0], [1]]),
+        left_retargeting=types.SimpleNamespace(retarget=lambda ref: np.array([0.2, -0.4, 0.6, -0.8, 1.0, -1.2, 1.4])),
+        right_retargeting=types.SimpleNamespace(retarget=lambda ref: np.array([1.4, 1.2, 1.0, 0.8, 0.6, 0.4, 0.2])),
+        left_dex_retargeting_to_hardware=list(range(7)),
+        right_dex_retargeting_to_hardware=list(range(7)),
+    )
+    class SharedArray:
+        def __init__(self):
+            self.values = [0.0] * 75
+
+        def get_lock(self):
+            return __import__("contextlib").nullcontext()
+
+        def __getitem__(self, key):
+            return self.values[key]
+
+    left_input = SharedArray()
+    right_input = SharedArray()
+    left_trigger = types.SimpleNamespace(value=0.25, get_lock=lambda: __import__("contextlib").nullcontext())
+    right_trigger = types.SimpleNamespace(value=0.75, get_lock=lambda: __import__("contextlib").nullcontext())
+    controller.control_step(left_input, right_input, left_trigger, right_trigger)
+
+    assert published[0][0] == "left"
+    assert published[1][0] == "right"
+    left_base = controller.hand_retargeting.left_retargeting.retarget(None)
+    right_base = controller.hand_retargeting.right_retargeting.retarget(None)
+    np.testing.assert_allclose(published[0][1], compose_dex3_targets(left_base, 0.25, module.Dex3_Closed_Pose))
+    np.testing.assert_allclose(published[1][1], compose_dex3_targets(right_base, 0.75, module.Dex3_Closed_Pose))

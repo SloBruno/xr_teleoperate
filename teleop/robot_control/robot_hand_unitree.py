@@ -19,7 +19,7 @@ parent2_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 sys.path.append(parent2_dir)
 from teleop.robot_control.hand_retargeting import HandRetargeting, HandType
 from teleop.utils.weighted_moving_filter import WeightedMovingFilter
-from teleop.utils.dex3_controls import trigger_to_dex3_targets
+from teleop.utils.dex3_controls import compose_dex3_targets
 
 import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
@@ -142,6 +142,43 @@ class Dex3_1_Controller:
         self.LeftHandCmb_publisher.Write(self.left_msg)
         self.RightHandCmb_publisher.Write(self.right_msg)
         # logger_mp.debug("hand ctrl publish ok.")
+
+    def control_step(self, left_hand_array_in, right_hand_array_in,
+                     left_ctrl_trigger_in=None, right_ctrl_trigger_in=None,
+                     xr_motion_data_ready=True, previous_targets=None):
+        """Run one hand-control mapping/publish cycle."""
+        with left_hand_array_in.get_lock():
+            left_hand_data = np.array(left_hand_array_in[:]).reshape(25, 3).copy()
+        with right_hand_array_in.get_lock():
+            right_hand_data = np.array(right_hand_array_in[:]).reshape(25, 3).copy()
+
+        if left_ctrl_trigger_in is not None:
+            with left_ctrl_trigger_in.get_lock():
+                left_trigger = left_ctrl_trigger_in.value
+        else:
+            left_trigger = 0.0
+        if right_ctrl_trigger_in is not None:
+            with right_ctrl_trigger_in.get_lock():
+                right_trigger = right_ctrl_trigger_in.value
+        else:
+            right_trigger = 0.0
+
+        if xr_motion_data_ready:
+            ref_left_value = left_hand_data[self.hand_retargeting.left_indices[1,:]] - left_hand_data[self.hand_retargeting.left_indices[0,:]]
+            ref_right_value = right_hand_data[self.hand_retargeting.right_indices[1,:]] - right_hand_data[self.hand_retargeting.right_indices[0,:]]
+            left_base = self.hand_retargeting.left_retargeting.retarget(ref_left_value)[self.hand_retargeting.left_dex_retargeting_to_hardware]
+            right_base = self.hand_retargeting.right_retargeting.retarget(ref_right_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
+            left_q_target = compose_dex3_targets(left_base, left_trigger, Dex3_Closed_Pose)
+            right_q_target = compose_dex3_targets(right_base, right_trigger, Dex3_Closed_Pose)
+        else:
+            if previous_targets is None:
+                left_q_target = np.zeros(Dex3_Num_Motors)
+                right_q_target = np.zeros(Dex3_Num_Motors)
+            else:
+                left_q_target, right_q_target = previous_targets
+
+        self.ctrl_dual_hand(left_q_target, right_q_target)
+        return left_q_target, right_q_target
     
     def control_process(self, left_hand_array_in, right_hand_array_in, left_hand_state_array, right_hand_state_array,
                               dual_hand_data_lock = None, dual_hand_state_array_out = None, dual_hand_action_array_out = None, xr_motion_data_ready_in = None,
@@ -185,39 +222,21 @@ class Dex3_1_Controller:
             while self.running:
                 start_time = time.time()
                 # get dual hand state
-                with left_hand_array_in.get_lock():
-                    left_hand_data  = np.array(left_hand_array_in[:]).reshape(25, 3).copy()
-                with right_hand_array_in.get_lock():
-                    right_hand_data = np.array(right_hand_array_in[:]).reshape(25, 3).copy()
                 if xr_motion_data_ready_in is not None:
                     with xr_motion_data_ready_in.get_lock():
                         xr_motion_data_ready = xr_motion_data_ready_in.value
                 else:
                     xr_motion_data_ready = True
 
-                if left_ctrl_trigger_in is not None:
-                    with left_ctrl_trigger_in.get_lock():
-                        left_trigger = left_ctrl_trigger_in.value
-                else:
-                    left_trigger = 0.0
-                if right_ctrl_trigger_in is not None:
-                    with right_ctrl_trigger_in.get_lock():
-                        right_trigger = right_ctrl_trigger_in.value
-                else:
-                    right_trigger = 0.0
-
                 # Read left and right q_state from shared arrays
                 state_data = np.concatenate((np.array(left_hand_state_array[:]), np.array(right_hand_state_array[:])))
 
-                if xr_motion_data_ready:
-                    ref_left_value = left_hand_data[self.hand_retargeting.left_indices[1,:]] - left_hand_data[self.hand_retargeting.left_indices[0,:]]
-                    ref_right_value = right_hand_data[self.hand_retargeting.right_indices[1,:]] - right_hand_data[self.hand_retargeting.right_indices[0,:]]
-
-                    left_q_target  = self.hand_retargeting.left_retargeting.retarget(ref_left_value)[self.hand_retargeting.left_dex_retargeting_to_hardware]
-                    right_q_target = self.hand_retargeting.right_retargeting.retarget(ref_right_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
-
-                    left_q_target = trigger_to_dex3_targets(left_trigger, Dex3_Open_Pose, Dex3_Closed_Pose)
-                    right_q_target = trigger_to_dex3_targets(right_trigger, Dex3_Open_Pose, Dex3_Closed_Pose)
+                left_q_target, right_q_target = self.control_step(
+                    left_hand_array_in, right_hand_array_in,
+                    left_ctrl_trigger_in, right_ctrl_trigger_in,
+                    xr_motion_data_ready,
+                    (left_q_target, right_q_target),
+                )
 
                 # get dual hand action
                 action_data = np.concatenate((left_q_target, right_q_target))    
@@ -226,7 +245,6 @@ class Dex3_1_Controller:
                         dual_hand_state_array_out[:] = state_data
                         dual_hand_action_array_out[:] = action_data
 
-                self.ctrl_dual_hand(left_q_target, right_q_target)
                 current_time = time.time()
                 time_elapsed = current_time - start_time
                 sleep_time = max(0, (1 / self.fps) - time_elapsed)
