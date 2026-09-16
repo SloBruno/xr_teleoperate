@@ -23,3 +23,9 @@
 - `git diff --check` passed in the parent and Televuer submodule.
 - An actual `.venv-haptics` Vuer 0.0.60 construction/emission check passed with the verified left-side fields present on the `MotionControllers` element.
 - No robot hardware, DDS services, or external services were started.
+
+## Round 2 safety fix evidence
+
+- RED: `PYTHONPATH=.:teleop/televuer/src pytest -q tests/test_haptics.py::test_timestamped_zero_after_contact_suppresses_haptic_pulse` failed because a timestamped zero after a max-pressure pulse returned `True` and emitted a second pulse.
+- Fix: zero/non-contact mapper outputs now reset state and return zero before rate limiting; invalid timestamp conversion also resets the side mapper. Positive finite contact remains rate-limited.
+- GREEN: the focused regression test passed, followed by `PYTHONPATH=.:teleop/televuer/src pytest -q tests` → `33 passed`.

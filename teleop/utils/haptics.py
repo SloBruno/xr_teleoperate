@@ -82,6 +82,10 @@ class PressureHapticMapper:
             self._last_output = 0.0
             self._last_time = now
             return 0.0
+        if target <= 0.0:
+            self._last_output = 0.0
+            self._last_time = now
+            return 0.0
         elapsed = max(0.0, now - self._last_time)
         limit = self.max_rate * elapsed
         output = float(np.clip(target, self._last_output - limit, self._last_output + limit))
@@ -176,6 +180,7 @@ class HapticTransportAdapter:
         try:
             timestamp = float(sample_timestamp)
         except (TypeError, ValueError):
+            self._mappers[side].update(np.array([np.nan]), sample_age=0.0)
             return 0.0
         if not np.isfinite(timestamp) or not np.isfinite(now) or timestamp > now:
             self._mappers[side].update(np.array([np.nan]), sample_age=0.0)

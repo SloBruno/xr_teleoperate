@@ -129,3 +129,31 @@ def test_haptic_upsert_is_suppressed_for_invalid_stale_zero_or_missing_session(m
     assert HapticTransportAdapter(None).emit("left", 0.5, duration_ms=80) is False
     assert calls == []
     assert transport.limit_duration(5000) == 250
+
+
+def test_timestamped_zero_after_contact_suppresses_haptic_pulse(monkeypatch):
+    elements = []
+
+    class FakeMotionControllers:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeUpsert:
+        def __matmul__(self, element):
+            elements.append(element)
+
+    class FakeSession:
+        upsert = FakeUpsert()
+
+    import teleop.utils.haptics as haptics
+    monkeypatch.setattr(haptics, "MotionControllers", FakeMotionControllers)
+    now = [10.0]
+    transport = HapticTransportAdapter(
+        FakeSession(), max_rate=100.0, min_interval=0.0, clock=lambda: now[0]
+    )
+
+    now[0] = 10.1
+    assert transport.emit_pressure("left", np.array([10.0]), 10.1, 80) is True
+    now[0] = 10.11
+    assert transport.emit_pressure("left", np.array([0.0]), 10.11, 80) is False
+    assert len(elements) == 1
