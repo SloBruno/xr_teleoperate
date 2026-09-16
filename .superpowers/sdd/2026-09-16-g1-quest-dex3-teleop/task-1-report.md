@@ -140,4 +140,26 @@ FAILED tests/test_vertical_camera_frames.py::test_vertical_stack_skips_missing_c
 ```text
 .                                                                        [100%]
 1 passed in 0.15s
+
+### Final verification evidence
+
+The first full-history recursive clone timed out during GitHub transfer before
+checkout. A shallow recursive clone of the pushed personal feature branch was
+then completed successfully:
+
+```text
+clone_head=4b86ce954b61d7ae6a214ab4db4f8a0ddeb4c390
+d7753d38c9ff11f80bafea6cd168351fd3db9b0e teleop/robot_control/dex-retargeting (heads/main)
+2aab15d9601865ab6bee334ae26839e0306b0770 teleop/teleimager (heads/main)
+9ec7df248a25b48199a42cb4adf436f52cace2e4 teleop/televuer (heads/snapshot/g1-quest-dex3-teleop)
+clone_gitmodules_unitree=absent
+clone_config_unitree=absent
+## feat/g1-quest-dex3-teleop...origin/feat/g1-quest-dex3-teleop
+git diff --check: exit 0; no output
+.                                                                        [100%]
+1 passed in 0.15s
+python -m py_compile teleop/teleop_hand_and_arm.py teleop/robot_control/robot_arm.py teleop/robot_control/robot_hand_inspire.py: exit 0
+```
+
+No services or robot hardware were run. The clone used only SloBruno URLs.
 ```
