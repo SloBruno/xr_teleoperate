@@ -3,7 +3,7 @@
 	url = https://github.com/SloBruno/televuer.git
 [submodule "teleop/robot_control/dex-retargeting"]
 	path = teleop/robot_control/dex-retargeting
-	url = https://github.com/silencht/dex-retargeting
+	url = https://github.com/SloBruno/dex-retargeting.git
 [submodule "teleop/teleimager"]
 	path = teleop/teleimager
-	url = https://github.com/unitreerobotics/teleimager.git
+	url = https://github.com/SloBruno/teleimager.git

@@ -99,6 +99,17 @@ def stack_camera_frames_vertical(top_frame, bottom_frame, scale=0.5,
     return np.vstack((top_frame, bottom_frame))
 
 
+def stack_camera_images_vertical(top_image, bottom_image, scale=0.5,
+                                 top_crop_bottom=0.89, bottom_crop_top=0.11,
+                                 divider_px=4):
+    """Return a vertical camera stack, skipping unavailable camera images."""
+    if top_image is None or bottom_image is None:
+        return None
+    return stack_camera_frames_vertical(
+        top_image.bgr, bottom_image.bgr, scale, top_crop_bottom,
+        bottom_crop_top, divider_px)
+
+
 def head_yaw_from_pose(head_pose):
     """Extract robot-convention yaw from a 4x4 XR head pose."""
     return float(np.arctan2(head_pose[1, 0], head_pose[0, 0]))
@@ -361,8 +372,8 @@ if __name__ == '__main__':
                 head_img = img_client.get_head_frame()
                 if vertical_camera_stack:
                     left_wrist_img = img_client.get_left_wrist_frame()
-                    stacked_img = stack_camera_frames_vertical(
-                        head_img.bgr, left_wrist_img.bgr, args.camera_scale,
+                    stacked_img = stack_camera_images_vertical(
+                        head_img, left_wrist_img, args.camera_scale,
                         args.head_crop_bottom, args.wrist_crop_top, args.camera_divider_px)
                     if stacked_img is not None:
                         tv_wrapper.render_to_xr(stacked_img)
@@ -397,9 +408,9 @@ if __name__ == '__main__':
                 if args.record or (xr_need_local_img and vertical_camera_stack):
                     left_wrist_img = img_client.get_left_wrist_frame()
             if xr_need_local_img and head_img is not None:
-                if vertical_camera_stack and left_wrist_img is not None:
-                    stacked_img = stack_camera_frames_vertical(
-                        head_img.bgr, left_wrist_img.bgr, args.camera_scale,
+                if vertical_camera_stack:
+                    stacked_img = stack_camera_images_vertical(
+                        head_img, left_wrist_img, args.camera_scale,
                         args.head_crop_bottom, args.wrist_crop_top, args.camera_divider_px)
                     if stacked_img is not None:
                         tv_wrapper.render_to_xr(stacked_img)
