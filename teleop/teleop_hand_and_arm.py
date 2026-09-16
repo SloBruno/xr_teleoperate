@@ -22,6 +22,7 @@ from teleimager.image_client import ImageClient
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
+from teleop.utils.quest_controls import joystick_to_locomotion
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -136,7 +137,6 @@ if __name__ == '__main__':
     parser.add_argument('--waist-yaw-limit-deg', type=float, default=90.0, help='Symmetric waist-yaw limit in degrees (maximum: 90)')
     parser.add_argument('--waist-yaw-speed-deg', type=float, default=45.0, help='Maximum waist-yaw speed in degrees/second')
     parser.add_argument('--waist-yaw-deadband-deg', type=float, default=2.0, help='Ignore small headset yaw changes around center')
-    parser.add_argument('--quest-buttons', action=argparse.BooleanOptionalAction, default=True, help='Use Quest Y to start tracking and B to stop')
     # network parameters
     parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='IP address of image server, used by teleimager and televuer')
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
@@ -363,8 +363,6 @@ if __name__ == '__main__':
                 f"Waist yaw will follow the headset after [r]: ±{args.waist_yaw_limit_deg:.0f}° "
                 f"at up to {args.waist_yaw_speed_deg:.0f}°/s.")
         waist_yaw_reference = None
-        quest_y_was_pressed = False
-        quest_b_was_pressed = False
         READY = True                  # now ready to (1) enter START state
         while not START and not STOP: # wait for start or stop signal.
             time.sleep(0.033)
@@ -380,15 +378,6 @@ if __name__ == '__main__':
                 elif head_img.bgr is not None:
                     tv_wrapper.render_to_xr(head_img.bgr)
 
-            if args.quest_buttons:
-                waiting_tele_data = tv_wrapper.get_tele_data()
-                quest_y_pressed = bool(waiting_tele_data.left_ctrl_bButton)
-                if quest_y_pressed and not quest_y_was_pressed:
-                    waist_yaw_reference = head_yaw_from_pose(waiting_tele_data.head_pose)
-                    START = True
-                    logger_mp.info("Quest Y pressed: starting robot motion tracking.")
-                    logger_mp.info("Headset forward direction calibrated as waist yaw zero.")
-                quest_y_was_pressed = quest_y_pressed
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
@@ -436,14 +425,6 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
-            if args.quest_buttons:
-                quest_b_pressed = bool(tele_data.right_ctrl_bButton)
-                if quest_b_pressed and not quest_b_was_pressed:
-                    logger_mp.info("Quest B pressed: stopping teleoperation mode.")
-                    START = False
-                    STOP = True
-                    break
-                quest_b_was_pressed = quest_b_pressed
 
             if args.waist_yaw_follow:
                 current_head_yaw = head_yaw_from_pose(tele_data.head_pose)
@@ -488,17 +469,10 @@ if __name__ == '__main__':
             
             # high level control
             if args.input_mode == "controller" and args.motion:
-                # quit teleoperate
-                if tele_data.right_ctrl_aButton:
-                    START = False
-                    STOP = True
-                # command robot to enter damping mode. soft emergency stop function
-                if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
-                    loco_wrapper.Damp()
-                # https://github.com/unitreerobotics/xr_teleoperate/issues/135, control, limit velocity to within 0.3
-                loco_wrapper.Move(-tele_data.left_ctrl_thumbstickValue[1] * 0.3,
-                                  -tele_data.left_ctrl_thumbstickValue[0] * 0.3,
-                                  -tele_data.right_ctrl_thumbstickValue[0]* 0.3)
+                loco_wrapper.Move(*joystick_to_locomotion(
+                    tele_data.left_ctrl_thumbstickValue,
+                    tele_data.right_ctrl_thumbstickValue,
+                ))
 
             # get current robot state data.
             current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()
@@ -538,9 +512,10 @@ if __name__ == '__main__':
                         left_hand_action = [dual_gripper_action_array[0]]
                         right_hand_action = [dual_gripper_action_array[1]]
                         current_body_state = arm_ctrl.get_current_motor_q().tolist()
-                        current_body_action = [-tele_data.left_ctrl_thumbstickValue[1]  * 0.3,
-                                               -tele_data.left_ctrl_thumbstickValue[0]  * 0.3,
-                                               -tele_data.right_ctrl_thumbstickValue[0] * 0.3]
+                        current_body_action = list(joystick_to_locomotion(
+                            tele_data.left_ctrl_thumbstickValue,
+                            tele_data.right_ctrl_thumbstickValue,
+                        ))
                 elif (args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
                     with dual_hand_data_lock:
                         left_ee_state = dual_hand_state_array[:6]
@@ -556,9 +531,10 @@ if __name__ == '__main__':
                         left_hand_action = dual_hand_action_array[:6]
                         right_hand_action = dual_hand_action_array[-6:]
                         current_body_state = arm_ctrl.get_current_motor_q().tolist()
-                        current_body_action = [-tele_data.left_ctrl_thumbstickValue[1]  * 0.3,
-                                               -tele_data.left_ctrl_thumbstickValue[0]  * 0.3,
-                                               -tele_data.right_ctrl_thumbstickValue[0] * 0.3]
+                        current_body_action = list(joystick_to_locomotion(
+                            tele_data.left_ctrl_thumbstickValue,
+                            tele_data.right_ctrl_thumbstickValue,
+                        ))
                 else:
                     left_ee_state = []
                     right_ee_state = []
