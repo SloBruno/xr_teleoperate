@@ -3,7 +3,7 @@ import math
 
 def _clamp_stick_value(value):
     value = float(value)
-    if math.isnan(value):
+    if not math.isfinite(value):
         return 0.0
     return max(-1.0, min(1.0, value))
 

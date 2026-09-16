@@ -45,6 +45,18 @@ def test_joystick_to_locomotion_handles_nonfinite_values(left_xy, right_xy):
     assert all(-1.0 <= value <= 1.0 for value in result)
 
 
+@pytest.mark.parametrize(
+    ("left_xy", "right_xy", "expected"),
+    [
+        ((math.nan, 0.25), (0.5, 0.0), (-0.25, 0.0, -0.5)),
+        ((0.25, math.inf), (0.5, 0.0), (0.0, -0.25, -0.5)),
+        ((0.25, -0.5), (-math.inf, 0.0), (0.5, -0.25, 0.0)),
+    ],
+)
+def test_each_nonfinite_stick_axis_has_exact_zero_locomotion_contribution(left_xy, right_xy, expected):
+    assert joystick_to_locomotion(left_xy, right_xy) == expected
+
+
 def test_loco_wrapper_passes_exact_native_tuple_to_client(monkeypatch):
     calls = []
 
@@ -110,6 +122,17 @@ def test_hand_mode_teledata_carries_controller_sticks_and_sample_timestamp():
     assert "controller_sample_timestamp=self.tvuer.controller_sample_timestamp" in hand_return
 
 
+def test_headset_waist_yaw_follow_has_no_cli_or_robot_actuator_path():
+    root = Path(__file__).resolve().parents[1]
+    teleop_source = (root / "teleop" / "teleop_hand_and_arm.py").read_text()
+    arm_source = (root / "teleop" / "robot_control" / "robot_arm.py").read_text()
+
+    for forbidden in ("waist-yaw-follow", "waist_yaw_follow", "head_yaw_from_pose", "wrapped_angle_difference", "ctrl_waist_yaw"):
+        assert forbidden not in teleop_source
+    for forbidden in ("ctrl_waist_yaw", "waist_yaw_target", "waist_yaw_command", "waist_yaw_velocity_limit", "get_current_waist_yaw"):
+        assert forbidden not in arm_source
+
+
 def test_terminal_keys_are_the_only_lifecycle_authority(monkeypatch):
     stubs = {
         "logging_mp": types.ModuleType("logging_mp"),
@@ -172,9 +195,6 @@ def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
             pass
 
         def speed_gradual_max(self):
-            pass
-
-        def ctrl_waist_yaw(self, *args, **kwargs):
             pass
 
         def ctrl_dual_arm_go_home(self):

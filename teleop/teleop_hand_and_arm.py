@@ -112,15 +112,6 @@ def stack_camera_images_vertical(top_image, bottom_image, scale=0.5,
         bottom_crop_top, divider_px)
 
 
-def head_yaw_from_pose(head_pose):
-    """Extract robot-convention yaw from a 4x4 XR head pose."""
-    return float(np.arctan2(head_pose[1, 0], head_pose[0, 0]))
-
-
-def wrapped_angle_difference(angle, reference):
-    """Return the shortest signed angular difference in radians."""
-    return float(np.arctan2(np.sin(angle - reference), np.cos(angle - reference)))
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # basic control parameters
@@ -134,10 +125,6 @@ if __name__ == '__main__':
     parser.add_argument('--head-crop-bottom', type=float, default=0.89, help='Fraction of the head-camera height retained before the seam')
     parser.add_argument('--wrist-crop-top', type=float, default=0.11, help='Fraction removed from the top of the wrist camera before the seam')
     parser.add_argument('--camera-divider-px', type=int, default=4, help='Dark divider thickness between camera views')
-    parser.add_argument('--waist-yaw-follow', action=argparse.BooleanOptionalAction, default=True, help='Follow headset yaw with the G1 waist')
-    parser.add_argument('--waist-yaw-limit-deg', type=float, default=90.0, help='Symmetric waist-yaw limit in degrees (maximum: 90)')
-    parser.add_argument('--waist-yaw-speed-deg', type=float, default=45.0, help='Maximum waist-yaw speed in degrees/second')
-    parser.add_argument('--waist-yaw-deadband-deg', type=float, default=2.0, help='Ignore small headset yaw changes around center')
     # network parameters
     parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='IP address of image server, used by teleimager and televuer')
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
@@ -192,14 +179,6 @@ if __name__ == '__main__':
             raise ValueError("--wrist-crop-top must be at least 0 and less than 1")
         if args.camera_divider_px < 0:
             raise ValueError("--camera-divider-px cannot be negative")
-        if not 0 < args.waist_yaw_limit_deg <= 90:
-            raise ValueError("--waist-yaw-limit-deg must be greater than 0 and at most 90")
-        if args.waist_yaw_speed_deg <= 0:
-            raise ValueError("--waist-yaw-speed-deg must be greater than 0")
-        if not 0 <= args.waist_yaw_deadband_deg < args.waist_yaw_limit_deg:
-            raise ValueError("--waist-yaw-deadband-deg must be non-negative and smaller than the yaw limit")
-        if args.waist_yaw_follow and args.arm != "G1_29":
-            raise ValueError("Headset waist-yaw following is currently supported only for G1_29")
 
         display_img_shape = camera_config['head_camera']['image_shape']
         display_binocular = camera_config['head_camera']['binocular']
@@ -225,8 +204,7 @@ if __name__ == '__main__':
                                      display_mode=args.display_mode,
                                      zmq=camera_config['head_camera']['enable_zmq'],
                                      webrtc=camera_config['head_camera']['enable_webrtc'],
-                                     webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
-                                     arm_reference_mode="head_yaw"
+                                     webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer"
                                      )
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
@@ -361,11 +339,6 @@ if __name__ == '__main__':
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
-        if args.waist_yaw_follow:
-            logger_mp.info(
-                f"Waist yaw will follow the headset after [r]: ±{args.waist_yaw_limit_deg:.0f}° "
-                f"at up to {args.waist_yaw_speed_deg:.0f}°/s.")
-        waist_yaw_reference = None
         READY = True                  # now ready to (1) enter START state
         while not START and not STOP: # wait for start or stop signal.
             time.sleep(0.033)
@@ -429,18 +402,6 @@ if __name__ == '__main__':
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
 
-            if args.waist_yaw_follow:
-                current_head_yaw = head_yaw_from_pose(tele_data.head_pose)
-                if waist_yaw_reference is None:
-                    waist_yaw_reference = current_head_yaw
-                    logger_mp.info("Headset forward direction calibrated as waist yaw zero.")
-                relative_head_yaw = wrapped_angle_difference(current_head_yaw, waist_yaw_reference)
-                if abs(relative_head_yaw) < np.deg2rad(args.waist_yaw_deadband_deg):
-                    relative_head_yaw = 0.0
-                arm_ctrl.ctrl_waist_yaw(
-                    relative_head_yaw,
-                    limit=np.deg2rad(args.waist_yaw_limit_deg),
-                    velocity_limit=np.deg2rad(args.waist_yaw_speed_deg))
             if args.ee in ("dex3", "inspire_ftp", "inspire_dfx", "brainco")  and args.input_mode == "hand":
                 with left_hand_pos_array.get_lock():
                     left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()

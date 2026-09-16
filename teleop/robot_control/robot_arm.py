@@ -77,9 +77,6 @@ class G1_29_ArmController:
         self.kd_low = 3.0
         self.kp_wrist = 40.0
         self.kd_wrist = 1.5
-        self.kp_waist = 60.0
-        self.kd_waist = 1.5
-
         self.all_motor_q = None
         self.arm_velocity_limit = 20.0
         self.control_dt = 1.0 / 250.0
@@ -114,11 +111,6 @@ class G1_29_ArmController:
         self.msg.mode_machine = self.get_mode_machine()
 
         self.all_motor_q = self.get_current_motor_q()
-        self.waist_yaw_target = float(self.all_motor_q[G1_29_JointIndex.kWaistYaw])
-        self.waist_yaw_command = self.waist_yaw_target
-        self.waist_yaw_limit = np.deg2rad(90.0)
-        self.waist_yaw_velocity_limit = np.deg2rad(45.0)
-        self.waist_yaw_tracking_error_limit = np.deg2rad(12.0)
         logger_mp.debug(f"Current all body motor state q:\n{self.all_motor_q} \n")
         logger_mp.debug(f"Current two arms motor state q:\n{self.get_current_dual_arm_q()}\n")
         logger_mp.info("Lock all joints except two arms...")
@@ -126,10 +118,7 @@ class G1_29_ArmController:
         arm_indices = set(member.value for member in G1_29_JointArmIndex)
         for id in G1_29_JointIndex:
             self.msg.motor_cmd[id].mode = 1
-            if id == G1_29_JointIndex.kWaistYaw:
-                self.msg.motor_cmd[id].kp = self.kp_waist
-                self.msg.motor_cmd[id].kd = self.kd_waist
-            elif id.value in arm_indices:
+            if id.value in arm_indices:
                 if self._Is_wrist_motor(id):
                     self.msg.motor_cmd[id].kp = self.kp_wrist
                     self.msg.motor_cmd[id].kd = self.kd_wrist
@@ -182,9 +171,6 @@ class G1_29_ArmController:
             with self.ctrl_lock:
                 arm_q_target     = self.q_target
                 arm_tauff_target = self.tauff_target
-                waist_yaw_target = self.waist_yaw_target
-                waist_yaw_velocity_limit = self.waist_yaw_velocity_limit
-
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
             else:
@@ -194,20 +180,6 @@ class G1_29_ArmController:
                 self.msg.motor_cmd[id].q = cliped_arm_q_target[idx]
                 self.msg.motor_cmd[id].dq = 0
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]   
-
-            max_waist_step = waist_yaw_velocity_limit * self.control_dt
-            next_waist_command = self.waist_yaw_command + np.clip(
-                waist_yaw_target - self.waist_yaw_command, -max_waist_step, max_waist_step)
-            current_waist_yaw = self.get_current_waist_yaw()
-            next_waist_command = float(np.clip(
-                next_waist_command,
-                current_waist_yaw - self.waist_yaw_tracking_error_limit,
-                current_waist_yaw + self.waist_yaw_tracking_error_limit,
-            ))
-            self.waist_yaw_command = next_waist_command
-            self.msg.motor_cmd[G1_29_JointIndex.kWaistYaw].q = self.waist_yaw_command
-            self.msg.motor_cmd[G1_29_JointIndex.kWaistYaw].dq = 0.0
-            self.msg.motor_cmd[G1_29_JointIndex.kWaistYaw].tau = 0.0
 
             self.msg.crc = self.crc.Crc(self.msg)
             self.lowcmd_publisher.Write(self.msg)
@@ -229,17 +201,6 @@ class G1_29_ArmController:
             self.q_target = q_target
             self.tauff_target = tauff_target
 
-    def ctrl_waist_yaw(self, q_target, limit=np.pi / 2, velocity_limit=np.deg2rad(45.0)):
-        '''Set a finite, position-limited and velocity-limited waist yaw target.'''
-        if not np.isfinite(q_target):
-            return
-        safe_limit = min(abs(float(limit)), np.pi / 2)
-        safe_velocity = max(0.01, abs(float(velocity_limit)))
-        with self.ctrl_lock:
-            self.waist_yaw_limit = safe_limit
-            self.waist_yaw_velocity_limit = safe_velocity
-            self.waist_yaw_target = float(np.clip(q_target, -safe_limit, safe_limit))
-
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
         return self.lowstate_subscriber.Read().mode_machine
@@ -256,10 +217,6 @@ class G1_29_ArmController:
         '''Return current state dq of the left and right arm motors.'''
         return np.array([self.lowstate_buffer.GetData().motor_state[id].dq for id in G1_29_JointArmIndex])
 
-    def get_current_waist_yaw(self):
-        '''Return the current G1 waist yaw angle in radians.'''
-        return float(self.lowstate_buffer.GetData().motor_state[G1_29_JointIndex.kWaistYaw].q)
-    
     def ctrl_dual_arm_go_home(self):
         '''Move both the left and right arms of the robot to their home position by setting the target joint angles (q) and torques (tau) to zero.'''
         logger_mp.info("[G1_29_ArmController] ctrl_dual_arm_go_home start...")
@@ -267,12 +224,11 @@ class G1_29_ArmController:
         current_attempts = 0
         with self.ctrl_lock:
             self.q_target = np.zeros(14)
-            self.waist_yaw_target = 0.0
             # self.tauff_target = np.zeros(14)
         tolerance = 0.05  # Tolerance threshold for joint angles to determine "close to zero", can be adjusted based on your motor's precision requirements
         while current_attempts < max_attempts:
             current_q = self.get_current_dual_arm_q()
-            if np.all(np.abs(current_q) < tolerance) and abs(self.get_current_waist_yaw()) < tolerance:
+            if np.all(np.abs(current_q) < tolerance):
                 if self.motion_mode:
                     for weight in np.linspace(1, 0, num=101):
                         self.msg.motor_cmd[G1_29_JointIndex.kNotUsedJoint0].q = weight;
