@@ -2,6 +2,8 @@ import time
 import argparse
 from multiprocessing import Value, Array, Lock
 import threading
+import cv2
+import numpy as np
 import logging_mp
 logging_mp.basicConfig(level=logging_mp.INFO)
 logger_mp = logging_mp.getLogger(__name__)
@@ -70,6 +72,42 @@ def get_state() -> dict:
         "RECORD_RUNNING": RECORD_RUNNING,
     }
 
+def stack_camera_frames_vertical(top_frame, bottom_frame, scale=0.5,
+                                 top_crop_bottom=0.89, bottom_crop_top=0.11,
+                                 divider_px=4):
+    """Crop the overlapping views, resize them equally, and stack with a clean seam."""
+    if top_frame is None or bottom_frame is None:
+        return None
+
+    top_height, top_width = top_frame.shape[:2]
+    bottom_height, bottom_width = bottom_frame.shape[:2]
+    top_end = min(top_height, max(1, round(top_height * top_crop_bottom)))
+    bottom_start = min(bottom_height - 1, max(0, round(bottom_height * bottom_crop_top)))
+    top_frame = top_frame[:top_end]
+    bottom_frame = bottom_frame[bottom_start:]
+
+    target_width = max(1, round(top_width * scale))
+    target_top_height = max(1, round(top_frame.shape[0] * target_width / top_width))
+    target_bottom_height = max(1, round(bottom_frame.shape[0] * target_width / bottom_width))
+
+    top_frame = cv2.resize(top_frame, (target_width, target_top_height), interpolation=cv2.INTER_AREA)
+    bottom_frame = cv2.resize(bottom_frame, (target_width, target_bottom_height), interpolation=cv2.INTER_AREA)
+
+    if divider_px > 0:
+        divider = np.zeros((divider_px, target_width, 3), dtype=top_frame.dtype)
+        return np.vstack((top_frame, divider, bottom_frame))
+    return np.vstack((top_frame, bottom_frame))
+
+
+def head_yaw_from_pose(head_pose):
+    """Extract robot-convention yaw from a 4x4 XR head pose."""
+    return float(np.arctan2(head_pose[1, 0], head_pose[0, 0]))
+
+
+def wrapped_angle_difference(angle, reference):
+    """Return the shortest signed angular difference in radians."""
+    return float(np.arctan2(np.sin(angle - reference), np.cos(angle - reference)))
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # basic control parameters
@@ -78,6 +116,16 @@ if __name__ == '__main__':
     parser.add_argument('--display-mode', type=str, choices=['immersive', 'ego', 'pass-through'], default='immersive', help='Select XR device display mode')
     parser.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1', 'H2'], default='G1_29', help='Select arm controller')
     parser.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco'], help='Select end effector controller')
+    parser.add_argument('--camera-layout', type=str, choices=['head', 'vertical'], default='vertical', help='XR camera layout: head camera only, or head above left-wrist camera')
+    parser.add_argument('--camera-scale', type=float, default=0.5, help='Scale used for each camera in the vertical XR layout (default: 0.5)')
+    parser.add_argument('--head-crop-bottom', type=float, default=0.89, help='Fraction of the head-camera height retained before the seam')
+    parser.add_argument('--wrist-crop-top', type=float, default=0.11, help='Fraction removed from the top of the wrist camera before the seam')
+    parser.add_argument('--camera-divider-px', type=int, default=4, help='Dark divider thickness between camera views')
+    parser.add_argument('--waist-yaw-follow', action=argparse.BooleanOptionalAction, default=True, help='Follow headset yaw with the G1 waist')
+    parser.add_argument('--waist-yaw-limit-deg', type=float, default=90.0, help='Symmetric waist-yaw limit in degrees (maximum: 90)')
+    parser.add_argument('--waist-yaw-speed-deg', type=float, default=45.0, help='Maximum waist-yaw speed in degrees/second')
+    parser.add_argument('--waist-yaw-deadband-deg', type=float, default=2.0, help='Ignore small headset yaw changes around center')
+    parser.add_argument('--quest-buttons', action=argparse.BooleanOptionalAction, default=True, help='Use Quest Y to start tracking and B to stop')
     # network parameters
     parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='IP address of image server, used by teleimager and televuer')
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
@@ -121,11 +169,44 @@ if __name__ == '__main__':
         camera_config = img_client.get_cam_config()
         logger_mp.debug(f"Camera config: {camera_config}")
         xr_need_local_img = not (args.display_mode == 'pass-through' or camera_config['head_camera']['enable_webrtc'])
+        vertical_camera_stack = args.camera_layout == 'vertical'
+        if vertical_camera_stack and not camera_config['left_wrist_camera']['enable_zmq']:
+            raise RuntimeError("Vertical camera layout requires left_wrist_camera.enable_zmq=true")
+        if not 0 < args.camera_scale <= 1:
+            raise ValueError("--camera-scale must be greater than 0 and at most 1")
+        if not 0 < args.head_crop_bottom <= 1:
+            raise ValueError("--head-crop-bottom must be greater than 0 and at most 1")
+        if not 0 <= args.wrist_crop_top < 1:
+            raise ValueError("--wrist-crop-top must be at least 0 and less than 1")
+        if args.camera_divider_px < 0:
+            raise ValueError("--camera-divider-px cannot be negative")
+        if not 0 < args.waist_yaw_limit_deg <= 90:
+            raise ValueError("--waist-yaw-limit-deg must be greater than 0 and at most 90")
+        if args.waist_yaw_speed_deg <= 0:
+            raise ValueError("--waist-yaw-speed-deg must be greater than 0")
+        if not 0 <= args.waist_yaw_deadband_deg < args.waist_yaw_limit_deg:
+            raise ValueError("--waist-yaw-deadband-deg must be non-negative and smaller than the yaw limit")
+        if args.waist_yaw_follow and args.arm != "G1_29":
+            raise ValueError("Headset waist-yaw following is currently supported only for G1_29")
+
+        display_img_shape = camera_config['head_camera']['image_shape']
+        display_binocular = camera_config['head_camera']['binocular']
+        if vertical_camera_stack:
+            head_height, head_width = camera_config['head_camera']['image_shape']
+            wrist_height, wrist_width = camera_config['left_wrist_camera']['image_shape']
+            target_width = max(1, round(head_width * args.camera_scale))
+            cropped_head_height = max(1, round(head_height * args.head_crop_bottom))
+            cropped_wrist_height = max(1, wrist_height - round(wrist_height * args.wrist_crop_top))
+            scaled_head_height = max(1, round(cropped_head_height * target_width / head_width))
+            scaled_wrist_height = max(1, round(cropped_wrist_height * target_width / wrist_width))
+            display_img_shape = [scaled_head_height + args.camera_divider_px + scaled_wrist_height, target_width]
+            display_binocular = False
+            logger_mp.info(f"XR vertical camera layout enabled: display shape {display_img_shape}")
 
         # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
         tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand", 
-                                     binocular=camera_config['head_camera']['binocular'],
-                                     img_shape=camera_config['head_camera']['image_shape'],
+                                     binocular=display_binocular,
+                                     img_shape=display_img_shape,
                                      # maybe should decrease fps for better performance?
                                      # https://github.com/unitreerobotics/xr_teleoperate/issues/172
                                      # display_fps=camera_config['head_camera']['fps'] ? args.frequency? 30.0?
@@ -266,13 +347,37 @@ if __name__ == '__main__':
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
+        if args.waist_yaw_follow:
+            logger_mp.info(
+                f"Waist yaw will follow the headset after [r]: ±{args.waist_yaw_limit_deg:.0f}° "
+                f"at up to {args.waist_yaw_speed_deg:.0f}°/s.")
+        waist_yaw_reference = None
+        quest_y_was_pressed = False
+        quest_b_was_pressed = False
         READY = True                  # now ready to (1) enter START state
         while not START and not STOP: # wait for start or stop signal.
             time.sleep(0.033)
             if camera_config['head_camera']['enable_zmq'] and xr_need_local_img:
                 head_img = img_client.get_head_frame()
-                if head_img.bgr is not None:
+                if vertical_camera_stack:
+                    left_wrist_img = img_client.get_left_wrist_frame()
+                    stacked_img = stack_camera_frames_vertical(
+                        head_img.bgr, left_wrist_img.bgr, args.camera_scale,
+                        args.head_crop_bottom, args.wrist_crop_top, args.camera_divider_px)
+                    if stacked_img is not None:
+                        tv_wrapper.render_to_xr(stacked_img)
+                elif head_img.bgr is not None:
                     tv_wrapper.render_to_xr(head_img.bgr)
+
+            if args.quest_buttons:
+                waiting_tele_data = tv_wrapper.get_tele_data()
+                quest_y_pressed = bool(waiting_tele_data.left_ctrl_bButton)
+                if quest_y_pressed and not quest_y_was_pressed:
+                    waist_yaw_reference = head_yaw_from_pose(waiting_tele_data.head_pose)
+                    START = True
+                    logger_mp.info("Quest Y pressed: starting robot motion tracking.")
+                    logger_mp.info("Headset forward direction calibrated as waist yaw zero.")
+                quest_y_was_pressed = quest_y_pressed
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
@@ -288,11 +393,18 @@ if __name__ == '__main__':
             if camera_config['head_camera']['enable_zmq']:
                 if args.record or xr_need_local_img:
                     head_img = img_client.get_head_frame()
-                if xr_need_local_img and head_img.bgr is not None:
-                    tv_wrapper.render_to_xr(head_img.bgr)
             if camera_config['left_wrist_camera']['enable_zmq']:
-                if args.record:
+                if args.record or (xr_need_local_img and vertical_camera_stack):
                     left_wrist_img = img_client.get_left_wrist_frame()
+            if xr_need_local_img and head_img is not None:
+                if vertical_camera_stack and left_wrist_img is not None:
+                    stacked_img = stack_camera_frames_vertical(
+                        head_img.bgr, left_wrist_img.bgr, args.camera_scale,
+                        args.head_crop_bottom, args.wrist_crop_top, args.camera_divider_px)
+                    if stacked_img is not None:
+                        tv_wrapper.render_to_xr(stacked_img)
+                elif head_img.bgr is not None:
+                    tv_wrapper.render_to_xr(head_img.bgr)
             if camera_config['right_wrist_camera']['enable_zmq']:
                 if args.record:
                     right_wrist_img = img_client.get_right_wrist_frame()
@@ -313,6 +425,27 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
+            if args.quest_buttons:
+                quest_b_pressed = bool(tele_data.right_ctrl_bButton)
+                if quest_b_pressed and not quest_b_was_pressed:
+                    logger_mp.info("Quest B pressed: stopping teleoperation mode.")
+                    START = False
+                    STOP = True
+                    break
+                quest_b_was_pressed = quest_b_pressed
+
+            if args.waist_yaw_follow:
+                current_head_yaw = head_yaw_from_pose(tele_data.head_pose)
+                if waist_yaw_reference is None:
+                    waist_yaw_reference = current_head_yaw
+                    logger_mp.info("Headset forward direction calibrated as waist yaw zero.")
+                relative_head_yaw = wrapped_angle_difference(current_head_yaw, waist_yaw_reference)
+                if abs(relative_head_yaw) < np.deg2rad(args.waist_yaw_deadband_deg):
+                    relative_head_yaw = 0.0
+                arm_ctrl.ctrl_waist_yaw(
+                    relative_head_yaw,
+                    limit=np.deg2rad(args.waist_yaw_limit_deg),
+                    velocity_limit=np.deg2rad(args.waist_yaw_speed_deg))
             if args.ee in ("dex3", "inspire_ftp", "inspire_dfx", "brainco")  and args.input_mode == "hand":
                 with left_hand_pos_array.get_lock():
                     left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()

@@ -246,6 +246,7 @@ class Inspire_Controller_FTP:
         """
         Send scaled angle commands [0-1000] to both hands.
         """
+        from inspire_sdkpy import inspire_hand_defaut as inspire_hand_default
         # Left Hand Command
         left_cmd_msg = inspire_hand_default.get_inspire_hand_ctrl()
         left_cmd_msg.angle_set = left_angle_cmd_scaled
