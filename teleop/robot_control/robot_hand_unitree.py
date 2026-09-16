@@ -20,6 +20,7 @@ sys.path.append(parent2_dir)
 from teleop.robot_control.hand_retargeting import HandRetargeting, HandType
 from teleop.utils.weighted_moving_filter import WeightedMovingFilter
 from teleop.utils.dex3_controls import compose_dex3_targets
+from teleop.utils.haptics import extract_dex3_pressure
 
 import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
@@ -85,6 +86,11 @@ class Dex3_1_Controller:
         # Shared Arrays for hand states
         self.left_hand_state_array  = Array('d', Dex3_Num_Motors, lock=True)  
         self.right_hand_state_array = Array('d', Dex3_Num_Motors, lock=True)
+        # Verified HandState_ pressure source: press_sensor_state[*].pressure[12].
+        # These values are exposed for an offline/explicitly unsupported haptic
+        # adapter; no robot-side pressure command is issued here.
+        self.left_pressure = Value('d', 0.0, lock=True)
+        self.right_pressure = Value('d', 0.0, lock=True)
 
         # initialize subscribe thread
         self.subscribe_state_thread = threading.Thread(target=self._subscribe_hand_state)
@@ -110,13 +116,18 @@ class Dex3_1_Controller:
         while True:
             left_hand_msg  = self.LeftHandState_subscriber.Read()
             right_hand_msg = self.RightHandState_subscriber.Read()
-            if left_hand_msg is not None and right_hand_msg is not None:
+            if left_hand_msg is not None:
                 # Update left hand state
                 for idx, id in enumerate(Dex3_1_Left_JointIndex):
                     self.left_hand_state_array[idx] = left_hand_msg.motor_state[id].q
+                with self.left_pressure.get_lock():
+                    self.left_pressure.value = extract_dex3_pressure(left_hand_msg)
+            if right_hand_msg is not None:
                 # Update right hand state
                 for idx, id in enumerate(Dex3_1_Right_JointIndex):
                     self.right_hand_state_array[idx] = right_hand_msg.motor_state[id].q
+                with self.right_pressure.get_lock():
+                    self.right_pressure.value = extract_dex3_pressure(right_hand_msg)
             time.sleep(0.002)
     
     class _RIS_Mode:
