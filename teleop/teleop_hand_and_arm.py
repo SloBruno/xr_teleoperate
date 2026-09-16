@@ -265,8 +265,11 @@ if __name__ == '__main__':
             dual_hand_data_lock = Lock()
             dual_hand_state_array = Array('d', 14, lock = False)   # [output] current left, right hand state(14) data.
             dual_hand_action_array = Array('d', 14, lock = False)  # [output] current left, right hand action(14) data.
+            left_ctrl_trigger_in = Value('d', 0.0, lock=True)      # [input] raw Televuer trigger, 0.0 -> 1.0
+            right_ctrl_trigger_in = Value('d', 0.0, lock=True)     # [input] raw Televuer trigger, 0.0 -> 1.0
             hand_ctrl = Dex3_1_Controller(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, 
-                                          dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim, xr_motion_data_ready_in=xr_motion_data_ready)
+                                          dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim, xr_motion_data_ready_in=xr_motion_data_ready,
+                                          left_ctrl_trigger_in=left_ctrl_trigger_in, right_ctrl_trigger_in=right_ctrl_trigger_in)
         elif args.ee == "dex1":
             from teleop.robot_control.robot_hand_unitree import Dex1_1_Gripper_Controller
             left_gripper_value = Value('d', 0.0, lock=True)        # [input]
@@ -443,6 +446,11 @@ if __name__ == '__main__':
                     left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
                 with right_hand_pos_array.get_lock():
                     right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
+                if args.ee == "dex3":
+                    with left_ctrl_trigger_in.get_lock():
+                        left_ctrl_trigger_in.value = tele_data.left_ctrl_triggerValue
+                    with right_ctrl_trigger_in.get_lock():
+                        right_ctrl_trigger_in.value = tele_data.right_ctrl_triggerValue
             elif args.ee == "brainco" and args.input_mode == "controller":
                 with left_gripper_trigger_in.get_lock():
                     left_gripper_trigger_in.value = tele_data.left_ctrl_triggerValue
