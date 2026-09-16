@@ -23,6 +23,7 @@ from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.quest_controls import joystick_to_locomotion
+from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -448,9 +449,13 @@ if __name__ == '__main__':
                     right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
                 if args.ee == "dex3":
                     with left_ctrl_trigger_in.get_lock():
-                        left_ctrl_trigger_in.value = tele_data.left_ctrl_triggerValue
+                        left_ctrl_trigger_in.value = fresh_controller_value(
+                            tele_data.left_ctrl_triggerValue, tele_data.controller_sample_timestamp
+                        )
                     with right_ctrl_trigger_in.get_lock():
-                        right_ctrl_trigger_in.value = tele_data.right_ctrl_triggerValue
+                        right_ctrl_trigger_in.value = fresh_controller_value(
+                            tele_data.right_ctrl_triggerValue, tele_data.controller_sample_timestamp
+                        )
                     tv_wrapper.set_pressure_samples(*hand_ctrl.get_pressure_samples())
             elif args.ee == "brainco" and args.input_mode == "controller":
                 with left_gripper_trigger_in.get_lock():
@@ -477,11 +482,15 @@ if __name__ == '__main__':
                 xr_motion_data_ready.value = tele_data.motion_data_ready
             
             # high level control
-            if args.input_mode == "controller" and args.motion:
-                loco_wrapper.Move(*joystick_to_locomotion(
-                    tele_data.left_ctrl_thumbstickValue,
-                    tele_data.right_ctrl_thumbstickValue,
-                ))
+            if args.motion:
+                if controller_sample_is_fresh(tele_data.controller_sample_timestamp):
+                    locomotion = joystick_to_locomotion(
+                        tele_data.left_ctrl_thumbstickValue,
+                        tele_data.right_ctrl_thumbstickValue,
+                    )
+                else:
+                    locomotion = (0.0, 0.0, 0.0)
+                loco_wrapper.Move(*locomotion)
 
             # get current robot state data.
             current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()

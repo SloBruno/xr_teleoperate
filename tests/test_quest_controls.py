@@ -92,6 +92,23 @@ def test_ordinary_controller_input_cannot_damp_or_change_lifecycle():
     assert "right_ctrl_bButton" not in source
 
 
+def test_locomotion_is_not_gated_to_controller_mode_and_uses_freshness():
+    source = (Path(__file__).resolve().parents[1] / "teleop" / "teleop_hand_and_arm.py").read_text()
+
+    assert "if args.motion:" in source
+    assert "controller_sample_is_fresh" in source
+    assert "locomotion = (0.0, 0.0, 0.0)" in source
+
+
+def test_hand_mode_teledata_carries_controller_sticks_and_sample_timestamp():
+    source = (Path(__file__).resolve().parents[1] / "teleop" / "televuer" / "src" / "televuer" / "tv_wrapper.py").read_text()
+
+    hand_return = source.split("if self.use_hand_tracking:", 1)[1].split("# controller tracking", 1)[0]
+    assert "left_ctrl_thumbstickValue=self.tvuer.left_ctrl_thumbstickValue" in hand_return
+    assert "right_ctrl_thumbstickValue=self.tvuer.right_ctrl_thumbstickValue" in hand_return
+    assert "controller_sample_timestamp=self.tvuer.controller_sample_timestamp" in hand_return
+
+
 def test_terminal_keys_are_the_only_lifecycle_authority(monkeypatch):
     stubs = {
         "logging_mp": types.ModuleType("logging_mp"),
