@@ -1,4 +1,5 @@
 import importlib
+from pathlib import Path
 import sys
 import types
 
@@ -8,6 +9,21 @@ import numpy as np
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 
 from teleop.utils.dex3_controls import compose_dex3_targets, trigger_to_dex3_targets
+
+
+
+def test_control_process_does_not_read_xr_hand_readiness():
+    source = (Path(__file__).resolve().parents[1] / "teleop" / "robot_control" / "robot_hand_unitree.py").read_text()
+    process_body = source[source.index("    def control_process("):source.index("class Dex3_1_Left_JointIndex")]
+
+    assert "xr_motion_data_ready_in.get_lock()" not in process_body
+
+
+def test_dex3_controller_does_not_construct_hand_retargeting():
+    source = (Path(__file__).resolve().parents[1] / "teleop" / "robot_control" / "robot_hand_unitree.py").read_text()
+    dex3_body = source[source.index("class Dex3_1_Controller"):source.index("class Dex3_1_Left_JointIndex")]
+
+    assert "HandRetargeting(" not in dex3_body
 
 
 def test_released_trigger_returns_open_pose_for_all_seven_slots():
@@ -161,7 +177,7 @@ def test_dex3_publisher_receives_side_specific_seven_slot_commands(monkeypatch):
     np.testing.assert_allclose(published["right"][0], right_command)
 
 
-def test_control_step_reads_shared_triggers_and_publishes_distinct_composed_vectors(monkeypatch):
+def test_control_step_uses_only_side_specific_triggers_when_hand_tracking_is_unavailable(monkeypatch):
     # Reuse the module import fakes from the publisher test's shape, but exercise
     # the controller's one-cycle mapping and publish path.
     sdk_channel = types.ModuleType("unitree_sdk2py.core.channel")
@@ -226,25 +242,21 @@ def test_control_step_reads_shared_triggers_and_publishes_distinct_composed_vect
         left_dex_retargeting_to_hardware=list(range(7)),
         right_dex_retargeting_to_hardware=list(range(7)),
     )
-    class SharedArray:
-        def __init__(self):
-            self.values = [0.0] * 75
-
-        def get_lock(self):
-            return __import__("contextlib").nullcontext()
-
-        def __getitem__(self, key):
-            return self.values[key]
-
-    left_input = SharedArray()
-    right_input = SharedArray()
+    # No hand-tracking object is available. Dex3 must still operate from
+    # controller triggers rather than attempting to read hand data/readiness.
+    left_input = object()
+    right_input = object()
     left_trigger = types.SimpleNamespace(value=0.25, get_lock=lambda: __import__("contextlib").nullcontext())
     right_trigger = types.SimpleNamespace(value=0.75, get_lock=lambda: __import__("contextlib").nullcontext())
-    controller.control_step(left_input, right_input, left_trigger, right_trigger)
+    controller.control_step(left_input, right_input, left_trigger, right_trigger, xr_motion_data_ready=False)
 
     assert published[0][0] == "left"
     assert published[1][0] == "right"
-    left_base = controller.hand_retargeting.left_retargeting.retarget(None)
-    right_base = controller.hand_retargeting.right_retargeting.retarget(None)
-    np.testing.assert_allclose(published[0][1], compose_dex3_targets(left_base, 0.25, module.Dex3_Closed_Pose))
-    np.testing.assert_allclose(published[1][1], compose_dex3_targets(right_base, 0.75, module.Dex3_Closed_Pose))
+    # Retargeted vectors deliberately differ from trigger commands: physical
+    # finger targets must depend only on their corresponding controller trigger.
+    np.testing.assert_allclose(
+        published[0][1], trigger_to_dex3_targets(0.25, module.Dex3_Open_Pose, module.Dex3_Closed_Pose)
+    )
+    np.testing.assert_allclose(
+        published[1][1], trigger_to_dex3_targets(0.75, module.Dex3_Open_Pose, module.Dex3_Closed_Pose)
+    )

@@ -17,9 +17,8 @@ from multiprocessing import Process, Array, Value, Lock
 
 parent2_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(parent2_dir)
-from teleop.robot_control.hand_retargeting import HandRetargeting, HandType
 from teleop.utils.weighted_moving_filter import WeightedMovingFilter
-from teleop.utils.dex3_controls import compose_dex3_targets
+from teleop.utils.dex3_controls import trigger_to_dex3_targets
 from teleop.utils.haptics import extract_dex3_pressure
 
 import logging_mp
@@ -67,10 +66,9 @@ class Dex3_1_Controller:
         self.fps = fps
         self.Unit_Test = Unit_Test
         self.simulation_mode = simulation_mode
-        if not self.Unit_Test:
-            self.hand_retargeting = HandRetargeting(HandType.UNITREE_DEX3)
-        else:
-            self.hand_retargeting = HandRetargeting(HandType.UNITREE_DEX3_Unit_Test)
+
+        # Dex3 joint targets are controller-trigger owned; no hand-retargeting
+        # object is constructed for this controller.
 
         # initialize handcmd publisher and handstate subscriber
         self.LeftHandCmb_publisher = ChannelPublisher(kTopicDex3LeftCommand, HandCmd_)
@@ -170,11 +168,12 @@ class Dex3_1_Controller:
     def control_step(self, left_hand_array_in, right_hand_array_in,
                      left_ctrl_trigger_in=None, right_ctrl_trigger_in=None,
                      xr_motion_data_ready=True, previous_targets=None):
-        """Run one hand-control mapping/publish cycle."""
-        with left_hand_array_in.get_lock():
-            left_hand_data = np.array(left_hand_array_in[:]).reshape(25, 3).copy()
-        with right_hand_array_in.get_lock():
-            right_hand_data = np.array(right_hand_array_in[:]).reshape(25, 3).copy()
+        """Publish Dex3 targets from controller triggers only.
+
+        Hand-array and XR-readiness parameters are retained only to avoid
+        breaking the existing process call signature; they intentionally have
+        no authority over finger targets.
+        """
 
         if left_ctrl_trigger_in is not None:
             with left_ctrl_trigger_in.get_lock():
@@ -187,19 +186,14 @@ class Dex3_1_Controller:
         else:
             right_trigger = 0.0
 
-        if xr_motion_data_ready:
-            ref_left_value = left_hand_data[self.hand_retargeting.left_indices[1,:]] - left_hand_data[self.hand_retargeting.left_indices[0,:]]
-            ref_right_value = right_hand_data[self.hand_retargeting.right_indices[1,:]] - right_hand_data[self.hand_retargeting.right_indices[0,:]]
-            left_base = self.hand_retargeting.left_retargeting.retarget(ref_left_value)[self.hand_retargeting.left_dex_retargeting_to_hardware]
-            right_base = self.hand_retargeting.right_retargeting.retarget(ref_right_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
-            left_q_target = compose_dex3_targets(left_base, left_trigger, Dex3_Closed_Pose)
-            right_q_target = compose_dex3_targets(right_base, right_trigger, Dex3_Closed_Pose)
-        else:
-            if previous_targets is None:
-                left_q_target = np.zeros(Dex3_Num_Motors)
-                right_q_target = np.zeros(Dex3_Num_Motors)
-            else:
-                left_q_target, right_q_target = previous_targets
+        # Dex3 finger targets are controller-only: released is the explicit
+        # open pose and trigger travel interpolates to the explicit close pose.
+        # Hand tracking still supplies arm/wrist tracking elsewhere, but never
+        # contributes to Dex3 joint targets.
+        left_q_target = trigger_to_dex3_targets(
+            left_trigger, Dex3_Open_Pose, Dex3_Closed_Pose)
+        right_q_target = trigger_to_dex3_targets(
+            right_trigger, Dex3_Open_Pose, Dex3_Closed_Pose)
 
         self.ctrl_dual_hand(left_q_target, right_q_target)
         return left_q_target, right_q_target
@@ -245,21 +239,12 @@ class Dex3_1_Controller:
         try:
             while self.running:
                 start_time = time.time()
-                # get dual hand state
-                if xr_motion_data_ready_in is not None:
-                    with xr_motion_data_ready_in.get_lock():
-                        xr_motion_data_ready = xr_motion_data_ready_in.value
-                else:
-                    xr_motion_data_ready = True
-
                 # Read left and right q_state from shared arrays
                 state_data = np.concatenate((np.array(left_hand_state_array[:]), np.array(right_hand_state_array[:])))
 
                 left_q_target, right_q_target = self.control_step(
                     left_hand_array_in, right_hand_array_in,
                     left_ctrl_trigger_in, right_ctrl_trigger_in,
-                    xr_motion_data_ready,
-                    (left_q_target, right_q_target),
                 )
 
                 # get dual hand action
