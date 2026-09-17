@@ -1,6 +1,7 @@
 import importlib
 from pathlib import Path
 import sys
+import time
 import types
 
 import numpy as np
@@ -25,6 +26,28 @@ def test_dex3_controller_does_not_construct_hand_retargeting():
 
     assert "HandRetargeting(" not in dex3_body
 
+
+
+def test_dex3_closed_poses_hold_thumb_center_and_mirror_finger_limits():
+    import ast
+
+    source = (Path(__file__).resolve().parents[1] / "teleop" / "robot_control" / "robot_hand_unitree.py").read_text()
+    assignments = {
+        node.targets[0].id: ast.literal_eval(node.value.args[0])
+        for node in ast.parse(source).body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "array"
+    }
+    left_closed = assignments["Dex3_Left_Closed_Pose"]
+    right_closed = assignments["Dex3_Right_Closed_Pose"]
+
+    assert left_closed[:3] == [0.0, 0.0, 0.0]
+    assert right_closed[:3] == [0.0, 0.0, 0.0]
+    np.testing.assert_allclose(left_closed[3:], [-1.57079632, -1.74532925, -1.57079632, -1.74532925])
+    np.testing.assert_allclose(right_closed[3:], [1.57079632, 1.74532925, 1.57079632, 1.74532925])
 
 def test_released_trigger_returns_open_pose_for_all_seven_slots():
     open_pose = np.arange(7, dtype=float)
@@ -171,10 +194,15 @@ def test_dex3_publisher_receives_side_specific_seven_slot_commands(monkeypatch):
 
     left_command = trigger_to_dex3_targets(0.25, np.zeros(7), np.arange(1, 8))
     right_command = trigger_to_dex3_targets(0.75, np.zeros(7), np.arange(10, 17))
-    controller.ctrl_dual_hand(left_command, right_command)
+    controller.ctrl_dual_hand(
+        left_command, right_command, time.monotonic(), time.monotonic())
 
     np.testing.assert_allclose(published["left"][0], left_command)
     np.testing.assert_allclose(published["right"][0], right_command)
+
+    controller.ctrl_dual_hand(left_command, right_command, 0.0, 0.0)
+    np.testing.assert_allclose(published["left"][1], np.zeros(7))
+    np.testing.assert_allclose(published["right"][1], np.zeros(7))
 
 
 def test_control_step_uses_only_side_specific_triggers_when_hand_tracking_is_unavailable(monkeypatch):
@@ -246,17 +274,47 @@ def test_control_step_uses_only_side_specific_triggers_when_hand_tracking_is_una
     # controller triggers rather than attempting to read hand data/readiness.
     left_input = object()
     right_input = object()
-    left_trigger = types.SimpleNamespace(value=0.25, get_lock=lambda: __import__("contextlib").nullcontext())
-    right_trigger = types.SimpleNamespace(value=0.75, get_lock=lambda: __import__("contextlib").nullcontext())
-    controller.control_step(left_input, right_input, left_trigger, right_trigger, xr_motion_data_ready=False)
+    class SharedSample:
+        def __init__(self, trigger, timestamp):
+            self.values = [trigger, timestamp]
+
+        def get_lock(self):
+            return __import__("contextlib").nullcontext()
+
+        def __getitem__(self, key):
+            return self.values[key]
+
+        def __setitem__(self, key, value):
+            self.values[key] = value
+
+    left_sample = SharedSample(0.25, time.monotonic())
+    right_sample = SharedSample(0.75, time.monotonic())
+    controller.control_step(
+        left_input, right_input,
+        left_ctrl_sample_in=left_sample,
+        right_ctrl_sample_in=right_sample,
+        xr_motion_data_ready=False,
+    )
 
     assert published[0][0] == "left"
     assert published[1][0] == "right"
     # Retargeted vectors deliberately differ from trigger commands: physical
     # finger targets must depend only on their corresponding controller trigger.
     np.testing.assert_allclose(
-        published[0][1], trigger_to_dex3_targets(0.25, module.Dex3_Open_Pose, module.Dex3_Closed_Pose)
+        published[0][1], trigger_to_dex3_targets(0.25, module.Dex3_Open_Pose, module.Dex3_Left_Closed_Pose)
     )
     np.testing.assert_allclose(
-        published[1][1], trigger_to_dex3_targets(0.75, module.Dex3_Open_Pose, module.Dex3_Closed_Pose)
+        published[1][1], trigger_to_dex3_targets(0.75, module.Dex3_Open_Pose, module.Dex3_Right_Closed_Pose)
     )
+
+    # A stalled producer leaves old shared trigger values behind. The publisher
+    # itself must fail open when their matching samples are stale.
+    left_sample[:] = [1.0, 0.0]
+    right_sample[:] = [1.0, 0.0]
+    controller.control_step(
+        left_input, right_input,
+        left_ctrl_sample_in=left_sample,
+        right_ctrl_sample_in=right_sample,
+    )
+    np.testing.assert_allclose(published[2][1], module.Dex3_Open_Pose)
+    np.testing.assert_allclose(published[3][1], module.Dex3_Open_Pose)

@@ -19,6 +19,7 @@ parent2_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 sys.path.append(parent2_dir)
 from teleop.utils.weighted_moving_filter import WeightedMovingFilter
 from teleop.utils.dex3_controls import trigger_to_dex3_targets
+from teleop.utils.quest_safety import controller_sample_is_fresh
 from teleop.utils.haptics import extract_dex3_pressure
 
 import logging_mp
@@ -32,16 +33,25 @@ kTopicDex3LeftState = "rt/dex3/left/state"
 kTopicDex3RightState = "rt/dex3/right/state"
 
 Dex3_Open_Pose = np.zeros(Dex3_Num_Motors)
-Dex3_Closed_Pose = np.array([
-    1.04719755, 0.920, 1.74532925,
+# Dex3 joint limits from Unitree's G1 Dex3 example. Thumb stays neutral so
+# trigger closes only index and middle fingers; right-side finger signs mirror
+# the left-side kinematics.
+Dex3_Left_Closed_Pose = np.array([
+    0.0, 0.0, 0.0,
     -1.57079632, -1.74532925, -1.57079632, -1.74532925,
+])
+Dex3_Right_Closed_Pose = np.array([
+    0.0, 0.0, 0.0,
+    1.57079632, 1.74532925, 1.57079632, 1.74532925,
 ])
 
 
 class Dex3_1_Controller:
     def __init__(self, left_hand_array_in, right_hand_array_in, dual_hand_data_lock = None, dual_hand_state_array_out = None,
                        dual_hand_action_array_out = None, fps = 100.0, Unit_Test = False, simulation_mode = False, xr_motion_data_ready_in = None,
-                       left_ctrl_trigger_in = None, right_ctrl_trigger_in = None):
+                       left_ctrl_trigger_in = None, right_ctrl_trigger_in = None,
+                       left_ctrl_timestamp_in = None, right_ctrl_timestamp_in = None,
+                       left_ctrl_sample_in = None, right_ctrl_sample_in = None):
         """
         [note] A *_array type parameter requires using a multiprocessing Array, because it needs to be passed to the internal child process
 
@@ -105,7 +115,9 @@ class Dex3_1_Controller:
 
         hand_control_process = Process(target=self.control_process, args=(left_hand_array_in, right_hand_array_in,  self.left_hand_state_array, self.right_hand_state_array,
                                                                           dual_hand_data_lock, dual_hand_state_array_out, dual_hand_action_array_out, xr_motion_data_ready_in,
-                                                                          left_ctrl_trigger_in, right_ctrl_trigger_in))
+                                                                          left_ctrl_trigger_in, right_ctrl_trigger_in,
+                                                                          left_ctrl_timestamp_in, right_ctrl_timestamp_in,
+                                                                          left_ctrl_sample_in, right_ctrl_sample_in))
         hand_control_process.daemon = True
         hand_control_process.start()
 
@@ -154,20 +166,26 @@ class Dex3_1_Controller:
             self.motor_mode |= (self.timeout & 0x01) << 7
             return self.motor_mode
 
-    def ctrl_dual_hand(self, left_q_target, right_q_target):
-        """set current left, right hand motor state target q"""
+    def ctrl_dual_hand(self, left_q_target, right_q_target,
+                       left_sample_timestamp=0.0, right_sample_timestamp=0.0):
+        """Publish both targets, rechecking freshness immediately before output."""
+        if not controller_sample_is_fresh(left_sample_timestamp):
+            left_q_target = Dex3_Open_Pose.copy()
         for idx, id in enumerate(Dex3_1_Left_JointIndex):
             self.left_msg.motor_cmd[id].q = left_q_target[idx]
+        self.LeftHandCmb_publisher.Write(self.left_msg)
+
+        if not controller_sample_is_fresh(right_sample_timestamp):
+            right_q_target = Dex3_Open_Pose.copy()
         for idx, id in enumerate(Dex3_1_Right_JointIndex):
             self.right_msg.motor_cmd[id].q = right_q_target[idx]
-
-        self.LeftHandCmb_publisher.Write(self.left_msg)
         self.RightHandCmb_publisher.Write(self.right_msg)
-        # logger_mp.debug("hand ctrl publish ok.")
 
     def control_step(self, left_hand_array_in, right_hand_array_in,
                      left_ctrl_trigger_in=None, right_ctrl_trigger_in=None,
-                     xr_motion_data_ready=True, previous_targets=None):
+                     xr_motion_data_ready=True, previous_targets=None,
+                     left_ctrl_timestamp_in=None, right_ctrl_timestamp_in=None,
+                     left_ctrl_sample_in=None, right_ctrl_sample_in=None):
         """Publish Dex3 targets from controller triggers only.
 
         Hand-array and XR-readiness parameters are retained only to avoid
@@ -175,15 +193,21 @@ class Dex3_1_Controller:
         no authority over finger targets.
         """
 
-        if left_ctrl_trigger_in is not None:
-            with left_ctrl_trigger_in.get_lock():
-                left_trigger = left_ctrl_trigger_in.value
+        # Read each controller value and its monotonic timestamp atomically.
+        # A missing, invalid, or stale sample fails open at the publisher.
+        if left_ctrl_sample_in is not None:
+            with left_ctrl_sample_in.get_lock():
+                left_trigger, left_sample_timestamp = left_ctrl_sample_in[:]
         else:
+            left_trigger, left_sample_timestamp = 0.0, 0.0
+        if right_ctrl_sample_in is not None:
+            with right_ctrl_sample_in.get_lock():
+                right_trigger, right_sample_timestamp = right_ctrl_sample_in[:]
+        else:
+            right_trigger, right_sample_timestamp = 0.0, 0.0
+        if not controller_sample_is_fresh(left_sample_timestamp):
             left_trigger = 0.0
-        if right_ctrl_trigger_in is not None:
-            with right_ctrl_trigger_in.get_lock():
-                right_trigger = right_ctrl_trigger_in.value
-        else:
+        if not controller_sample_is_fresh(right_sample_timestamp):
             right_trigger = 0.0
 
         # Dex3 finger targets are controller-only: released is the explicit
@@ -191,16 +215,19 @@ class Dex3_1_Controller:
         # Hand tracking still supplies arm/wrist tracking elsewhere, but never
         # contributes to Dex3 joint targets.
         left_q_target = trigger_to_dex3_targets(
-            left_trigger, Dex3_Open_Pose, Dex3_Closed_Pose)
+            left_trigger, Dex3_Open_Pose, Dex3_Left_Closed_Pose)
         right_q_target = trigger_to_dex3_targets(
-            right_trigger, Dex3_Open_Pose, Dex3_Closed_Pose)
+            right_trigger, Dex3_Open_Pose, Dex3_Right_Closed_Pose)
 
-        self.ctrl_dual_hand(left_q_target, right_q_target)
+        self.ctrl_dual_hand(
+            left_q_target, right_q_target, left_sample_timestamp, right_sample_timestamp)
         return left_q_target, right_q_target
     
     def control_process(self, left_hand_array_in, right_hand_array_in, left_hand_state_array, right_hand_state_array,
                               dual_hand_data_lock = None, dual_hand_state_array_out = None, dual_hand_action_array_out = None, xr_motion_data_ready_in = None,
-                              left_ctrl_trigger_in = None, right_ctrl_trigger_in = None):
+                              left_ctrl_trigger_in = None, right_ctrl_trigger_in = None,
+                              left_ctrl_timestamp_in = None, right_ctrl_timestamp_in = None,
+                              left_ctrl_sample_in = None, right_ctrl_sample_in = None):
         self.running = True
 
         left_q_target  = np.full(Dex3_Num_Motors, 0)
@@ -245,6 +272,10 @@ class Dex3_1_Controller:
                 left_q_target, right_q_target = self.control_step(
                     left_hand_array_in, right_hand_array_in,
                     left_ctrl_trigger_in, right_ctrl_trigger_in,
+                    left_ctrl_timestamp_in=left_ctrl_timestamp_in,
+                    right_ctrl_timestamp_in=right_ctrl_timestamp_in,
+                    left_ctrl_sample_in=left_ctrl_sample_in,
+                    right_ctrl_sample_in=right_ctrl_sample_in,
                 )
 
                 # get dual hand action

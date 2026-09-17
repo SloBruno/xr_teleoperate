@@ -243,11 +243,17 @@ if __name__ == '__main__':
             dual_hand_data_lock = Lock()
             dual_hand_state_array = Array('d', 14, lock = False)   # [output] current left, right hand state(14) data.
             dual_hand_action_array = Array('d', 14, lock = False)  # [output] current left, right hand action(14) data.
-            left_ctrl_trigger_in = Value('d', 0.0, lock=True)      # [input] raw Televuer trigger, 0.0 -> 1.0
-            right_ctrl_trigger_in = Value('d', 0.0, lock=True)     # [input] raw Televuer trigger, 0.0 -> 1.0
+            left_ctrl_trigger_in = Value('d', 0.0, lock=True)      # legacy input retained for compatibility
+            right_ctrl_trigger_in = Value('d', 0.0, lock=True)     # legacy input retained for compatibility
+            left_ctrl_timestamp_in = Value('d', 0.0, lock=True)    # legacy input retained for compatibility
+            right_ctrl_timestamp_in = Value('d', 0.0, lock=True)   # legacy input retained for compatibility
+            left_ctrl_sample_in = Array('d', 2, lock=True)         # [trigger, monotonic timestamp]
+            right_ctrl_sample_in = Array('d', 2, lock=True)        # [trigger, monotonic timestamp]
             hand_ctrl = Dex3_1_Controller(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, 
                                           dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim, xr_motion_data_ready_in=xr_motion_data_ready,
-                                          left_ctrl_trigger_in=left_ctrl_trigger_in, right_ctrl_trigger_in=right_ctrl_trigger_in)
+                                          left_ctrl_trigger_in=left_ctrl_trigger_in, right_ctrl_trigger_in=right_ctrl_trigger_in,
+                                          left_ctrl_timestamp_in=left_ctrl_timestamp_in, right_ctrl_timestamp_in=right_ctrl_timestamp_in,
+                                          left_ctrl_sample_in=left_ctrl_sample_in, right_ctrl_sample_in=right_ctrl_sample_in)
         elif args.ee == "dex1":
             from teleop.robot_control.robot_hand_unitree import Dex1_1_Gripper_Controller
             left_gripper_value = Value('d', 0.0, lock=True)        # [input]
@@ -408,14 +414,19 @@ if __name__ == '__main__':
                 with right_hand_pos_array.get_lock():
                     right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
                 if args.ee == "dex3":
-                    with left_ctrl_trigger_in.get_lock():
-                        left_ctrl_trigger_in.value = fresh_controller_value(
-                            tele_data.left_ctrl_triggerValue, tele_data.controller_sample_timestamp
-                        )
-                    with right_ctrl_trigger_in.get_lock():
-                        right_ctrl_trigger_in.value = fresh_controller_value(
-                            tele_data.right_ctrl_triggerValue, tele_data.controller_sample_timestamp
-                        )
+                    # Dex3 itself owns the final watchdog check. Keep the
+                    # matching controller sample timestamp alongside each raw
+                    # trigger so a stalled parent cannot hold a closed hand.
+                    with left_ctrl_sample_in.get_lock():
+                        left_ctrl_sample_in[:] = [
+                            tele_data.left_ctrl_triggerValue,
+                            tele_data.controller_sample_timestamp,
+                        ]
+                    with right_ctrl_sample_in.get_lock():
+                        right_ctrl_sample_in[:] = [
+                            tele_data.right_ctrl_triggerValue,
+                            tele_data.controller_sample_timestamp,
+                        ]
                     tv_wrapper.set_pressure_samples(*hand_ctrl.get_pressure_samples())
             elif args.ee == "brainco" and args.input_mode == "controller":
                 with left_gripper_trigger_in.get_lock():
