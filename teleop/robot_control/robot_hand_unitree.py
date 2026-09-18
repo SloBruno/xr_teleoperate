@@ -33,15 +33,14 @@ kTopicDex3LeftState = "rt/dex3/left/state"
 kTopicDex3RightState = "rt/dex3/right/state"
 
 Dex3_Open_Pose = np.zeros(Dex3_Num_Motors)
-# Dex3 joint limits from Unitree's G1 Dex3 example. Thumb stays neutral so
-# trigger closes only index and middle fingers; right-side finger signs mirror
-# the left-side kinematics.
+# Dex3 targets are controller-trigger owned. Thumb0 remains at neutral to avoid
+# lateral rotation; Thumb1/Thumb2 close within the Unitree SDK-published limits.
 Dex3_Left_Closed_Pose = np.array([
-    0.0, 0.0, 0.0,
+    0.0, 1.05, 1.75,
     -1.57079632, -1.74532925, -1.57079632, -1.74532925,
 ])
 Dex3_Right_Closed_Pose = np.array([
-    0.0, 0.0, 0.0,
+    0.0, -1.05, -1.75,
     1.57079632, 1.74532925, 1.57079632, 1.74532925,
 ])
 

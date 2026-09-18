@@ -24,6 +24,7 @@ from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.quest_controls import joystick_to_locomotion
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
+from teleop.utils.teleop_status import TeleopStatusMonitor, camera_frame_is_usable
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -337,6 +338,12 @@ if __name__ == '__main__':
                                      frequency = args.frequency, 
                                      rerun_log = not args.headless)
 
+        status_monitor = TeleopStatusMonitor(lambda payload: logger_mp.info(payload))
+        # Initialize before the pre-arm loop: some display modes intentionally do
+        # not fetch local frames, but their status must remain observable.
+        head_img = None
+        left_wrist_img = None
+
         logger_mp.info("----------------------------------------------------------------")
         logger_mp.info("🟢  Press [r] to start syncing the robot with your movements.")
         if args.record:
@@ -359,6 +366,18 @@ if __name__ == '__main__':
                         tv_wrapper.render_to_xr(stacked_img)
                 elif head_img.bgr is not None:
                     tv_wrapper.render_to_xr(head_img.bgr)
+            ready_tele_data = tv_wrapper.get_tele_data()
+            ready_pressure_timestamps = (0.0, 0.0)
+            if args.ee == "dex3":
+                left_pressure_sample, right_pressure_sample = hand_ctrl.get_pressure_samples()
+                ready_pressure_timestamps = (left_pressure_sample[1], right_pressure_sample[1])
+            status_monitor.observe(
+                now=time.monotonic(),
+                lifecycle="ready",
+                controller_sample_timestamp=ready_tele_data.controller_sample_timestamp,
+                cameras={"head": camera_frame_is_usable(head_img), "left_wrist": camera_frame_is_usable(left_wrist_img)},
+                dex3_pressure_timestamps=ready_pressure_timestamps,
+            )
 
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
@@ -453,15 +472,28 @@ if __name__ == '__main__':
                 xr_motion_data_ready.value = tele_data.motion_data_ready
             
             # high level control
+            locomotion = (0.0, 0.0, 0.0)
             if args.motion:
                 if controller_sample_is_fresh(tele_data.controller_sample_timestamp):
                     locomotion = joystick_to_locomotion(
                         tele_data.left_ctrl_thumbstickValue,
                         tele_data.right_ctrl_thumbstickValue,
                     )
-                else:
-                    locomotion = (0.0, 0.0, 0.0)
                 loco_wrapper.Move(*locomotion)
+
+            tracking_pressure_timestamps = (0.0, 0.0)
+            if args.ee == "dex3":
+                left_pressure_sample, right_pressure_sample = hand_ctrl.get_pressure_samples()
+                tracking_pressure_timestamps = (left_pressure_sample[1], right_pressure_sample[1])
+            status_monitor.observe(
+                now=time.monotonic(),
+                lifecycle="tracking",
+                controller_sample_timestamp=tele_data.controller_sample_timestamp,
+                motion_enabled=args.motion,
+                locomotion=locomotion,
+                cameras={"head": camera_frame_is_usable(head_img), "left_wrist": camera_frame_is_usable(left_wrist_img)},
+                dex3_pressure_timestamps=tracking_pressure_timestamps,
+            )
 
             # get current robot state data.
             current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()

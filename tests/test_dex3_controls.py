@@ -28,7 +28,7 @@ def test_dex3_controller_does_not_construct_hand_retargeting():
 
 
 
-def test_dex3_closed_poses_hold_thumb_center_and_mirror_finger_limits():
+def test_dex3_closed_poses_close_thumb_without_lateral_rotation_and_mirror_finger_limits():
     import ast
 
     source = (Path(__file__).resolve().parents[1] / "teleop" / "robot_control" / "robot_hand_unitree.py").read_text()
@@ -44,8 +44,10 @@ def test_dex3_closed_poses_hold_thumb_center_and_mirror_finger_limits():
     left_closed = assignments["Dex3_Left_Closed_Pose"]
     right_closed = assignments["Dex3_Right_Closed_Pose"]
 
-    assert left_closed[:3] == [0.0, 0.0, 0.0]
-    assert right_closed[:3] == [0.0, 0.0, 0.0]
+    # Thumb0 stays centered to eliminate lateral rotation; Thumb1/Thumb2 travel
+    # toward the vendor-published grasp limits along with the two fingers.
+    np.testing.assert_allclose(left_closed[:3], [0.0, 1.05, 1.75])
+    np.testing.assert_allclose(right_closed[:3], [0.0, -1.05, -1.75])
     np.testing.assert_allclose(left_closed[3:], [-1.57079632, -1.74532925, -1.57079632, -1.74532925])
     np.testing.assert_allclose(right_closed[3:], [1.57079632, 1.74532925, 1.57079632, 1.74532925])
 
