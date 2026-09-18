@@ -5,6 +5,37 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
+def test_status_file_sink_writes_asynchronously_without_control_path_file_io(tmp_path):
+    from teleop.utils.teleop_status import AsyncStatusFileSink
+
+    warnings = []
+    target = tmp_path / "status" / "teleop.jsonl"
+    sink = AsyncStatusFileSink(str(target), warnings.append)
+    sink.emit('{"event":"teleop_status"}')
+    sink.close()
+
+    assert target.read_text() == '{"event":"teleop_status"}\n'
+    assert warnings == []
+
+
+def test_status_file_sink_degrades_to_noop_when_storage_setup_fails(monkeypatch):
+    from teleop.utils import teleop_status
+
+    warnings = []
+    def fail_makedirs(*args, **kwargs):
+        raise OSError("read-only")
+    monkeypatch.setattr(teleop_status.os, "makedirs", fail_makedirs)
+    sink = teleop_status.AsyncStatusFileSink("/blocked/teleop.jsonl", warnings.append)
+    for _ in range(128):
+        sink.emit('{"event":"teleop_status"}')
+    sink.close()
+
+    # The control path must not invoke logging even if a failed writer leaves
+    # its bounded queue full; only the writer thread reports setup failure.
+    assert warnings == ["Could not initialize teleop status log: read-only"]
+
+
+
 def test_status_monitor_emits_structured_heartbeat_with_control_ages():
     from teleop.utils.teleop_status import TeleopStatusMonitor
 

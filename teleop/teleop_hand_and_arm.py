@@ -24,7 +24,7 @@ from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.quest_controls import joystick_to_locomotion
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
-from teleop.utils.teleop_status import TeleopStatusMonitor, camera_frame_is_usable
+from teleop.utils.teleop_status import AsyncStatusFileSink, TeleopStatusMonitor, camera_frame_is_usable
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -338,7 +338,12 @@ if __name__ == '__main__':
                                      frequency = args.frequency, 
                                      rerun_log = not args.headless)
 
-        status_monitor = TeleopStatusMonitor(lambda payload: logger_mp.info(payload))
+        status_log_path = os.environ.get(
+            "XR_TELEOP_STATUS_LOG",
+            "/home/unitree/.local/state/xr_teleoperate/teleop-status.jsonl",
+        )
+        status_sink = AsyncStatusFileSink(status_log_path, logger_mp.warning)
+        status_monitor = TeleopStatusMonitor(status_sink.emit)
         # Initialize before the pre-arm loop: some display modes intentionally do
         # not fetch local frames, but their status must remain observable.
         head_img = None
@@ -695,6 +700,11 @@ if __name__ == '__main__':
             tv_wrapper.close()
         except Exception as e:
             logger_mp.error(f"Failed to close televuer wrapper: {e}")
+
+        try:
+            status_sink.close()
+        except Exception as e:
+            logger_mp.error(f"Failed to close teleop status sink: {e}")
 
         try:
             if not args.motion:
