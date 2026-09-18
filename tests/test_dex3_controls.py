@@ -44,12 +44,12 @@ def test_dex3_closed_poses_close_thumb_without_lateral_rotation_and_mirror_finge
     left_closed = assignments["Dex3_Left_Closed_Pose"]
     right_closed = assignments["Dex3_Right_Closed_Pose"]
 
-    # Thumb0 stays centered to eliminate lateral rotation; Thumb1/Thumb2 travel
-    # toward the vendor-published grasp limits along with the two fingers.
-    np.testing.assert_allclose(left_closed[:3], [0.0, 1.05, 1.75])
-    np.testing.assert_allclose(right_closed[:3], [0.0, -1.05, -1.75])
-    np.testing.assert_allclose(left_closed[3:], [-1.57079632, -1.74532925, -1.57079632, -1.74532925])
-    np.testing.assert_allclose(right_closed[3:], [1.57079632, 1.74532925, 1.57079632, 1.74532925])
+    # The Unitree Dex3 reference grasp uses mid-range values, never the hard
+    # joint limits. Thumb0 remains centered to prevent lateral rotation.
+    np.testing.assert_allclose(left_closed[:3], [0.0, 0.163, 0.875])
+    np.testing.assert_allclose(right_closed[:3], [0.0, -0.154, -0.875])
+    np.testing.assert_allclose(left_closed[3:], [-0.78539816, -0.87266463, -0.78539816, -0.87266463])
+    np.testing.assert_allclose(right_closed[3:], [0.78539816, 0.87266463, 0.78539816, 0.87266463])
 
 def test_released_trigger_returns_open_pose_for_all_seven_slots():
     open_pose = np.arange(7, dtype=float)
