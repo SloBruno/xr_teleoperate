@@ -391,7 +391,7 @@ if __name__ == '__main__':
             )
             if (
                 START
-                and ready_tele_data.controller_sample_timestamp >= ARM_REQUEST_TIMESTAMP
+                and ready_tele_data.controller_sample_timestamp > ARM_REQUEST_TIMESTAMP
                 and controller_sample_is_fresh(ready_tele_data.controller_sample_timestamp)
             ):
                 break
@@ -444,26 +444,25 @@ if __name__ == '__main__':
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
 
-            if args.ee in ("dex3", "inspire_ftp", "inspire_dfx", "brainco")  and args.input_mode == "hand":
+            if args.ee in ("inspire_ftp", "inspire_dfx", "brainco") and args.input_mode == "hand":
                 with left_hand_pos_array.get_lock():
                     left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
                 with right_hand_pos_array.get_lock():
                     right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
-                if args.ee == "dex3":
-                    # Dex3 itself owns the final watchdog check. Keep the
-                    # matching controller sample timestamp alongside each raw
-                    # trigger so a stalled parent cannot hold a closed hand.
-                    with left_ctrl_sample_in.get_lock():
-                        left_ctrl_sample_in[:] = [
-                            tele_data.left_ctrl_triggerValue,
-                            tele_data.controller_sample_timestamp,
-                        ]
-                    with right_ctrl_sample_in.get_lock():
-                        right_ctrl_sample_in[:] = [
-                            tele_data.right_ctrl_triggerValue,
-                            tele_data.controller_sample_timestamp,
-                        ]
-                    tv_wrapper.set_pressure_samples(*hand_ctrl.get_pressure_samples())
+            if args.ee == "dex3":
+                # Dex3 has no hand-skeleton input path: only timestamped Quest
+                # controller triggers are published to its process.
+                with left_ctrl_sample_in.get_lock():
+                    left_ctrl_sample_in[:] = [
+                        tele_data.left_ctrl_triggerValue,
+                        tele_data.controller_sample_timestamp,
+                    ]
+                with right_ctrl_sample_in.get_lock():
+                    right_ctrl_sample_in[:] = [
+                        tele_data.right_ctrl_triggerValue,
+                        tele_data.controller_sample_timestamp,
+                    ]
+                tv_wrapper.set_pressure_samples(*hand_ctrl.get_pressure_samples())
             elif args.ee == "brainco" and args.input_mode == "controller":
                 with left_gripper_trigger_in.get_lock():
                     left_gripper_trigger_in.value = tele_data.left_ctrl_triggerValue
@@ -537,7 +536,18 @@ if __name__ == '__main__':
             else:
                 sol_q = current_lr_arm_q.copy()
                 sol_tauff = np.zeros_like(current_lr_arm_q)
-            arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
+            if (
+                controller_is_fresh
+                and controller_sample_is_fresh(tele_data.controller_sample_timestamp)
+            ):
+                arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
+            else:
+                # The sample expired during IK; discard its target and hold the
+                # most recently measured arm position instead.
+                arm_ctrl.ctrl_dual_arm(
+                    arm_ctrl.get_current_dual_arm_q().copy(),
+                    np.zeros_like(current_lr_arm_q),
+                )
 
             # record data
             if args.record:
