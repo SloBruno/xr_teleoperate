@@ -38,6 +38,7 @@ def publish_reset_category(category: int, publisher): # Scene Reset signal
 # state transition
 START          = False  # Enable to start robot following VR user motion
 STOP           = False  # Enable to begin system exit procedure
+ARM_REQUEST_TIMESTAMP = 0.0  # Monotonic time of the most recent terminal r request
 READY          = False  # Ready to (1) enter START state, (2) enter RECORD_RUNNING state
 RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
@@ -54,8 +55,9 @@ RECORD_TOGGLE  = False  # Toggle recording state
 #  --> auto  : Auto-transition after saving data.
 
 def on_press(key):
-    global STOP, START, RECORD_TOGGLE
+    global STOP, START, RECORD_TOGGLE, ARM_REQUEST_TIMESTAMP
     if key == 'r':
+        ARM_REQUEST_TIMESTAMP = time.monotonic()
         START = True
     elif key == 'q':
         START = False
@@ -387,7 +389,11 @@ if __name__ == '__main__':
                 cameras={"head": camera_frame_is_usable(head_img), "left_wrist": camera_frame_is_usable(left_wrist_img)},
                 dex3_pressure_timestamps=ready_pressure_timestamps,
             )
-            if START and controller_sample_is_fresh(ready_tele_data.controller_sample_timestamp):
+            if (
+                START
+                and ready_tele_data.controller_sample_timestamp >= ARM_REQUEST_TIMESTAMP
+                and controller_sample_is_fresh(ready_tele_data.controller_sample_timestamp)
+            ):
                 break
 
 
@@ -511,6 +517,9 @@ if __name__ == '__main__':
             # get current robot state data.
             current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()
             current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
+            # Recheck immediately before IK; state reads may consume the final
+            # part of the controller freshness window.
+            controller_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)
 
             # Only solve new arm targets while the controller pose is fresh.
             # On loss of controller authority, hold the measured joint position
