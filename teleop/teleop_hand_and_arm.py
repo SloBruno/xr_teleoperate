@@ -205,7 +205,8 @@ if __name__ == '__main__':
                                      display_mode=args.display_mode,
                                      zmq=camera_config['head_camera']['enable_zmq'],
                                      webrtc=camera_config['head_camera']['enable_webrtc'],
-                                     webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer"
+                                     webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
+                                     arm_pose_source="controller"
                                      )
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
@@ -358,7 +359,10 @@ if __name__ == '__main__':
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True                  # now ready to (1) enter START state
-        while not START and not STOP: # wait for start or stop signal.
+        # Pressing r is only an arm request. Keep the robot pre-armed until a
+        # current controller pose sample exists; zero-initialized pose buffers
+        # must never be passed to IK.
+        while not STOP:
             time.sleep(0.033)
             if camera_config['head_camera']['enable_zmq'] and xr_need_local_img:
                 head_img = img_client.get_head_frame()
@@ -383,6 +387,8 @@ if __name__ == '__main__':
                 cameras={"head": camera_frame_is_usable(head_img), "left_wrist": camera_frame_is_usable(left_wrist_img)},
                 dex3_pressure_timestamps=ready_pressure_timestamps,
             )
+            if START and controller_sample_is_fresh(ready_tele_data.controller_sample_timestamp):
+                break
 
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
@@ -476,10 +482,12 @@ if __name__ == '__main__':
             with xr_motion_data_ready.get_lock():
                 xr_motion_data_ready.value = tele_data.motion_data_ready
             
-            # high level control
+            # A controller sample owns every operator-commanded output in this
+            # mode. Locomotion and arm IK must make the same freshness decision.
+            controller_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)
             locomotion = (0.0, 0.0, 0.0)
             if args.motion:
-                if controller_sample_is_fresh(tele_data.controller_sample_timestamp):
+                if controller_is_fresh:
                     locomotion = joystick_to_locomotion(
                         tele_data.left_ctrl_thumbstickValue,
                         tele_data.right_ctrl_thumbstickValue,
@@ -504,11 +512,22 @@ if __name__ == '__main__':
             current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()
             current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
 
-            # solve ik using motor data and wrist pose, then use ik results to control arms.
-            time_ik_start = time.time()
-            sol_q, sol_tauff  = arm_ik.solve_ik(tele_data.left_wrist_pose, tele_data.right_wrist_pose, current_lr_arm_q, current_lr_arm_dq)
-            time_ik_end = time.time()
-            logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
+            # Only solve new arm targets while the controller pose is fresh.
+            # On loss of controller authority, hold the measured joint position
+            # with zero feed-forward torque instead of advancing stale IK.
+            if controller_is_fresh:
+                time_ik_start = time.time()
+                sol_q, sol_tauff = arm_ik.solve_ik(
+                    tele_data.left_wrist_pose,
+                    tele_data.right_wrist_pose,
+                    current_lr_arm_q,
+                    current_lr_arm_dq,
+                )
+                time_ik_end = time.time()
+                logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
+            else:
+                sol_q = current_lr_arm_q.copy()
+                sol_tauff = np.zeros_like(current_lr_arm_q)
             arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
 
             # record data
