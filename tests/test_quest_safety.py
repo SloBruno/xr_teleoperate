@@ -21,6 +21,13 @@ def test_controller_sample_freshness_limit_is_documented_and_monotonic():
     assert not controller_sample_is_fresh(0.0, now=0.1)
 
 
+def test_hand_pose_freshness_uses_the_same_monotonic_limit():
+    hand_sample_is_fresh = safety_api().hand_sample_is_fresh
+    assert hand_sample_is_fresh(10.0, now=10.25)
+    assert not hand_sample_is_fresh(10.0, now=10.250001)
+    assert not hand_sample_is_fresh(0.0, now=0.1)
+
+
 def test_stale_joystick_is_replaced_with_exact_zero_velocity_input():
     fresh_controller_value = safety_api().fresh_controller_value
     assert fresh_controller_value((0.8, -0.4), sample_timestamp=1.0, now=1.251) == (0.0, 0.0)

@@ -37,17 +37,66 @@ class PrearmActuatorGateTest(unittest.TestCase):
         self.assertFalse(starts_named_output(class_method(HAND, "Dex3_1_Controller", "__init__"), "hand_control_process"))
         self.assertTrue(starts_named_output(class_method(HAND, "Dex3_1_Controller", "activate"), "hand_control_process"))
 
-    def test_teleop_activates_outputs_only_after_the_post_r_prearm_gate(self):
+    def test_launcher_prepares_arms_before_the_prearm_loop(self):
+        source = TELEOP.read_text(encoding="utf-8")
+        prearm = source.index("        READY = True")
+        activate = source.index("arm_ctrl.activate()")
+        prepare = source.index("arm_ctrl.ctrl_dual_arm_go_home()")
+        self.assertLess(activate, prearm)
+        self.assertLess(prepare, prearm)
+
+    def test_launcher_releases_r_only_after_confirmed_preparation_pose(self):
+        source = TELEOP.read_text(encoding="utf-8")
+        prepare = source[source.index("Match the original launcher behavior"):source.index("# Initialize before the pre-arm loop")]
+        self.assertIn("preparation_confirmed = arm_ctrl.ctrl_dual_arm_go_home()", prepare)
+        self.assertIn("if args.arm == \"G1_29\" and not preparation_confirmed:", prepare)
+        self.assertLess(prepare.index("if args.arm == \"G1_29\" and not preparation_confirmed:"), prepare.index("PREPARATION_COMPLETE = True"))
+        home = ARM.read_text(encoding="utf-8")[ARM.read_text(encoding="utf-8").index("    def ctrl_dual_arm_go_home(self):"):ARM.read_text(encoding="utf-8").index("    def speed_gradual_max", ARM.read_text(encoding="utf-8").index("    def ctrl_dual_arm_go_home(self):"))]
+        self.assertIn("return True", home)
+        self.assertIn("return False", home)
+        self.assertIn("np.all(np.abs(current_q) <= tolerance)", home)
+
+    def test_startup_inputs_are_serialized_with_launcher_preparation(self):
+        source = TELEOP.read_text(encoding="utf-8")
+        on_press = source[source.index("def on_press"):source.index("def get_state")]
+        self.assertIn("if not PREPARATION_COMPLETE:", on_press)
+        self.assertLess(
+            on_press.index("if not PREPARATION_COMPLETE:"),
+            on_press.index("ARM_REQUEST_TIMESTAMP = time.monotonic()"),
+        )
+        prepare = source[source.index("Match the original launcher behavior"):source.index("# Initialize before the pre-arm loop")]
+        self.assertIn("with LIFECYCLE_LOCK:", prepare)
+        self.assertLess(prepare.index("if STOP:"), prepare.index("arm_ctrl.activate()"))
+        self.assertLess(prepare.index("arm_ctrl.ctrl_dual_arm_go_home()"), prepare.index("PREPARATION_COMPLETE = True"))
+
+    def test_dex3_activates_only_after_the_post_r_controller_gate(self):
         source = TELEOP.read_text(encoding="utf-8")
         gate = source.index("ready_tele_data.controller_sample_timestamp > ARM_REQUEST_TIMESTAMP")
-        arm_activate = source.index("arm_ctrl.activate()")
         hand_activate = source.index("hand_ctrl.activate()")
-        self.assertLess(gate, arm_activate)
         self.assertLess(gate, hand_activate)
+        dex3_gate = source[gate:hand_activate]
+        self.assertIn("controller_sample_is_fresh", dex3_gate)
+        self.assertNotIn("hand_sample_timestamp", dex3_gate)
+
+    def test_r_prepares_arms_before_tracking(self):
+        source = TELEOP.read_text(encoding="utf-8")
+        activate = source.index("arm_ctrl.activate()")
+        prepare = source.index("arm_ctrl.ctrl_dual_arm_go_home()")
+        tracking = source.index("start Tracking")
+        self.assertLess(activate, prepare)
+        self.assertLess(prepare, tracking)
+
+    def test_q_returns_arms_to_prepared_pose_before_deactivation(self):
+        source = TELEOP.read_text(encoding="utf-8")
+        finally_block = source[source.index("    finally:"):]
+        prepare = finally_block.index("arm_ctrl.ctrl_dual_arm_go_home()")
+        deactivate = finally_block.index("arm_ctrl.deactivate()")
+        self.assertLess(prepare, deactivate)
 
     def test_prearm_exit_never_requests_arm_home_motion(self):
         source = TELEOP.read_text(encoding="utf-8")
-        self.assertNotIn("arm_ctrl.ctrl_dual_arm_go_home()", source)
+        prearm = source[:source.index("arm_ctrl.activate()")]
+        self.assertNotIn("arm_ctrl.ctrl_dual_arm_go_home()", prearm)
     def test_arm_activate_holds_measured_pose_before_the_first_publish(self):
         source = ARM.read_text(encoding="utf-8")
         activate = source[source.index("    def activate(self):"):source.index("    def _subscribe_motor_state", source.index("    def activate(self):"))]
@@ -65,15 +114,13 @@ class PrearmActuatorGateTest(unittest.TestCase):
         )
         self.assertNotIn("ChannelPublisher", arm_init)
         self.assertNotIn("ChannelPublisher", hand_init)
-    def test_q_prearm_exit_serializes_with_output_activation(self):
+    def test_q_prearm_exit_serializes_with_dex3_activation(self):
         source = TELEOP.read_text(encoding="utf-8")
-        prearm = source.index("while not STOP:")
-        arm_activate = source.index("arm_ctrl.activate()")
-        lock = source.index("with LIFECYCLE_LOCK:", prearm, arm_activate)
-        cancellation = source.index("prearm_cancelled = STOP", lock, arm_activate)
-        self.assertLess(prearm, lock)
-        self.assertLess(lock, cancellation)
-        self.assertLess(cancellation, arm_activate)
+        gate = source.index("ready_tele_data.controller_sample_timestamp > ARM_REQUEST_TIMESTAMP")
+        hand_activate = source.index("hand_ctrl.activate()")
+        dex3_gate = source[gate:hand_activate]
+        self.assertIn("with LIFECYCLE_LOCK:", dex3_gate)
+        self.assertIn("if not STOP and not hand_outputs_activated:", dex3_gate)
         on_press = source[source.index("def on_press"):source.index("def get_state")]
         self.assertEqual(on_press.count("with LIFECYCLE_LOCK:"), 2)
     def test_activation_rejects_stale_lowstate_and_q_deactivates_outputs(self):

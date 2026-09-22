@@ -18,6 +18,11 @@ def controller_sample_is_fresh(sample_timestamp: float, now: float | None = None
     return 0.0 <= age <= CONTROLLER_SAMPLE_FRESHNESS_LIMIT_S
 
 
+def hand_sample_is_fresh(sample_timestamp: float, now: float | None = None) -> bool:
+    """Return whether a hand wrist-pose sample is no older than 0.25 s."""
+    return controller_sample_is_fresh(sample_timestamp, now)
+
+
 def fresh_controller_value(value, sample_timestamp: float, now: float | None = None):
     """Return a controller value only while its sample remains fresh."""
     return value if controller_sample_is_fresh(sample_timestamp, now) else 0.0 if isinstance(value, (int, float)) else (0.0, 0.0)

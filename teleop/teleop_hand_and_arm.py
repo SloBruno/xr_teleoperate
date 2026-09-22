@@ -23,7 +23,7 @@ from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.quest_controls import joystick_to_locomotion
-from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
+from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value, hand_sample_is_fresh
 from teleop.utils.teleop_status import AsyncStatusFileSink, TeleopStatusMonitor, camera_frame_is_usable
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -40,6 +40,7 @@ START          = False  # Enable to start robot following VR user motion
 STOP           = False  # Enable to begin system exit procedure
 ARM_REQUEST_TIMESTAMP = 0.0  # Monotonic time of the most recent terminal r request
 READY          = False  # Ready to (1) enter START state, (2) enter RECORD_RUNNING state
+PREPARATION_COMPLETE = False  # Launcher-time arm preparation has completed.
 RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
 # Serializes r/q lifecycle decisions with the one-way output activation gate.
@@ -57,9 +58,12 @@ LIFECYCLE_LOCK = threading.Lock()
 #  --> auto  : Auto-transition after saving data.
 
 def on_press(key):
-    global STOP, START, RECORD_TOGGLE, ARM_REQUEST_TIMESTAMP
+    global STOP, START, RECORD_TOGGLE, ARM_REQUEST_TIMESTAMP, PREPARATION_COMPLETE
     if key == 'r':
         with LIFECYCLE_LOCK:
+            if not PREPARATION_COMPLETE:
+                logger_mp.warning("[on_press] Ignoring r until arm preparation completes.")
+                return
             ARM_REQUEST_TIMESTAMP = time.monotonic()
             START = True
     elif key == 'q':
@@ -152,6 +156,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     logger_mp.debug(f"args: {args}")
     outputs_activated = False
+    hand_outputs_activated = False
 
     try:
         # setup dds communication domains id
@@ -213,7 +218,7 @@ if __name__ == '__main__':
                                      zmq=camera_config['head_camera']['enable_zmq'],
                                      webrtc=camera_config['head_camera']['enable_webrtc'],
                                      webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
-                                     arm_pose_source="controller"
+                                     arm_pose_source="hand"
                                      )
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
@@ -352,6 +357,26 @@ if __name__ == '__main__':
         )
         status_sink = AsyncStatusFileSink(status_log_path, logger_mp.warning)
         status_monitor = TeleopStatusMonitor(status_sink.emit)
+
+        # Match the original launcher behavior: connecting the arm motors moves
+        # the arms to the all-zero preparation pose immediately, before r.
+        # The same lock makes an early terminal q win over output activation.
+        # Dex3 remains passive until the later post-r gate.
+        with LIFECYCLE_LOCK:
+            if STOP:
+                logger_mp.info("Launcher cancelled before arm preparation.")
+                raise KeyboardInterrupt
+            arm_ctrl.activate()
+            outputs_activated = True
+            preparation_confirmed = arm_ctrl.ctrl_dual_arm_go_home()
+            # G1_29 reports confirmed all-zero arrival; preserve the original
+            # void-return behavior of the other selectable arm profiles.
+            if args.arm == "G1_29" and not preparation_confirmed:
+                arm_ctrl.deactivate()
+                outputs_activated = False
+                raise RuntimeError("Arm preparation pose was not reached; refusing tracking.")
+            PREPARATION_COMPLETE = True
+
         # Initialize before the pre-arm loop: some display modes intentionally do
         # not fetch local frames, but their status must remain observable.
         head_img = None
@@ -367,7 +392,7 @@ if __name__ == '__main__':
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True                  # now ready to (1) enter START state
         # Pressing r is only an arm request. Keep the robot pre-armed until a
-        # current controller pose sample exists; zero-initialized pose buffers
+        # current hand wrist-pose sample exists; zero-initialized pose buffers
         # must never be passed to IK.
         while not STOP:
             time.sleep(0.033)
@@ -394,30 +419,35 @@ if __name__ == '__main__':
                 cameras={"head": camera_frame_is_usable(head_img), "left_wrist": camera_frame_is_usable(left_wrist_img)},
                 dex3_pressure_timestamps=ready_pressure_timestamps,
             )
+            # Dex3 has controller/trigger authority only. Start its command
+            # process after a post-r controller sample, independently of hand
+            # skeleton availability needed by arm IK.
             if (
-                START
+                args.ee == "dex3"
+                and not hand_outputs_activated
+                and START
                 and ready_tele_data.controller_sample_timestamp > ARM_REQUEST_TIMESTAMP
                 and controller_sample_is_fresh(ready_tele_data.controller_sample_timestamp)
             ):
+                with LIFECYCLE_LOCK:
+                    if not STOP and not hand_outputs_activated:
+                        hand_ctrl.activate()
+                        hand_outputs_activated = True
+
+            if (
+                START
+                and ready_tele_data.hand_sample_timestamp > ARM_REQUEST_TIMESTAMP
+                and hand_sample_is_fresh(ready_tele_data.hand_sample_timestamp)
+            ):
                 break
 
-        # Linearize q cancellation against output activation. If q acquired the
-        # lifecycle lock first, no writer/process can be created. If activation
-        # acquires it first, r has already become the explicit authority.
+        # The arm writer was activated at launcher-time preparation.  Here r
+        # only authorizes tracking after a fresh valid hand-pose pair; Dex3 may
+        # already be active from its independent post-r controller gate.
         with LIFECYCLE_LOCK:
             prearm_cancelled = STOP
-            if not prearm_cancelled:
-                arm_ctrl.activate()
-                outputs_activated = True
-                try:
-                    if args.ee == "dex3":
-                        hand_ctrl.activate()
-                except Exception:
-                    arm_ctrl.deactivate()
-                    outputs_activated = False
-                    raise
         if prearm_cancelled:
-            logger_mp.info("Pre-arm cancelled; no actuator output was activated.")
+            logger_mp.info("Preparation complete; tracking was cancelled before r.")
             raise KeyboardInterrupt
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
@@ -510,8 +540,8 @@ if __name__ == '__main__':
             with xr_motion_data_ready.get_lock():
                 xr_motion_data_ready.value = tele_data.motion_data_ready
             
-            # A controller sample owns every operator-commanded output in this
-            # mode. Locomotion and arm IK must make the same freshness decision.
+            # Controller samples own locomotion and Dex3 trigger freshness.
+            # Hand wrist-pose samples independently own arm IK freshness.
             controller_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)
             locomotion = (0.0, 0.0, 0.0)
             if args.motion:
@@ -540,13 +570,13 @@ if __name__ == '__main__':
             current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()
             current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
             # Recheck immediately before IK; state reads may consume the final
-            # part of the controller freshness window.
-            controller_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)
+            # part of the hand wrist-pose freshness window.
+            hand_pose_is_fresh = hand_sample_is_fresh(tele_data.hand_sample_timestamp)
 
-            # Only solve new arm targets while the controller pose is fresh.
-            # On loss of controller authority, hold the measured joint position
+            # Only solve new arm targets while the hand wrist poses are fresh.
+            # On loss of hand authority, hold the measured joint position
             # with zero feed-forward torque instead of advancing stale IK.
-            if controller_is_fresh:
+            if hand_pose_is_fresh:
                 time_ik_start = time.time()
                 sol_q, sol_tauff = arm_ik.solve_ik(
                     tele_data.left_wrist_pose,
@@ -560,8 +590,8 @@ if __name__ == '__main__':
                 sol_q = current_lr_arm_q.copy()
                 sol_tauff = np.zeros_like(current_lr_arm_q)
             if (
-                controller_is_fresh
-                and controller_sample_is_fresh(tele_data.controller_sample_timestamp)
+                hand_pose_is_fresh
+                and hand_sample_is_fresh(tele_data.hand_sample_timestamp)
             ):
                 arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
             else:
@@ -737,17 +767,22 @@ if __name__ == '__main__':
         import traceback
         logger_mp.error(traceback.format_exc())
     finally:
-        # Never create an actuator command while leaving the passive pre-arm
-        # screen. q ends tracking; the process exits without an autonomous
-        # go-home motion.
+        # Dex3 is an independent post-r output. Stop its child process before
+        # the potentially slower arm return-to-preparation motion.
+        if hand_outputs_activated:
+            try:
+                hand_ctrl.deactivate()
+            except Exception as e:
+                logger_mp.error(f"Failed to deactivate Dex3 output: {e}")
         if outputs_activated:
             try:
+                # Return to the original all-zero preparation pose before
+                # releasing arm DDS output.
+                arm_ctrl.ctrl_dual_arm_go_home()
                 arm_ctrl.deactivate()
-                if args.ee == "dex3":
-                    hand_ctrl.deactivate()
             except Exception as e:
-                logger_mp.error(f"Failed to deactivate actuator output: {e}")
-            logger_mp.info("Actuator outputs were active; exiting without autonomous arm homing.")
+                logger_mp.error(f"Failed to deactivate arm output: {e}")
+            logger_mp.info("Arm preparation output ended; exiting.")
         try:
             if args.ipc:
                 ipc_server.stop()

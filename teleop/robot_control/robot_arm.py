@@ -259,15 +259,17 @@ class G1_29_ArmController:
         tolerance = 0.05  # Tolerance threshold for joint angles to determine "close to zero", can be adjusted based on your motor's precision requirements
         while current_attempts < max_attempts:
             current_q = self.get_current_dual_arm_q()
-            if np.all(np.abs(current_q) < tolerance):
+            if np.all(np.abs(current_q) <= tolerance):
                 if self.motion_mode:
                     for weight in np.linspace(1, 0, num=101):
                         self.msg.motor_cmd[G1_29_JointIndex.kNotUsedJoint0].q = weight;
                         time.sleep(0.02)
                 logger_mp.info("[G1_29_ArmController] both arms have reached the home position.")
-                break
+                return True
             current_attempts += 1
             time.sleep(0.05)
+        logger_mp.error("[G1_29_ArmController] timed out waiting for arms to reach home position.")
+        return False
 
     def speed_gradual_max(self, t = 5.0):
         '''Parameter t is the total time required for arms velocity to gradually increase to its maximum value, in seconds. The default is 5.0.'''
