@@ -32,6 +32,7 @@ class MotorState:
 
 class G1_29_LowState:
     def __init__(self):
+        self.mode_machine = None
         self.motor_state = [MotorState() for _ in range(G1_29_Num_Motors)]
 
 class G1_23_LowState:
@@ -54,15 +55,21 @@ class H2_LowState:
 class DataBuffer:
     def __init__(self):
         self.data = None
+        self.timestamp = 0.0
         self.lock = threading.Lock()
 
     def GetData(self):
         with self.lock:
             return self.data
 
+    def GetSnapshot(self):
+        with self.lock:
+            return self.data, self.timestamp
+
     def SetData(self, data):
         with self.lock:
             self.data = data
+            self.timestamp = time.monotonic()
 
 class G1_29_ArmController:
     def __init__(self, motion_mode = False, simulation_mode = False):
@@ -85,11 +92,11 @@ class G1_29_ArmController:
         self._gradual_start_time = None
         self._gradual_time = None
 
-        if self.motion_mode:
-            self.lowcmd_publisher = ChannelPublisher(kTopicLowCommand_Motion, hg_LowCmd)
-        else:
-            self.lowcmd_publisher = ChannelPublisher(kTopicLowCommand_Debug, hg_LowCmd)
-        self.lowcmd_publisher.Init()
+        # Pre-arm is receive-only: create the state subscriber and wait for a
+        # measured robot state, but do not create a command publisher/message.
+        self.lowcmd_publisher = None
+        self.crc = None
+        self.msg = None
         self.lowstate_subscriber = ChannelSubscriber(kTopicLowState, hg_LowState)
         self.lowstate_subscriber.Init()
         self.lowstate_buffer = DataBuffer()
@@ -104,17 +111,37 @@ class G1_29_ArmController:
             logger_mp.warning("[G1_29_ArmController] Waiting to subscribe dds...")
         logger_mp.info("[G1_29_ArmController] Subscribe dds ok.")
 
-        # initialize hg's lowcmd msg
+        # Command message and all target positions are initialized from a fresh
+        # low-state sample in activate(), immediately before first output.
+
+        # Construct the publisher now, but never start its write loop until the
+        # terminal pre-arm gate has accepted a post-r controller sample.
+        self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
+        self.ctrl_lock = threading.Lock()
+        self.publish_thread.daemon = True
+        self.output_enabled = threading.Event()
+        self.outputs_activated = False
+
+        logger_mp.info("Initialize G1_29_ArmController OK (passive pre-arm).")
+
+    def activate(self):
+        """Start arm DDS publication after the terminal pre-arm gate only."""
+        if self.outputs_activated:
+            return
+        # Build the complete command from one atomic fresh state snapshot.
+        lowstate, lowstate_timestamp = self.lowstate_buffer.GetSnapshot()
+        if lowstate is None or time.monotonic() - lowstate_timestamp > 0.1:
+            raise RuntimeError("[G1_29_ArmController] LowState is stale; refusing activation.")
+        if self.motion_mode:
+            self.lowcmd_publisher = ChannelPublisher(kTopicLowCommand_Motion, hg_LowCmd)
+        else:
+            self.lowcmd_publisher = ChannelPublisher(kTopicLowCommand_Debug, hg_LowCmd)
+        self.lowcmd_publisher.Init()
         self.crc = CRC()
         self.msg = unitree_hg_msg_dds__LowCmd_()
         self.msg.mode_pr = 0
-        self.msg.mode_machine = self.get_mode_machine()
-
-        self.all_motor_q = self.get_current_motor_q()
-        logger_mp.debug(f"Current all body motor state q:\n{self.all_motor_q} \n")
-        logger_mp.debug(f"Current two arms motor state q:\n{self.get_current_dual_arm_q()}\n")
-        logger_mp.info("Lock all joints except two arms...")
-
+        self.msg.mode_machine = lowstate.mode_machine
+        self.all_motor_q = np.array([lowstate.motor_state[id].q for id in G1_29_JointIndex])
         arm_indices = set(member.value for member in G1_29_JointArmIndex)
         for id in G1_29_JointIndex:
             self.msg.motor_cmd[id].mode = 1
@@ -125,29 +152,34 @@ class G1_29_ArmController:
                 else:
                     self.msg.motor_cmd[id].kp = self.kp_low
                     self.msg.motor_cmd[id].kd = self.kd_low
+            elif self._Is_weak_motor(id):
+                self.msg.motor_cmd[id].kp = self.kp_low
+                self.msg.motor_cmd[id].kd = self.kd_low
             else:
-                if self._Is_weak_motor(id):
-                    self.msg.motor_cmd[id].kp = self.kp_low
-                    self.msg.motor_cmd[id].kd = self.kd_low
-                else:
-                    self.msg.motor_cmd[id].kp = self.kp_high
-                    self.msg.motor_cmd[id].kd = self.kd_high
-            self.msg.motor_cmd[id].q  = self.all_motor_q[id]
-        logger_mp.info("Lock OK!")
-
-        # initialize publish thread
-        self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
-        self.ctrl_lock = threading.Lock()
-        self.publish_thread.daemon = True
+                self.msg.motor_cmd[id].kp = self.kp_high
+                self.msg.motor_cmd[id].kd = self.kd_high
+            self.msg.motor_cmd[id].q = self.all_motor_q[id]
+        # First arm command is the same fresh measured configuration.
+        with self.ctrl_lock:
+            self.q_target = np.array([
+                lowstate.motor_state[id].q for id in G1_29_JointArmIndex]).copy()
+            self.tauff_target = np.zeros_like(self.q_target)
+        self.output_enabled.set()
+        self.outputs_activated = True
         self.publish_thread.start()
+        logger_mp.info("[G1_29_ArmController] Arm DDS output activated.")
 
-        logger_mp.info("Initialize G1_29_ArmController OK!")
+    def deactivate(self):
+        """Stop the arm write loop immediately when terminal q is processed."""
+        self.output_enabled.clear()
+        logger_mp.info("[G1_29_ArmController] Arm DDS output deactivated.")
 
     def _subscribe_motor_state(self):
         while True:
             msg = self.lowstate_subscriber.Read()
             if msg is not None:
                 lowstate = G1_29_LowState()
+                lowstate.mode_machine = msg.mode_machine
                 for id in range(G1_29_Num_Motors):
                     lowstate.motor_state[id].q  = msg.motor_state[id].q
                     lowstate.motor_state[id].dq = msg.motor_state[id].dq
@@ -163,9 +195,8 @@ class G1_29_ArmController:
 
     def _ctrl_motor_state(self):
         if self.motion_mode:
-            self.msg.motor_cmd[G1_29_JointIndex.kNotUsedJoint0].q = 1.0;
-
-        while True:
+            self.msg.motor_cmd[G1_29_JointIndex.kNotUsedJoint0].q = 1.0
+        while self.output_enabled.is_set():
             start_time = time.time()
 
             with self.ctrl_lock:

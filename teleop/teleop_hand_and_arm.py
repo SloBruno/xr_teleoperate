@@ -42,6 +42,8 @@ ARM_REQUEST_TIMESTAMP = 0.0  # Monotonic time of the most recent terminal r requ
 READY          = False  # Ready to (1) enter START state, (2) enter RECORD_RUNNING state
 RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
+# Serializes r/q lifecycle decisions with the one-way output activation gate.
+LIFECYCLE_LOCK = threading.Lock()
 #  -------        ---------                -----------                -----------            ---------
 #   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
 #  -------        ---------      |         -----------      |         -----------      |     ---------
@@ -57,11 +59,13 @@ RECORD_TOGGLE  = False  # Toggle recording state
 def on_press(key):
     global STOP, START, RECORD_TOGGLE, ARM_REQUEST_TIMESTAMP
     if key == 'r':
-        ARM_REQUEST_TIMESTAMP = time.monotonic()
-        START = True
+        with LIFECYCLE_LOCK:
+            ARM_REQUEST_TIMESTAMP = time.monotonic()
+            START = True
     elif key == 'q':
-        START = False
-        STOP = True
+        with LIFECYCLE_LOCK:
+            START = False
+            STOP = True
     elif key == 's' and START == True:
         RECORD_TOGGLE = True
     else:
@@ -147,6 +151,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     logger_mp.debug(f"args: {args}")
+    outputs_activated = False
 
     try:
         # setup dds communication domains id
@@ -396,6 +401,24 @@ if __name__ == '__main__':
             ):
                 break
 
+        # Linearize q cancellation against output activation. If q acquired the
+        # lifecycle lock first, no writer/process can be created. If activation
+        # acquires it first, r has already become the explicit authority.
+        with LIFECYCLE_LOCK:
+            prearm_cancelled = STOP
+            if not prearm_cancelled:
+                arm_ctrl.activate()
+                outputs_activated = True
+                try:
+                    if args.ee == "dex3":
+                        hand_ctrl.activate()
+                except Exception:
+                    arm_ctrl.deactivate()
+                    outputs_activated = False
+                    raise
+        if prearm_cancelled:
+            logger_mp.info("Pre-arm cancelled; no actuator output was activated.")
+            raise KeyboardInterrupt
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
@@ -714,11 +737,17 @@ if __name__ == '__main__':
         import traceback
         logger_mp.error(traceback.format_exc())
     finally:
-        try:
-            arm_ctrl.ctrl_dual_arm_go_home()
-        except Exception as e:
-            logger_mp.error(f"Failed to ctrl_dual_arm_go_home: {e}")
-        
+        # Never create an actuator command while leaving the passive pre-arm
+        # screen. q ends tracking; the process exits without an autonomous
+        # go-home motion.
+        if outputs_activated:
+            try:
+                arm_ctrl.deactivate()
+                if args.ee == "dex3":
+                    hand_ctrl.deactivate()
+            except Exception as e:
+                logger_mp.error(f"Failed to deactivate actuator output: {e}")
+            logger_mp.info("Actuator outputs were active; exiting without autonomous arm homing.")
         try:
             if args.ipc:
                 ipc_server.stop()

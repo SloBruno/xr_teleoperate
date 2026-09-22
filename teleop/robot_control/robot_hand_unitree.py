@@ -79,12 +79,10 @@ class Dex3_1_Controller:
         # Dex3 joint targets are controller-trigger owned; no hand-retargeting
         # object is constructed for this controller.
 
-        # initialize handcmd publisher and handstate subscriber
-        self.LeftHandCmb_publisher = ChannelPublisher(kTopicDex3LeftCommand, HandCmd_)
-        self.LeftHandCmb_publisher.Init()
-        self.RightHandCmb_publisher = ChannelPublisher(kTopicDex3RightCommand, HandCmd_)
-        self.RightHandCmb_publisher.Init()
-
+        # Pre-arm is receive-only; command publishers are constructed in the
+        # child process only after activate() starts it.
+        self.LeftHandCmb_publisher = None
+        self.RightHandCmb_publisher = None
         self.LeftHandState_subscriber = ChannelSubscriber(kTopicDex3LeftState, HandState_)
         self.LeftHandState_subscriber.Init()
         self.RightHandState_subscriber = ChannelSubscriber(kTopicDex3RightState, HandState_)
@@ -112,15 +110,38 @@ class Dex3_1_Controller:
             logger_mp.warning("[Dex3_1_Controller] Waiting to subscribe dds...")
         logger_mp.info("[Dex3_1_Controller] Subscribe dds ok.")
 
-        hand_control_process = Process(target=self.control_process, args=(left_hand_array_in, right_hand_array_in,  self.left_hand_state_array, self.right_hand_state_array,
-                                                                          dual_hand_data_lock, dual_hand_state_array_out, dual_hand_action_array_out, xr_motion_data_ready_in,
-                                                                          left_ctrl_trigger_in, right_ctrl_trigger_in,
-                                                                          left_ctrl_timestamp_in, right_ctrl_timestamp_in,
-                                                                          left_ctrl_sample_in, right_ctrl_sample_in))
-        hand_control_process.daemon = True
-        hand_control_process.start()
+        # Save the command-loop arguments, but keep the process absent until
+        # the explicit terminal r gate activates actuator authority.
+        self._control_process_args = (
+            left_hand_array_in, right_hand_array_in, self.left_hand_state_array,
+            self.right_hand_state_array, dual_hand_data_lock,
+            dual_hand_state_array_out, dual_hand_action_array_out,
+            xr_motion_data_ready_in, left_ctrl_trigger_in, right_ctrl_trigger_in,
+            left_ctrl_timestamp_in, right_ctrl_timestamp_in,
+            left_ctrl_sample_in, right_ctrl_sample_in,
+        )
+        self.hand_control_process = None
+        self.outputs_activated = False
 
-        logger_mp.info("Initialize Dex3_1_Controller OK!")
+        logger_mp.info("Initialize Dex3_1_Controller OK (passive pre-arm).")
+
+    def activate(self):
+        """Start Dex3 command publication after terminal r has been accepted."""
+        if self.outputs_activated:
+            return
+        self.hand_control_process = Process(
+            target=self.control_process, args=self._control_process_args)
+        self.hand_control_process.daemon = True
+        self.hand_control_process.start()
+        self.outputs_activated = True
+        logger_mp.info("[Dex3_1_Controller] Dex3 DDS output activated.")
+
+    def deactivate(self):
+        """Terminate the Dex3 command process when terminal q is processed."""
+        if self.hand_control_process is not None and self.hand_control_process.is_alive():
+            self.hand_control_process.terminate()
+            self.hand_control_process.join(timeout=1.0)
+        logger_mp.info("[Dex3_1_Controller] Dex3 DDS output deactivated.")
 
     def _subscribe_hand_state(self):
         while True:
@@ -228,6 +249,13 @@ class Dex3_1_Controller:
                               left_ctrl_timestamp_in = None, right_ctrl_timestamp_in = None,
                               left_ctrl_sample_in = None, right_ctrl_sample_in = None):
         self.running = True
+
+        # This child exists only after activate(); construct command publishers
+        # here so passive pre-arm cannot create a DDS writer.
+        self.LeftHandCmb_publisher = ChannelPublisher(kTopicDex3LeftCommand, HandCmd_)
+        self.LeftHandCmb_publisher.Init()
+        self.RightHandCmb_publisher = ChannelPublisher(kTopicDex3RightCommand, HandCmd_)
+        self.RightHandCmb_publisher.Init()
 
         left_q_target  = np.full(Dex3_Num_Motors, 0)
         right_q_target = np.full(Dex3_Num_Motors, 0)
