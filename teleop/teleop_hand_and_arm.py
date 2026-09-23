@@ -25,6 +25,7 @@ from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.quest_controls import joystick_to_locomotion
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
 from teleop.utils.teleop_status import AsyncStatusFileSink, TeleopStatusMonitor, camera_frame_is_usable
+from teleop.utils.full_pose_telemetry import PoseTelemetryJsonlSink, build_pose_record
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -184,6 +185,7 @@ if __name__ == '__main__':
     logger_mp.debug(f"args: {args}")
     outputs_activated = False
     hand_outputs_activated = False
+    pose_telemetry_sink = None
 
     try:
         # setup dds communication domains id
@@ -384,6 +386,11 @@ if __name__ == '__main__':
         )
         status_sink = AsyncStatusFileSink(status_log_path, logger_mp.warning)
         status_monitor = TeleopStatusMonitor(status_sink.emit)
+        pose_log_dir = os.environ.get(
+            "XR_TELEOP_POSE_LOG_DIR",
+            "/home/unitree/.local/state/xr_teleoperate",
+        )
+        pose_telemetry_sink = PoseTelemetryJsonlSink(pose_log_dir, logger_mp.warning)
 
         # Match the original launcher behavior: connecting the arm motors moves
         # the arms to the all-zero preparation pose immediately, before r.
@@ -453,6 +460,19 @@ if __name__ == '__main__':
                 cameras={"head": camera_frame_is_usable(head_img), "left_wrist": camera_frame_is_usable(left_wrist_img)},
                 dex3_pressure_timestamps=ready_pressure_timestamps,
             )
+            get_ready_arm_q = getattr(arm_ctrl, "get_current_dual_arm_q", None)
+            ready_arm_q = get_ready_arm_q() if get_ready_arm_q is not None else np.zeros(14)
+            pose_telemetry_sink.emit(build_pose_record(
+                timestamp=time.time(),
+                lifecycle="ready",
+                controller_sample_timestamp=ready_tele_data.controller_sample_timestamp,
+                left_wrist_pose=getattr(ready_tele_data, "left_wrist_pose", None),
+                right_wrist_pose=getattr(ready_tele_data, "right_wrist_pose", None),
+                measured_arm_q=ready_arm_q,
+                commanded_arm_q=ready_arm_q,
+                drop_count=pose_telemetry_sink.drop_count,
+                now=time.monotonic(),
+            ))
             # Dex3 has controller/trigger authority only. Start its command
             # process after a post-r controller sample, independently of hand
             # skeleton availability needed by arm IK.
@@ -636,6 +656,26 @@ if __name__ == '__main__':
                     arm_ctrl.get_current_dual_arm_q().copy(),
                     np.zeros_like(current_lr_arm_q),
                 )
+
+            dex3_measured_q = None
+            dex3_commanded_q = None
+            if args.ee == "dex3":
+                with dual_hand_data_lock:
+                    dex3_measured_q = np.asarray(dual_hand_state_array[:], dtype=float).copy()
+                    dex3_commanded_q = np.asarray(dual_hand_action_array[:], dtype=float).copy()
+            pose_telemetry_sink.emit(build_pose_record(
+                timestamp=time.time(),
+                lifecycle="tracking",
+                controller_sample_timestamp=tele_data.controller_sample_timestamp,
+                left_wrist_pose=getattr(tele_data, "left_wrist_pose", None),
+                right_wrist_pose=getattr(tele_data, "right_wrist_pose", None),
+                measured_arm_q=current_lr_arm_q,
+                commanded_arm_q=sol_q,
+                dex3_measured_q=dex3_measured_q,
+                dex3_commanded_q=dex3_commanded_q,
+                drop_count=pose_telemetry_sink.drop_count,
+                now=time.monotonic(),
+            ))
 
             # record data
             if args.record:
@@ -845,6 +885,12 @@ if __name__ == '__main__':
             tv_wrapper.close()
         except Exception as e:
             logger_mp.error(f"Failed to close televuer wrapper: {e}")
+
+        try:
+            if pose_telemetry_sink is not None:
+                pose_telemetry_sink.close()
+        except Exception as e:
+            logger_mp.error(f"Failed to close pose telemetry sink: {e}")
 
         try:
             status_sink.close()

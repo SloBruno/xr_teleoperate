@@ -1,4 +1,3 @@
-import json
 import sys
 from pathlib import Path
 
@@ -52,7 +51,7 @@ def test_status_monitor_emits_structured_heartbeat_with_control_ages():
     )
 
     assert status is not None
-    event = json.loads(records[-1])
+    event = records[-1]
     assert event["event"] == "teleop_status"
     assert event["lifecycle"] == "tracking"
     assert event["controller"] == {"fresh": True, "age_ms": 100}
@@ -71,7 +70,7 @@ def test_status_monitor_emits_one_warning_on_controller_freshness_transition():
     monitor.observe(now=10.3, lifecycle="tracking", controller_sample_timestamp=9.9)
     monitor.observe(now=10.4, lifecycle="tracking", controller_sample_timestamp=9.9)
 
-    events = [json.loads(record) for record in records]
+    events = records
     warnings = [event for event in events if event["event"] == "controller_freshness_changed"]
     assert warnings == [{"event": "controller_freshness_changed", "fresh": False, "age_ms": 400}]
 

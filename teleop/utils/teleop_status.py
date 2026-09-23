@@ -10,7 +10,7 @@ import math
 import os
 from queue import Full, Queue
 import threading
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from teleop.utils.quest_safety import controller_sample_is_fresh
 
@@ -41,8 +41,8 @@ class AsyncStatusFileSink:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def emit(self, payload: str) -> None:
-        """Queue telemetry without performing filesystem I/O on the control path."""
+    def emit(self, payload: str | Mapping[str, Any]) -> None:
+        """Queue telemetry without I/O or JSON encoding on the control path."""
         if self._closed:
             return
         try:
@@ -78,7 +78,11 @@ class AsyncStatusFileSink:
                     payload = self._queue.get()
                     if payload is None:
                         return
-                    status_log.write(payload + "\n")
+                    if isinstance(payload, str):
+                        serialized = payload
+                    else:
+                        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                    status_log.write(serialized + "\n")
                     status_log.flush()
         except OSError as error:
             self._warn(f"Could not initialize teleop status log: {error}")
@@ -113,11 +117,11 @@ class TeleopStatusMonitor:
             self._last_controller_fresh = controller_fresh
         elif controller_fresh != self._last_controller_fresh:
             self._last_controller_fresh = controller_fresh
-            self._emit(json.dumps({
+            self._emit({
                 "event": "controller_freshness_changed",
                 "fresh": controller_fresh,
                 "age_ms": controller_age_ms,
-            }, sort_keys=True))
+            })
 
         if self._last_status_at is not None and now - self._last_status_at < self._interval_s:
             return None
@@ -137,5 +141,5 @@ class TeleopStatusMonitor:
                 "right_age_ms": _age_ms(right_pressure_timestamp, now),
             },
         }
-        self._emit(json.dumps(status, sort_keys=True))
+        self._emit(status)
         return status
