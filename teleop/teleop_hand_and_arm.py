@@ -23,7 +23,7 @@ from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.quest_controls import joystick_to_locomotion
-from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value, hand_sample_is_fresh
+from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
 from teleop.utils.teleop_status import AsyncStatusFileSink, TeleopStatusMonitor, camera_frame_is_usable
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -218,7 +218,7 @@ if __name__ == '__main__':
                                      zmq=camera_config['head_camera']['enable_zmq'],
                                      webrtc=camera_config['head_camera']['enable_webrtc'],
                                      webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
-                                     arm_pose_source="hand"
+                                     arm_pose_source="controller"
                                      )
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
@@ -392,7 +392,7 @@ if __name__ == '__main__':
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True                  # now ready to (1) enter START state
         # Pressing r is only an arm request. Keep the robot pre-armed until a
-        # current hand wrist-pose sample exists; zero-initialized pose buffers
+        # current controller-pose sample exists; zero-initialized pose buffers
         # must never be passed to IK.
         while not STOP:
             time.sleep(0.033)
@@ -436,13 +436,13 @@ if __name__ == '__main__':
 
             if (
                 START
-                and ready_tele_data.hand_sample_timestamp > ARM_REQUEST_TIMESTAMP
-                and hand_sample_is_fresh(ready_tele_data.hand_sample_timestamp)
+                and ready_tele_data.controller_sample_timestamp > ARM_REQUEST_TIMESTAMP
+                and controller_sample_is_fresh(ready_tele_data.controller_sample_timestamp)
             ):
                 break
 
         # The arm writer was activated at launcher-time preparation.  Here r
-        # only authorizes tracking after a fresh valid hand-pose pair; Dex3 may
+        # only authorizes tracking after a fresh controller-pose pair; Dex3 may
         # already be active from its independent post-r controller gate.
         with LIFECYCLE_LOCK:
             prearm_cancelled = STOP
@@ -540,8 +540,7 @@ if __name__ == '__main__':
             with xr_motion_data_ready.get_lock():
                 xr_motion_data_ready.value = tele_data.motion_data_ready
             
-            # Controller samples own locomotion and Dex3 trigger freshness.
-            # Hand wrist-pose samples independently own arm IK freshness.
+            # Controller samples own arm IK, locomotion, and Dex3 freshness.
             controller_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)
             locomotion = (0.0, 0.0, 0.0)
             if args.motion:
@@ -570,13 +569,13 @@ if __name__ == '__main__':
             current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()
             current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
             # Recheck immediately before IK; state reads may consume the final
-            # part of the hand wrist-pose freshness window.
-            hand_pose_is_fresh = hand_sample_is_fresh(tele_data.hand_sample_timestamp)
+            # part of the controller-pose freshness window.
+            controller_pose_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)
 
-            # Only solve new arm targets while the hand wrist poses are fresh.
-            # On loss of hand authority, hold the measured joint position
+            # Only solve new arm targets while the controller poses are fresh.
+            # On loss of controller authority, hold the measured joint position
             # with zero feed-forward torque instead of advancing stale IK.
-            if hand_pose_is_fresh:
+            if controller_pose_is_fresh:
                 time_ik_start = time.time()
                 sol_q, sol_tauff = arm_ik.solve_ik(
                     tele_data.left_wrist_pose,
@@ -590,8 +589,8 @@ if __name__ == '__main__':
                 sol_q = current_lr_arm_q.copy()
                 sol_tauff = np.zeros_like(current_lr_arm_q)
             if (
-                hand_pose_is_fresh
-                and hand_sample_is_fresh(tele_data.hand_sample_timestamp)
+                controller_pose_is_fresh
+                and controller_sample_is_fresh(tele_data.controller_sample_timestamp)
             ):
                 arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
             else:

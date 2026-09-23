@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 import importlib
 import runpy
+import time
 import types
 
 import pytest
@@ -119,7 +120,7 @@ def test_hand_mode_teledata_carries_controller_sticks_and_sample_timestamp():
     hand_return = source.split("if self.use_hand_tracking:", 1)[1].split("# controller tracking", 1)[0]
     assert "left_ctrl_thumbstickValue=self.tvuer.left_ctrl_thumbstickValue" in hand_return
     assert "right_ctrl_thumbstickValue=self.tvuer.right_ctrl_thumbstickValue" in hand_return
-    assert "controller_sample_timestamp=self.tvuer.controller_sample_timestamp" in hand_return
+    assert "controller_sample_timestamp=controller_sample_timestamp" in hand_return
 
 
 def test_headset_waist_yaw_follow_has_no_cli_or_robot_actuator_path():
@@ -168,8 +169,12 @@ def test_terminal_keys_are_the_only_lifecycle_authority(monkeypatch):
     module = importlib.reload(importlib.import_module("teleop.teleop_hand_and_arm"))
     module.START = False
     module.STOP = False
+    module.PREPARATION_COMPLETE = False
     module.on_press("x")
     assert (module.START, module.STOP) == (False, False)
+    module.on_press("r")
+    assert (module.START, module.STOP) == (False, False)
+    module.PREPARATION_COMPLETE = True
     module.on_press("r")
     assert (module.START, module.STOP) == (True, False)
     module.on_press("q")
@@ -178,6 +183,7 @@ def test_terminal_keys_are_the_only_lifecycle_authority(monkeypatch):
 
 def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
     moves = []
+    arm_request_callbacks = []
 
     class StopAfterMove(Exception):
         pass
@@ -194,11 +200,17 @@ def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
         def __init__(self, **kwargs):
             pass
 
+        def activate(self):
+            pass
+
+        def deactivate(self):
+            pass
+
         def speed_gradual_max(self):
             pass
 
-        def ctrl_dual_arm_go_home(self):
-            pass
+        def ctrl_dual_arm_go_home(self, release_motion_authority=False):
+            return True
 
     class FakeArmIK:
         pass
@@ -208,9 +220,11 @@ def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
             pass
 
         def get_tele_data(self):
+            if arm_request_callbacks:
+                arm_request_callbacks.pop()("r")
             return types.SimpleNamespace(
                 head_pose=__import__("numpy").eye(4),
-                controller_sample_timestamp=0.0,
+                controller_sample_timestamp=time.monotonic(),
                 left_ctrl_thumbstickValue=(0.0, 0.0),
                 right_ctrl_thumbstickValue=(0.0, 0.0),
                 motion_data_ready=False,
@@ -241,7 +255,7 @@ def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
             self.on_press = on_press
 
         def start(self):
-            self.on_press("r")
+            arm_request_callbacks.append(self.on_press)
 
         def stop(self):
             pass
