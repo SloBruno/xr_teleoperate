@@ -97,13 +97,91 @@ def test_loco_wrapper_passes_exact_native_tuple_to_client(monkeypatch):
     assert calls == [(*locomotion, False)]
 
 
-def test_ordinary_controller_input_cannot_damp_or_change_lifecycle():
+def test_controller_lifecycle_edges_use_the_right_controller_and_no_damping():
     source = (Path(__file__).resolve().parents[1] / "teleop" / "teleop_hand_and_arm.py").read_text()
 
     assert ".Damp(" not in source
-    assert "right_ctrl_aButton" not in source
+    assert "right_ctrl_aButton" in source
+    assert "right_ctrl_bButton" in source
     assert "left_ctrl_bButton" not in source
-    assert "right_ctrl_bButton" not in source
+
+
+def test_controller_lifecycle_poll_uses_fresh_rising_edges_and_shared_requests(monkeypatch):
+    stubs = {
+        "logging_mp": types.ModuleType("logging_mp"),
+        "unitree_sdk2py": types.ModuleType("unitree_sdk2py"),
+        "unitree_sdk2py.core": types.ModuleType("unitree_sdk2py.core"),
+        "unitree_sdk2py.core.channel": types.ModuleType("unitree_sdk2py.core.channel"),
+        "televuer": types.ModuleType("televuer"),
+        "teleimager": types.ModuleType("teleimager"),
+        "teleimager.image_client": types.ModuleType("teleimager.image_client"),
+        "sshkeyboard": types.ModuleType("sshkeyboard"),
+        "teleop.robot_control.robot_arm": types.ModuleType("teleop.robot_control.robot_arm"),
+        "teleop.robot_control.robot_arm_ik": types.ModuleType("teleop.robot_control.robot_arm_ik"),
+        "teleop.utils.episode_writer": types.ModuleType("teleop.utils.episode_writer"),
+        "teleop.utils.ipc": types.ModuleType("teleop.utils.ipc"),
+        "teleop.utils.motion_switcher": types.ModuleType("teleop.utils.motion_switcher"),
+        "unitree_sdk2py.idl": types.ModuleType("unitree_sdk2py.idl"),
+        "unitree_sdk2py.idl.std_msgs": types.ModuleType("unitree_sdk2py.idl.std_msgs"),
+        "unitree_sdk2py.idl.std_msgs.msg": types.ModuleType("unitree_sdk2py.idl.std_msgs.msg"),
+        "unitree_sdk2py.idl.std_msgs.msg.dds_": types.ModuleType("unitree_sdk2py.idl.std_msgs.msg.dds_"),
+    }
+    for name, module in stubs.items():
+        monkeypatch.setitem(sys.modules, name, module)
+        module.__getattr__ = lambda name: object
+    stubs["logging_mp"].basicConfig = lambda **kwargs: None
+    stubs["logging_mp"].getLogger = lambda name: types.SimpleNamespace(warning=lambda message: None)
+    stubs["logging_mp"].INFO = 20
+    stubs["unitree_sdk2py.core.channel"].ChannelFactoryInitialize = object
+    stubs["unitree_sdk2py.core.channel"].ChannelPublisher = object
+    stubs["unitree_sdk2py.idl.std_msgs.msg.dds_"].String_ = object
+    stubs["sshkeyboard"].listen_keyboard = object
+    stubs["sshkeyboard"].stop_listening = object
+
+    module = importlib.reload(importlib.import_module("teleop.teleop_hand_and_arm"))
+    module.START = False
+    module.STOP = False
+    module.PREPARATION_COMPLETE = False
+
+    sample = types.SimpleNamespace(
+        right_ctrl_aButton=True,
+        right_ctrl_bButton=False,
+        controller_sample_timestamp=time.monotonic(),
+    )
+    edge_state = module.poll_controller_lifecycle(sample, False, False)
+    assert edge_state == (True, False)
+    assert (module.START, module.STOP) == (False, False)
+
+    module.PREPARATION_COMPLETE = True
+    module.poll_controller_lifecycle(sample, True, False)
+    assert (module.START, module.STOP) == (False, False)
+    released = types.SimpleNamespace(
+        right_ctrl_aButton=False,
+        right_ctrl_bButton=False,
+        controller_sample_timestamp=time.monotonic(),
+    )
+    module.poll_controller_lifecycle(released, True, False)
+    module.poll_controller_lifecycle(sample, False, False)
+    assert module.START is True
+
+    stop_sample = types.SimpleNamespace(
+        right_ctrl_aButton=True,
+        right_ctrl_bButton=True,
+        controller_sample_timestamp=time.monotonic(),
+    )
+    module.poll_controller_lifecycle(stop_sample, True, False)
+    assert (module.START, module.STOP) == (False, True)
+
+    module.START = False
+    module.STOP = False
+    module.PREPARATION_COMPLETE = True
+    stale = types.SimpleNamespace(
+        right_ctrl_aButton=True,
+        right_ctrl_bButton=True,
+        controller_sample_timestamp=0.0,
+    )
+    module.poll_controller_lifecycle(stale, False, False)
+    assert (module.START, module.STOP) == (False, False)
 
 
 def test_locomotion_is_not_gated_to_controller_mode_and_uses_freshness():
@@ -121,6 +199,14 @@ def test_hand_mode_teledata_carries_controller_sticks_and_sample_timestamp():
     assert "left_ctrl_thumbstickValue=self.tvuer.left_ctrl_thumbstickValue" in hand_return
     assert "right_ctrl_thumbstickValue=self.tvuer.right_ctrl_thumbstickValue" in hand_return
     assert "controller_sample_timestamp=controller_sample_timestamp" in hand_return
+
+
+def test_hand_mode_teledata_carries_right_controller_lifecycle_buttons():
+    source = (Path(__file__).resolve().parents[1] / "teleop" / "televuer" / "src" / "televuer" / "tv_wrapper.py").read_text()
+
+    hand_return = source.split("if self.use_hand_tracking:", 1)[1].split("# controller tracking", 1)[0]
+    assert "right_ctrl_aButton=self.tvuer.right_ctrl_aButton" in hand_return
+    assert "right_ctrl_bButton=self.tvuer.right_ctrl_bButton" in hand_return
 
 
 def test_headset_waist_yaw_follow_has_no_cli_or_robot_actuator_path():

@@ -57,23 +57,50 @@ LIFECYCLE_LOCK = threading.Lock()
 #  ==> manual: when READY is True, set RECORD_TOGGLE=True to transition.
 #  --> auto  : Auto-transition after saving data.
 
+def _request_start_locked():
+    """Authorize tracking after preparation, without activating any output."""
+    global START, ARM_REQUEST_TIMESTAMP
+    if not PREPARATION_COMPLETE:
+        logger_mp.warning("[lifecycle] Ignoring start until arm preparation completes.")
+        return False
+    ARM_REQUEST_TIMESTAMP = time.monotonic()
+    START = True
+    return True
+
+
+def _request_stop_locked():
+    """Make the unconditional stop request."""
+    global STOP, START
+    START = False
+    STOP = True
+
+
 def on_press(key):
-    global STOP, START, RECORD_TOGGLE, ARM_REQUEST_TIMESTAMP, PREPARATION_COMPLETE
-    if key == 'r':
-        with LIFECYCLE_LOCK:
-            if not PREPARATION_COMPLETE:
-                logger_mp.warning("[on_press] Ignoring r until arm preparation completes.")
-                return
-            ARM_REQUEST_TIMESTAMP = time.monotonic()
-            START = True
-    elif key == 'q':
-        with LIFECYCLE_LOCK:
-            START = False
-            STOP = True
-    elif key == 's' and START == True:
-        RECORD_TOGGLE = True
-    else:
-        logger_mp.warning(f"[on_press] {key} was pressed, but no action is defined for this key.")
+    global RECORD_TOGGLE
+    with LIFECYCLE_LOCK:
+        if key == 'r':
+            _request_start_locked()
+        elif key == 'q':
+            _request_stop_locked()
+        elif key == 's' and START == True:
+            RECORD_TOGGLE = True
+        else:
+            logger_mp.warning(f"[on_press] {key} was pressed, but no action is defined for this key.")
+
+
+def poll_controller_lifecycle(controller_sample, right_a_was_pressed, right_b_was_pressed):
+    """Apply fresh right-controller A/B rising edges through the terminal gates."""
+    if not controller_sample_is_fresh(controller_sample.controller_sample_timestamp):
+        return right_a_was_pressed, right_b_was_pressed
+
+    right_a_pressed = bool(getattr(controller_sample, "right_ctrl_aButton", False))
+    right_b_pressed = bool(getattr(controller_sample, "right_ctrl_bButton", False))
+    with LIFECYCLE_LOCK:
+        if right_a_pressed and not right_a_was_pressed:
+            _request_start_locked()
+        if right_b_pressed and not right_b_was_pressed:
+            _request_stop_locked()
+    return right_a_pressed, right_b_pressed
 
 def get_state() -> dict:
     """Return current heartbeat state"""
@@ -394,6 +421,8 @@ if __name__ == '__main__':
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True                  # now ready to (1) enter START state
+        right_a_was_pressed = False
+        right_b_was_pressed = False
         # Pressing r is only an arm request. Keep the robot pre-armed until a
         # current controller-pose sample exists; zero-initialized pose buffers
         # must never be passed to IK.
@@ -411,6 +440,8 @@ if __name__ == '__main__':
                 elif head_img.bgr is not None:
                     tv_wrapper.render_to_xr(head_img.bgr)
             ready_tele_data = tv_wrapper.get_tele_data()
+            right_a_was_pressed, right_b_was_pressed = poll_controller_lifecycle(
+                ready_tele_data, right_a_was_pressed, right_b_was_pressed)
             ready_pressure_timestamps = (0.0, 0.0)
             if args.ee == "dex3":
                 left_pressure_sample, right_pressure_sample = hand_ctrl.get_pressure_samples()
@@ -499,6 +530,8 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
+            right_a_was_pressed, right_b_was_pressed = poll_controller_lifecycle(
+                tele_data, right_a_was_pressed, right_b_was_pressed)
 
             if args.ee in ("inspire_ftp", "inspire_dfx", "brainco") and args.input_mode == "hand":
                 with left_hand_pos_array.get_lock():

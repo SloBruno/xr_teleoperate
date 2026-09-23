@@ -86,10 +86,11 @@ class PrearmActuatorGateTest(unittest.TestCase):
     def test_startup_inputs_are_serialized_with_launcher_preparation(self):
         source = TELEOP.read_text(encoding="utf-8")
         on_press = source[source.index("def on_press"):source.index("def get_state")]
-        self.assertIn("if not PREPARATION_COMPLETE:", on_press)
+        start_helper = source[source.index("def _request_start_locked"):source.index("def _request_stop_locked")]
+        self.assertIn("if not PREPARATION_COMPLETE:", start_helper)
         self.assertLess(
-            on_press.index("if not PREPARATION_COMPLETE:"),
-            on_press.index("ARM_REQUEST_TIMESTAMP = time.monotonic()"),
+            start_helper.index("if not PREPARATION_COMPLETE:"),
+            start_helper.index("ARM_REQUEST_TIMESTAMP = time.monotonic()"),
         )
         prepare = source[source.index("Match the original launcher behavior"):source.index("# Initialize before the pre-arm loop")]
         self.assertIn("with LIFECYCLE_LOCK:", prepare)
@@ -152,8 +153,12 @@ class PrearmActuatorGateTest(unittest.TestCase):
         dex3_gate = source[gate:hand_activate]
         self.assertIn("with LIFECYCLE_LOCK:", dex3_gate)
         self.assertIn("if not STOP and not hand_outputs_activated:", dex3_gate)
-        on_press = source[source.index("def on_press"):source.index("def get_state")]
-        self.assertEqual(on_press.count("with LIFECYCLE_LOCK:"), 2)
+        on_press = source[source.index("def on_press"):source.index("def poll_controller_lifecycle")]
+        controller_poll = source[source.index("def poll_controller_lifecycle"):source.index("def get_state")]
+        self.assertEqual(on_press.count("with LIFECYCLE_LOCK:"), 1)
+        self.assertEqual(controller_poll.count("with LIFECYCLE_LOCK:"), 1)
+        self.assertIn("_request_start_locked()", on_press)
+        self.assertIn("_request_stop_locked()", on_press)
     def test_only_g1_29_arm_controller_implements_lifecycle_gate_methods(self):
         tree = ast.parse(ARM.read_text(encoding="utf-8"))
         lifecycle_methods = ("activate", "deactivate")
