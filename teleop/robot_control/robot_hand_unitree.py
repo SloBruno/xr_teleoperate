@@ -129,18 +129,22 @@ class Dex3_1_Controller:
         """Start Dex3 command publication after terminal r has been accepted."""
         if self.outputs_activated:
             return
-        self.hand_control_process = Process(
-            target=self.control_process, args=self._control_process_args)
-        self.hand_control_process.daemon = True
+        # Cyclone DDS was initialized by the parent process before this point.
+        # Forking here leaves the child with an unusable inherited participant,
+        # so keep command publication in a thread of the initialized process.
+        self.running = True
+        self.hand_control_process = threading.Thread(
+            target=self.control_process, args=self._control_process_args, daemon=True)
         self.hand_control_process.start()
         self.outputs_activated = True
         logger_mp.info("[Dex3_1_Controller] Dex3 DDS output activated.")
 
     def deactivate(self):
-        """Terminate the Dex3 command process when terminal q is processed."""
+        """Stop the Dex3 command thread when terminal q is processed."""
+        self.running = False
         if self.hand_control_process is not None and self.hand_control_process.is_alive():
-            self.hand_control_process.terminate()
             self.hand_control_process.join(timeout=1.0)
+        self.outputs_activated = False
         logger_mp.info("[Dex3_1_Controller] Dex3 DDS output deactivated.")
 
     def _subscribe_hand_state(self):
@@ -248,10 +252,9 @@ class Dex3_1_Controller:
                               left_ctrl_trigger_in = None, right_ctrl_trigger_in = None,
                               left_ctrl_timestamp_in = None, right_ctrl_timestamp_in = None,
                               left_ctrl_sample_in = None, right_ctrl_sample_in = None):
-        self.running = True
 
-        # This child exists only after activate(); construct command publishers
-        # here so passive pre-arm cannot create a DDS writer.
+        # DDS is already initialized in this process; construct publishers only
+        # after the explicit terminal-r activation gate.
         self.LeftHandCmb_publisher = ChannelPublisher(kTopicDex3LeftCommand, HandCmd_)
         self.LeftHandCmb_publisher.Init()
         self.RightHandCmb_publisher = ChannelPublisher(kTopicDex3RightCommand, HandCmd_)

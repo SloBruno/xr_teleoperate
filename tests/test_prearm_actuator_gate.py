@@ -37,6 +37,25 @@ class PrearmActuatorGateTest(unittest.TestCase):
         self.assertFalse(starts_named_output(class_method(HAND, "Dex3_1_Controller", "__init__"), "hand_control_process"))
         self.assertTrue(starts_named_output(class_method(HAND, "Dex3_1_Controller", "activate"), "hand_control_process"))
 
+    def test_dex3_command_loop_uses_a_thread_in_the_initialized_dds_process(self):
+        source = HAND.read_text(encoding="utf-8")
+        activate_start = source.index("    def activate(self):", source.index("class Dex3_1_Controller"))
+        deactivate_start = source.index("    def deactivate(self):", activate_start)
+        activate = source[activate_start:deactivate_start]
+        deactivate_end = source.index("    def _subscribe_hand_state(self):", deactivate_start)
+        deactivate = source[deactivate_start:deactivate_end]
+
+        self.assertIn("threading.Thread(", activate)
+        self.assertNotIn("Process(", activate)
+        self.assertIn("self.running = False", deactivate)
+        self.assertIn("self.hand_control_process.join(timeout=1.0)", deactivate)
+        self.assertNotIn(".terminate()", deactivate)
+
+        control_start = source.index("    def control_process(", deactivate_end)
+        control_end = source.index("class Dex3_1_Left_JointIndex", control_start)
+        control = source[control_start:control_end]
+        self.assertNotIn("self.running = True", control)
+
     def test_launcher_prepares_arms_before_the_prearm_loop(self):
         source = TELEOP.read_text(encoding="utf-8")
         prearm = source.index("        READY = True")
