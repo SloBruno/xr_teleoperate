@@ -33,14 +33,15 @@ kTopicDex3LeftState = "rt/dex3/left/state"
 kTopicDex3RightState = "rt/dex3/right/state"
 
 Dex3_Open_Pose = np.zeros(Dex3_Num_Motors)
-# Use the Unitree SDK reference grasp midpoints rather than hard limits.
-# Thumb0 stays at zero to avoid lateral rotation; Thumb1/Thumb2 close safely.
+# Keep the validated conservative midpoint targets for index/middle. Thumb0
+# stays neutral; Thumb1/Thumb2 use the Unitree full-grasp targets so the thumb
+# reaches full closure at trigger=1.0.
 Dex3_Left_Closed_Pose = np.array([
-    0.0, 0.163, 0.875,
+    0.0, 1.05, 1.75,
     -0.78539816, -0.87266463, -0.78539816, -0.87266463,
 ])
 Dex3_Right_Closed_Pose = np.array([
-    0.0, -0.154, -0.875,
+    0.0, -1.05, -1.75,
     0.78539816, 0.87266463, 0.78539816, 0.87266463,
 ])
 

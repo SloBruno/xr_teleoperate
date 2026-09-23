@@ -44,10 +44,11 @@ def test_dex3_closed_poses_close_thumb_without_lateral_rotation_and_mirror_finge
     left_closed = assignments["Dex3_Left_Closed_Pose"]
     right_closed = assignments["Dex3_Right_Closed_Pose"]
 
-    # The Unitree Dex3 reference grasp uses mid-range values, never the hard
-    # joint limits. Thumb0 remains centered to prevent lateral rotation.
-    np.testing.assert_allclose(left_closed[:3], [0.0, 0.163, 0.875])
-    np.testing.assert_allclose(right_closed[:3], [0.0, -0.154, -0.875])
+    # Thumb0 remains centered to prevent lateral rotation. Thumb1/Thumb2 use
+    # the Unitree-published full grasp targets; index/middle stay at the
+    # previously validated conservative midpoint targets.
+    np.testing.assert_allclose(left_closed[:3], [0.0, 1.05, 1.75])
+    np.testing.assert_allclose(right_closed[:3], [0.0, -1.05, -1.75])
     np.testing.assert_allclose(left_closed[3:], [-0.78539816, -0.87266463, -0.78539816, -0.87266463])
     np.testing.assert_allclose(right_closed[3:], [0.78539816, 0.87266463, 0.78539816, 0.87266463])
 
