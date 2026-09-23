@@ -24,6 +24,7 @@ from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.quest_controls import joystick_to_locomotion
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
+from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
 from teleop.utils.teleop_status import AsyncStatusFileSink, TeleopStatusMonitor, camera_frame_is_usable
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -45,6 +46,7 @@ RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
 # Serializes r/q lifecycle decisions with the one-way output activation gate.
 LIFECYCLE_LOCK = threading.Lock()
+arm_calibration = None  # G1_29-only controller-to-wrist calibration state.
 #  -------        ---------                -----------                -----------            ---------
 #   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
 #  -------        ---------      |         -----------      |         -----------      |     ---------
@@ -64,6 +66,8 @@ def _request_start_locked():
         logger_mp.warning("[lifecycle] Ignoring start until arm preparation completes.")
         return False
     ARM_REQUEST_TIMESTAMP = time.monotonic()
+    if arm_calibration is not None:
+        arm_calibration.reset_for_start_request(ARM_REQUEST_TIMESTAMP)
     START = True
     return True
 
@@ -260,6 +264,7 @@ if __name__ == '__main__':
         if args.arm == "G1_29":
             arm_ik = G1_29_ArmIK()
             arm_ctrl = G1_29_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+            arm_calibration = ControllerWristCalibrator()
         elif args.arm == "G1_23":
             arm_ik = G1_23_ArmIK()
             arm_ctrl = G1_23_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
@@ -473,6 +478,16 @@ if __name__ == '__main__':
                 and ready_tele_data.controller_sample_timestamp > ARM_REQUEST_TIMESTAMP
                 and controller_sample_is_fresh(ready_tele_data.controller_sample_timestamp)
             ):
+                if args.arm == "G1_29" and not arm_calibration.calibrated:
+                    measured_lr_arm_q = arm_ctrl.get_current_dual_arm_q()
+                    measured_wrist_poses = arm_ik.forward_kinematics(measured_lr_arm_q)
+                    arm_calibration.calibrate(
+                        (ready_tele_data.left_wrist_pose, ready_tele_data.right_wrist_pose),
+                        measured_wrist_poses,
+                        ready_tele_data.controller_sample_timestamp,
+                        ARM_REQUEST_TIMESTAMP,
+                    )
+                    continue
                 break
 
         # The arm writer was activated at launcher-time preparation.  Here r
@@ -611,20 +626,32 @@ if __name__ == '__main__':
             # Only solve new arm targets while the controller poses are fresh.
             # On loss of controller authority, hold the measured joint position
             # with zero feed-forward torque instead of advancing stale IK.
-            if controller_pose_is_fresh:
+            controller_targets = None
+            if args.arm == "G1_29":
+                if arm_calibration.calibrated and controller_pose_is_fresh:
+                    controller_targets = arm_calibration.targets(
+                        (tele_data.left_wrist_pose, tele_data.right_wrist_pose),
+                        tele_data.controller_sample_timestamp,
+                    )
+            elif controller_pose_is_fresh:
+                controller_targets = (tele_data.left_wrist_pose, tele_data.right_wrist_pose)
+
+            if controller_targets is None:
+                sol_q = current_lr_arm_q.copy()
+                sol_tauff = np.zeros_like(current_lr_arm_q)
+            else:
                 time_ik_start = time.time()
                 sol_q, sol_tauff = arm_ik.solve_ik(
-                    tele_data.left_wrist_pose,
-                    tele_data.right_wrist_pose,
+                    controller_targets[0],
+                    controller_targets[1],
                     current_lr_arm_q,
                     current_lr_arm_dq,
                 )
                 time_ik_end = time.time()
                 logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
-            else:
-                sol_q = current_lr_arm_q.copy()
-                sol_tauff = np.zeros_like(current_lr_arm_q)
             if (
+                controller_targets is not None
+                and
                 controller_pose_is_fresh
                 and controller_sample_is_fresh(tele_data.controller_sample_timestamp)
             ):

@@ -55,6 +55,32 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         self.assertLess(ik_call, post_ik_check)
         self.assertLess(post_ik_check, arm_write)
 
+    def test_g1_29_uses_measured_fk_for_per_start_controller_wrist_calibration(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("ControllerWristCalibrator", source)
+        self.assertIn("arm_ik.forward_kinematics(measured_lr_arm_q)", source)
+        self.assertIn("arm_calibration.reset_for_start_request(ARM_REQUEST_TIMESTAMP)", source)
+        self.assertIn("arm_calibration.calibrate(", source)
+
+    def test_arm_ik_is_never_called_until_calibration_has_succeeded(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        ik_call = source.index("arm_ik.solve_ik")
+        calibration_guard = source.index("if arm_calibration.calibrated and controller_pose_is_fresh:")
+        self.assertLess(calibration_guard, ik_call)
+
+    def test_invalid_controller_target_holds_measured_q_without_new_ik_or_arm_write(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("controller_targets = arm_calibration.targets(", source)
+        self.assertIn("sol_q = current_lr_arm_q.copy()", source)
+        self.assertIn("sol_tauff = np.zeros_like(current_lr_arm_q)", source)
+        self.assertIn("if controller_targets is None:", source)
+
+    def test_alternate_arm_profiles_do_not_use_controller_wrist_calibration(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('if args.arm == "G1_29":', source)
+        self.assertIn('if args.arm == "G1_29" and not arm_calibration.calibrated:', source)
+        self.assertIn('elif controller_pose_is_fresh:', source)
+
 
 if __name__ == "__main__":
     unittest.main()

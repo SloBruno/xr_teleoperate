@@ -393,7 +393,8 @@ def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.setattr(sys, "argv", [
-        "teleop_hand_and_arm.py", "--motion", "--input-mode", "hand", "--camera-layout", "head", "--ipc"
+        "teleop_hand_and_arm.py", "--motion", "--input-mode", "hand", "--camera-layout", "head", "--ipc",
+        "--arm", "G1_23"
     ])
     monkeypatch.setattr("builtins.exit", lambda code: None)
 

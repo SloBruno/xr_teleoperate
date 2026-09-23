@@ -250,6 +250,17 @@ class G1_29_ArmIK:
         robot_right_pose[:3, 3] *= scale_factor
         return robot_left_pose, robot_right_pose
 
+    def forward_kinematics(self, current_lr_arm_motor_q):
+        """Return measured left/right wrist transforms for the 14 arm joints."""
+        q = np.asarray(current_lr_arm_motor_q, dtype=float)
+        if q.shape != (14,) or not np.all(np.isfinite(q)):
+            raise ValueError("G1_29 arm FK requires 14 finite measured arm joints")
+        pin.framesForwardKinematics(self.reduced_robot.model, self.reduced_robot.data, q)
+        return (
+            self.reduced_robot.data.oMf[self.L_hand_id].homogeneous.copy(),
+            self.reduced_robot.data.oMf[self.R_hand_id].homogeneous.copy(),
+        )
+
     def solve_ik(self, left_wrist, right_wrist, current_lr_arm_motor_q = None, current_lr_arm_motor_dq = None):
         if current_lr_arm_motor_q is not None:
             self.init_data = current_lr_arm_motor_q
