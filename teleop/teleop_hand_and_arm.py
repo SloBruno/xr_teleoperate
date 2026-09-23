@@ -778,7 +778,10 @@ if __name__ == '__main__':
             try:
                 # Return to the original all-zero preparation pose before
                 # releasing arm DDS output.
-                arm_ctrl.ctrl_dual_arm_go_home()
+                if args.arm == "G1_29":
+                    arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)
+                else:
+                    arm_ctrl.ctrl_dual_arm_go_home()
                 arm_ctrl.deactivate()
             except Exception as e:
                 logger_mp.error(f"Failed to deactivate arm output: {e}")

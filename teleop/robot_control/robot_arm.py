@@ -248,8 +248,8 @@ class G1_29_ArmController:
         '''Return current state dq of the left and right arm motors.'''
         return np.array([self.lowstate_buffer.GetData().motor_state[id].dq for id in G1_29_JointArmIndex])
 
-    def ctrl_dual_arm_go_home(self):
-        '''Move both the left and right arms of the robot to their home position by setting the target joint angles (q) and torques (tau) to zero.'''
+    def ctrl_dual_arm_go_home(self, release_motion_authority=False):
+        '''Move both arms home; release rt/arm_sdk authority only during shutdown.'''
         logger_mp.info("[G1_29_ArmController] ctrl_dual_arm_go_home start...")
         max_attempts = 100
         current_attempts = 0
@@ -260,7 +260,7 @@ class G1_29_ArmController:
         while current_attempts < max_attempts:
             current_q = self.get_current_dual_arm_q()
             if np.all(np.abs(current_q) <= tolerance):
-                if self.motion_mode:
+                if self.motion_mode and release_motion_authority:
                     for weight in np.linspace(1, 0, num=101):
                         self.msg.motor_cmd[G1_29_JointIndex.kNotUsedJoint0].q = weight;
                         time.sleep(0.02)

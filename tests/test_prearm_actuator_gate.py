@@ -51,10 +51,16 @@ class PrearmActuatorGateTest(unittest.TestCase):
         self.assertIn("preparation_confirmed = arm_ctrl.ctrl_dual_arm_go_home()", prepare)
         self.assertIn("if args.arm == \"G1_29\" and not preparation_confirmed:", prepare)
         self.assertLess(prepare.index("if args.arm == \"G1_29\" and not preparation_confirmed:"), prepare.index("PREPARATION_COMPLETE = True"))
-        home = ARM.read_text(encoding="utf-8")[ARM.read_text(encoding="utf-8").index("    def ctrl_dual_arm_go_home(self):"):ARM.read_text(encoding="utf-8").index("    def speed_gradual_max", ARM.read_text(encoding="utf-8").index("    def ctrl_dual_arm_go_home(self):"))]
+        arm_source = ARM.read_text(encoding="utf-8")
+        home_start = arm_source.index("    def ctrl_dual_arm_go_home(self, release_motion_authority=False):")
+        home = arm_source[home_start:arm_source.index("    def speed_gradual_max", home_start)]
+        self.assertIn("if self.motion_mode and release_motion_authority:", home)
         self.assertIn("return True", home)
         self.assertIn("return False", home)
         self.assertIn("np.all(np.abs(current_q) <= tolerance)", home)
+
+        shutdown = source[source.index("    finally:"):]
+        self.assertIn("arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)", shutdown)
 
     def test_startup_inputs_are_serialized_with_launcher_preparation(self):
         source = TELEOP.read_text(encoding="utf-8")
