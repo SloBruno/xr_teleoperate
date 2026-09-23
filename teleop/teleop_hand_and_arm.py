@@ -366,15 +366,18 @@ if __name__ == '__main__':
             if STOP:
                 logger_mp.info("Launcher cancelled before arm preparation.")
                 raise KeyboardInterrupt
-            arm_ctrl.activate()
-            outputs_activated = True
-            preparation_confirmed = arm_ctrl.ctrl_dual_arm_go_home()
-            # G1_29 reports confirmed all-zero arrival; preserve the original
-            # void-return behavior of the other selectable arm profiles.
-            if args.arm == "G1_29" and not preparation_confirmed:
-                arm_ctrl.deactivate()
-                outputs_activated = False
-                raise RuntimeError("Arm preparation pose was not reached; refusing tracking.")
+            # G1_29 is the only lifecycle-gated arm profile: activating the arm
+            # output at launcher time and confirming all-zero arrival before r.
+            # The other selectable arm profiles publish continuously from
+            # construction, so no activate()/deactivate() call is made for them.
+            if args.arm == "G1_29":
+                arm_ctrl.activate()
+                outputs_activated = True
+                preparation_confirmed = arm_ctrl.ctrl_dual_arm_go_home()
+                if not preparation_confirmed:
+                    arm_ctrl.deactivate()
+                    outputs_activated = False
+                    raise RuntimeError("Arm preparation pose was not reached; refusing tracking.")
             PREPARATION_COMPLETE = True
 
         # Initialize before the pre-arm loop: some display modes intentionally do
@@ -773,18 +776,23 @@ if __name__ == '__main__':
                 hand_ctrl.deactivate()
             except Exception as e:
                 logger_mp.error(f"Failed to deactivate Dex3 output: {e}")
-        if outputs_activated:
-            try:
-                # Return to the original all-zero preparation pose before
-                # releasing arm DDS output.
-                if args.arm == "G1_29":
+        if args.arm == "G1_29":
+            if outputs_activated:
+                try:
+                    # Return to the original all-zero preparation pose before
+                    # releasing arm DDS output.
                     arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)
-                else:
-                    arm_ctrl.ctrl_dual_arm_go_home()
-                arm_ctrl.deactivate()
+                    arm_ctrl.deactivate()
+                except Exception as e:
+                    logger_mp.error(f"Failed to deactivate arm output: {e}")
+                logger_mp.info("Arm preparation output ended; exiting.")
+        else:
+            # Legacy arm profiles publish continuously from construction;
+            # preserve the previous shutdown behavior of returning home.
+            try:
+                arm_ctrl.ctrl_dual_arm_go_home()
             except Exception as e:
-                logger_mp.error(f"Failed to deactivate arm output: {e}")
-            logger_mp.info("Arm preparation output ended; exiting.")
+                logger_mp.error(f"Failed to ctrl_dual_arm_go_home: {e}")
         try:
             if args.ipc:
                 ipc_server.stop()

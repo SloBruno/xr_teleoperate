@@ -49,8 +49,10 @@ class PrearmActuatorGateTest(unittest.TestCase):
         source = TELEOP.read_text(encoding="utf-8")
         prepare = source[source.index("Match the original launcher behavior"):source.index("# Initialize before the pre-arm loop")]
         self.assertIn("preparation_confirmed = arm_ctrl.ctrl_dual_arm_go_home()", prepare)
-        self.assertIn("if args.arm == \"G1_29\" and not preparation_confirmed:", prepare)
-        self.assertLess(prepare.index("if args.arm == \"G1_29\" and not preparation_confirmed:"), prepare.index("PREPARATION_COMPLETE = True"))
+        self.assertIn('if args.arm == "G1_29":', prepare)
+        self.assertLess(prepare.index('if args.arm == "G1_29":'), prepare.index("arm_ctrl.activate()"))
+        self.assertIn("if not preparation_confirmed:", prepare)
+        self.assertLess(prepare.index("if not preparation_confirmed:"), prepare.index("PREPARATION_COMPLETE = True"))
         arm_source = ARM.read_text(encoding="utf-8")
         home_start = arm_source.index("    def ctrl_dual_arm_go_home(self, release_motion_authority=False):")
         home = arm_source[home_start:arm_source.index("    def speed_gradual_max", home_start)]
@@ -95,9 +97,13 @@ class PrearmActuatorGateTest(unittest.TestCase):
     def test_q_returns_arms_to_prepared_pose_before_deactivation(self):
         source = TELEOP.read_text(encoding="utf-8")
         finally_block = source[source.index("    finally:"):]
-        prepare = finally_block.index("arm_ctrl.ctrl_dual_arm_go_home()")
-        deactivate = finally_block.index("arm_ctrl.deactivate()")
-        self.assertLess(prepare, deactivate)
+        g1_29_shutdown = finally_block[finally_block.index('if args.arm == "G1_29":'):]
+        # In the lifecycle-gated path, the arms return to the prepared pose before
+        # the arm DDS output is released.
+        self.assertLess(
+            g1_29_shutdown.index("arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)"),
+            g1_29_shutdown.index("arm_ctrl.deactivate()"),
+        )
 
     def test_prearm_exit_never_requests_arm_home_motion(self):
         source = TELEOP.read_text(encoding="utf-8")
@@ -129,6 +135,56 @@ class PrearmActuatorGateTest(unittest.TestCase):
         self.assertIn("if not STOP and not hand_outputs_activated:", dex3_gate)
         on_press = source[source.index("def on_press"):source.index("def get_state")]
         self.assertEqual(on_press.count("with LIFECYCLE_LOCK:"), 2)
+    def test_only_g1_29_arm_controller_implements_lifecycle_gate_methods(self):
+        tree = ast.parse(ARM.read_text(encoding="utf-8"))
+        lifecycle_methods = ("activate", "deactivate")
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            methods = {m.name for m in node.body if isinstance(m, ast.FunctionDef)}
+            for method in lifecycle_methods:
+                self.assertEqual(
+                    method in methods,
+                    node.name == "G1_29_ArmController",
+                    f"{node.name} must {'define' if node.name == 'G1_29_ArmController' else 'not define'} {method}",
+                )
+
+    def test_alternate_arm_profiles_skip_the_g1_29_lifecycle_gate(self):
+        source = TELEOP.read_text(encoding="utf-8")
+        prep = source[source.index("Match the original launcher behavior"):source.index("# Initialize before the pre-arm loop")]
+        g1_29_guard = prep.index('if args.arm == "G1_29":')
+        activate = prep.index("arm_ctrl.activate()")
+        # activate()/deactivate() belong to the G1_29 lifecycle contract only;
+        # they must never run for the legacy arm profiles.
+        self.assertLess(g1_29_guard, activate)
+        self.assertNotIn("arm_ctrl.activate()", prep[:g1_29_guard])
+        self.assertNotIn("arm_ctrl.deactivate()", prep[:g1_29_guard])
+
+    def test_legacy_arm_profiles_retain_shutdown_home_motion(self):
+        source = TELEOP.read_text(encoding="utf-8")
+        finally_block = source[source.index("    finally:"):]
+        legacy_home = finally_block.index("arm_ctrl.ctrl_dual_arm_go_home()")
+        # The legacy shutdown path restores the arms home without touching the
+        # G1_29-only activate()/deactivate() methods.
+        self.assertIn("arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)", finally_block)
+        self.assertGreater(legacy_home, finally_block.index('if args.arm == "G1_29":'))
+        self.assertLess(finally_block.index("arm_ctrl.deactivate()"), legacy_home)
+
+    def test_launcher_keeps_every_arm_profile_selectable(self):
+        source = TELEOP.read_text(encoding="utf-8")
+        profiles = [
+            ("G1_29", "G1_29_ArmController"),
+            ("G1_23", "G1_23_ArmController"),
+            ("H1_2", "H1_2_ArmController"),
+            ("H1", "H1_ArmController"),
+            ("H2", "H2_ArmController"),
+        ]
+        for index, (flag, controller) in enumerate(profiles):
+            guard = f'if args.arm == "{flag}":' if index == 0 else f'elif args.arm == "{flag}":'
+            self.assertIn(guard, source)
+            self.assertIn(f"arm_ctrl = {controller}(", source)
+            self.assertLess(source.index(guard), source.index(f"arm_ctrl = {controller}("))
+
     def test_activation_rejects_stale_lowstate_and_q_deactivates_outputs(self):
         arm = ARM.read_text(encoding="utf-8")
         teleop = TELEOP.read_text(encoding="utf-8")
