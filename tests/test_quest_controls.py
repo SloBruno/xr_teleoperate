@@ -28,6 +28,19 @@ def test_joystick_to_locomotion_maps_normalized_sticks(left_xy, right_xy, expect
     assert joystick_to_locomotion(left_xy, right_xy) == expected
 
 
+def test_joystick_small_movements_use_deadzone_and_precision_curve():
+    assert joystick_to_locomotion((0.10, -0.10), (0.10, 0.0)) == (0.0, 0.0, 0.0)
+
+    shaped_half = ((0.50 - 0.12) / (1.0 - 0.12)) ** 3
+    forward, lateral, yaw = joystick_to_locomotion((0.50, -0.50), (0.50, 0.0))
+    assert forward == pytest.approx(shaped_half)
+    assert lateral == pytest.approx(-shaped_half)
+    assert yaw == pytest.approx(-shaped_half)
+
+    # Precision shaping must not cap the robot's native full-stick command.
+    assert joystick_to_locomotion((1.0, -1.0), (1.0, 0.0)) == (1.0, -1.0, -1.0)
+
+
 def test_joystick_to_locomotion_clamps_finite_values():
     assert joystick_to_locomotion((2.0, -2.0), (1.5, -1.5)) == (1.0, -1.0, -1.0)
 
@@ -46,16 +59,23 @@ def test_joystick_to_locomotion_handles_nonfinite_values(left_xy, right_xy):
     assert all(-1.0 <= value <= 1.0 for value in result)
 
 
+def _expected_precision(value):
+    if not math.isfinite(value) or abs(value) <= 0.12:
+        return 0.0
+    magnitude = (min(abs(value), 1.0) - 0.12) / (1.0 - 0.12)
+    return math.copysign(magnitude ** 3, value)
+
+
 @pytest.mark.parametrize(
     ("left_xy", "right_xy", "expected"),
     [
-        ((math.nan, 0.25), (0.5, 0.0), (-0.25, 0.0, -0.5)),
-        ((0.25, math.inf), (0.5, 0.0), (0.0, -0.25, -0.5)),
-        ((0.25, -0.5), (-math.inf, 0.0), (0.5, -0.25, 0.0)),
+        ((math.nan, 0.25), (0.5, 0.0), (-_expected_precision(0.25), 0.0, -_expected_precision(0.5))),
+        ((0.25, math.inf), (0.5, 0.0), (0.0, -_expected_precision(0.25), -_expected_precision(0.5))),
+        ((0.25, -0.5), (-math.inf, 0.0), (_expected_precision(0.5), -_expected_precision(0.25), 0.0)),
     ],
 )
 def test_each_nonfinite_stick_axis_has_exact_zero_locomotion_contribution(left_xy, right_xy, expected):
-    assert joystick_to_locomotion(left_xy, right_xy) == expected
+    assert joystick_to_locomotion(left_xy, right_xy) == pytest.approx(expected)
 
 
 def test_loco_wrapper_passes_exact_native_tuple_to_client(monkeypatch):
