@@ -31,7 +31,9 @@ def pose(x=0.0, y=0.0, z=0.0, angle=0.0):
 # Pinocchio operational-frame +[0.05, 0, 0] offset in robot_arm_ik.py.
 G1_ZERO_FK = (
     pose(0.24977428, 0.14865212, 0.09523008),
-    pose(0.24977428, -0.14865212, 0.09523008),
+    # Right shoulder origin is y=-0.10021 in the URDF (left is +0.10022),
+    # so the independently composed pelvis-root FK is 10 micrometres lower.
+    pose(0.24977428, -0.14866212, 0.09523008),
 )
 
 
@@ -71,7 +73,7 @@ def test_independently_derived_all_zero_fk_reference_is_calibratable_with_tolera
     )
     first = calibrator.consume_first_target()
     np.testing.assert_allclose(first[0][:3, 3], [0.2498, 0.1487, 0.0952], atol=5e-4)
-    np.testing.assert_allclose(first[1][:3, 3], [0.2498, -0.1487, 0.0952], atol=5e-4)
+    np.testing.assert_allclose(first[1][:3, 3], [0.24977428, -0.14866212, 0.09523008], atol=1e-9)
 
 
 def test_shoulder_relative_workspace_rejects_forward_lateral_vertical_and_accepts_drift_until_limit():

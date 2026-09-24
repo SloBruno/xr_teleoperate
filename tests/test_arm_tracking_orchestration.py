@@ -7,7 +7,10 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
-from teleop.utils.arm_tracking_orchestration import run_arm_tracking_cycle
+from teleop.utils.arm_tracking_orchestration import (
+    arm_recording_actions,
+    run_arm_tracking_cycle,
+)
 
 
 class FakeArm:
@@ -82,6 +85,12 @@ def test_calibrated_first_target_solves_then_publishes():
     assert result.target_accepted
     assert len(ik.calls) == 1
     np.testing.assert_allclose(arm.commands[0][0], 9.0)
+    assert result.requested_q.tolist() == [9.0] * 14
+    assert result.requested_tauff.tolist() == [3.0] * 14
+    assert result.selected_q.tolist() == [9.0] * 14
+    assert result.selected_tauff.tolist() == [3.0] * 14
+    assert result.hold is False
+    assert arm_recording_actions(result)["right_arm"]["qpos"] == [9.0] * 7
 
 
 def test_stop_race_holds_measured_pose_and_deactivates_without_publishing_ik():
@@ -90,6 +99,10 @@ def test_stop_race_holds_measured_pose_and_deactivates_without_publishing_ik():
     assert not ik.calls
     np.testing.assert_allclose(arm.commands[0][0], arm.measured_q)
     assert arm.deactivated
+    assert result.hold is True
+    assert result.selected_q.tolist() == arm.measured_q.tolist()
+    assert result.selected_tauff.tolist() == [0.0] * 14
+    assert arm_recording_actions(result)["left_arm"]["qpos"] == arm.measured_q[:7].tolist()
 
 
 def test_rejected_workspace_target_holds_without_ik():
@@ -97,6 +110,8 @@ def test_rejected_workspace_target_holds_without_ik():
     assert not result.target_accepted
     assert not ik.calls
     np.testing.assert_allclose(arm.commands[0][0], arm.measured_q)
+    assert result.hold is True
+    np.testing.assert_allclose(result.selected_q, arm.measured_q)
 
 
 def test_stale_and_invalid_targets_hold_without_ik():
@@ -106,3 +121,24 @@ def test_stale_and_invalid_targets_hold_without_ik():
     invalid, invalid_arm, invalid_ik = run(calibrator=SimpleNamespace(calibrated=False))
     assert not invalid.target_accepted
     assert not invalid_ik.calls
+    assert stale.hold and invalid.hold
+    np.testing.assert_allclose(stale.selected_q, stale_arm.measured_q)
+    np.testing.assert_allclose(invalid.selected_q, invalid_arm.measured_q)
+
+
+def test_record_enabled_runtime_flow_uses_each_current_cycle_command_decision():
+    first, first_arm, _ = run(first_target=poses())
+    fresh, fresh_arm, _ = run(candidate_targets=poses())
+    stale, stale_arm, _ = run(sample_timestamp=1.0, now=10.1)
+    rejected, rejected_arm, _ = run(calibrator=FakeCalibrator(None))
+    stopped, stopped_arm, _ = run(is_stopped=lambda: True)
+
+    recorded = [
+        arm_recording_actions(cycle)
+        for cycle in (first, fresh, stale, rejected, stopped)
+    ]
+    np.testing.assert_allclose(recorded[0]["left_arm"]["qpos"], [9.0] * 7)
+    np.testing.assert_allclose(recorded[1]["left_arm"]["qpos"], [9.0] * 7)
+    np.testing.assert_allclose(recorded[2]["left_arm"]["qpos"], stale_arm.measured_q[:7])
+    np.testing.assert_allclose(recorded[3]["left_arm"]["qpos"], rejected_arm.measured_q[:7])
+    np.testing.assert_allclose(recorded[4]["left_arm"]["qpos"], stopped_arm.measured_q[:7])

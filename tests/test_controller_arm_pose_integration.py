@@ -44,7 +44,7 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         cycle = source.index("run_arm_tracking_cycle(", state_read)
         self.assertLess(state_read, cycle)
         self.assertEqual(helper.count("controller_sample_is_fresh(sample_timestamp, now)"), 2)
-        self.assertIn("publish_if_authorized(", helper)
+        self.assertIn("publish_arm_command(", helper)
 
     def test_g1_29_uses_measured_fk_for_per_start_controller_wrist_calibration(self):
         source = SCRIPT.read_text(encoding="utf-8")

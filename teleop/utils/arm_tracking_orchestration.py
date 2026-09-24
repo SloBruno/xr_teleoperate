@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from teleop.utils.arm_command_gate import publish_if_authorized
+from teleop.utils.arm_command_gate import publish_arm_command
 from teleop.utils.quest_safety import controller_sample_is_fresh
 
 
@@ -12,6 +12,11 @@ from teleop.utils.quest_safety import controller_sample_is_fresh
 class ArmTrackingCycleResult:
     target_accepted: bool
     published: bool
+    hold: bool
+    requested_q: object
+    requested_tauff: object
+    selected_q: object
+    selected_tauff: object
     target: object = None
 
 
@@ -33,7 +38,7 @@ def run_arm_tracking_cycle(
 ):
     """Resolve one target, solve only accepted fresh targets, then gate output.
 
-    The final lifecycle/freshness gate remains in ``publish_if_authorized``;
+    The final lifecycle/freshness gate remains in ``publish_arm_command``;
     this helper only makes the pre-gate flow deterministic and injectable.
     """
     sample_fresh = controller_sample_is_fresh(sample_timestamp, now)
@@ -59,7 +64,7 @@ def run_arm_tracking_cycle(
         )
 
     final_sample_fresh = sample_fresh and controller_sample_is_fresh(sample_timestamp, now)
-    published = publish_if_authorized(
+    command = publish_arm_command(
         arm_ctrl,
         sol_q,
         sol_tauff,
@@ -69,4 +74,28 @@ def run_arm_tracking_cycle(
         is_started=is_started,
         is_stopped=is_stopped,
     )
-    return ArmTrackingCycleResult(target is not None, published, target)
+    return ArmTrackingCycleResult(
+        target_accepted=target is not None,
+        published=command.published,
+        hold=command.hold,
+        requested_q=np.asarray(sol_q).copy(),
+        requested_tauff=np.asarray(sol_tauff).copy(),
+        selected_q=command.selected_q,
+        selected_tauff=command.selected_tauff,
+        target=target,
+    )
+
+
+def arm_recording_actions(cycle: ArmTrackingCycleResult):
+    """Build arm actions from this cycle's selected command.
+
+    ``selected_*`` is the command decision passed to the actuator, including
+    a measured-q/zero-torque hold. It is pre-controller-limit telemetry;
+    post-limit snapshots can be added separately without changing this record.
+    """
+    left_q = cycle.selected_q[:7].tolist()
+    right_q = cycle.selected_q[-7:].tolist()
+    return {
+        "left_arm": {"qpos": left_q, "qvel": [], "torque": []},
+        "right_arm": {"qpos": right_q, "qvel": [], "torque": []},
+    }
