@@ -4,6 +4,7 @@ import unittest
 
 
 SCRIPT = Path(__file__).parents[1] / "teleop" / "teleop_hand_and_arm.py"
+IK_SCRIPT = Path(__file__).parents[1] / "teleop" / "robot_control" / "robot_arm_ik.py"
 
 
 class ControllerArmPoseIntegrationTest(unittest.TestCase):
@@ -41,7 +42,7 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         source = SCRIPT.read_text(encoding="utf-8")
         state_read = source.index("current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()")
         ik_call = source.index("arm_ik.solve_ik")
-        arm_write = source.index("arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)")
+        arm_write = source.index("_publish_arm_target_if_authorized(", ik_call)
         pre_ik_check = source.index(
             "controller_pose_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)",
             state_read,
@@ -80,6 +81,40 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         self.assertIn('if args.arm == "G1_29":', source)
         self.assertIn('if args.arm == "G1_29" and not arm_calibration.calibrated:', source)
         self.assertIn('elif controller_pose_is_fresh:', source)
+
+    def test_prearm_sample_is_carried_into_first_tracking_command(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        calibrate = source.index("calibrated = arm_calibration.calibrate(")
+        consume = source.index("first_controller_targets = arm_calibration.consume_first_target()", calibrate)
+        first_break = source.index("break", consume)
+        tracking_loop = source.index("# main loop. robot start to follow VR user's motion")
+        first_use = source.index("controller_targets = first_controller_targets", tracking_loop)
+        self.assertLess(calibrate, consume)
+        self.assertLess(consume, first_break)
+        self.assertLess(first_break, first_use)
+        self.assertIn("if first_controller_targets is not None:", source)
+
+    def test_fk_order_is_static_checked_when_pinocchio_is_unavailable(self):
+        source = IK_SCRIPT.read_text(encoding="utf-8")
+        fk = source[source.index("def forward_kinematics"):source.index("def solve_ik")]
+        self.assertLess(fk.index("self.L_hand_id"), fk.index("self.R_hand_id"))
+        self.assertIn("framesForwardKinematics", fk)
+        urdf = (Path(__file__).parents[1] / "assets" / "g1" / "g1_body29_hand14.urdf").read_text(encoding="utf-8")
+        self.assertLess(urdf.index('name="left_wrist_yaw_joint"'), urdf.index('name="right_wrist_yaw_joint"'))
+
+    def test_final_arm_publication_is_serialized_and_stop_holds_measured_q(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("_publish_arm_target_if_authorized", source)
+        self.assertIn("lifecycle_lock=LIFECYCLE_LOCK", source)
+        self.assertIn("is_stopped=lambda: STOP", source)
+        self.assertIn("np.zeros_like(current_lr_arm_q)", source)
+        self.assertNotIn("arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)", source)
+
+    def test_rejected_target_path_does_not_publish_ik_solution(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        reject_path = source[source.index("if controller_targets is None:"):source.index("# record data")]
+        self.assertNotIn("ctrl_dual_arm(sol_q", reject_path)
+        self.assertIn("controller_targets is not None", reject_path)
 
 
 if __name__ == "__main__":

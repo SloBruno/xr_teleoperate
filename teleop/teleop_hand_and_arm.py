@@ -25,6 +25,7 @@ from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.quest_controls import joystick_to_locomotion
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
 from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
+from teleop.utils.arm_command_gate import publish_if_authorized
 from teleop.utils.teleop_status import AsyncStatusFileSink, TeleopStatusMonitor, camera_frame_is_usable
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -105,6 +106,24 @@ def poll_controller_lifecycle(controller_sample, right_a_was_pressed, right_b_wa
         if right_b_pressed and not right_b_was_pressed:
             _request_stop_locked()
     return right_a_pressed, right_b_pressed
+
+
+def _publish_arm_target_if_authorized(arm_ctrl, q_target, tauff_target, target_accepted, sample_fresh):
+    """Serialize final lifecycle authority and arm target publication.
+
+    IK runs before this lock. STOP wins the final check and causes a measured-q
+    zero-feedforward hold followed by deactivation, never a final IK command.
+    """
+    return publish_if_authorized(
+        arm_ctrl,
+        q_target,
+        tauff_target,
+        target_accepted=target_accepted,
+        sample_fresh=sample_fresh,
+        lifecycle_lock=LIFECYCLE_LOCK,
+        is_started=lambda: START,
+        is_stopped=lambda: STOP,
+    )
 
 def get_state() -> dict:
     """Return current heartbeat state"""
@@ -428,6 +447,7 @@ if __name__ == '__main__':
         READY = True                  # now ready to (1) enter START state
         right_a_was_pressed = False
         right_b_was_pressed = False
+        first_controller_targets = None
         # Pressing r is only an arm request. Keep the robot pre-armed until a
         # current controller-pose sample exists; zero-initialized pose buffers
         # must never be passed to IK.
@@ -481,12 +501,16 @@ if __name__ == '__main__':
                 if args.arm == "G1_29" and not arm_calibration.calibrated:
                     measured_lr_arm_q = arm_ctrl.get_current_dual_arm_q()
                     measured_wrist_poses = arm_ik.forward_kinematics(measured_lr_arm_q)
-                    arm_calibration.calibrate(
+                    calibrated = arm_calibration.calibrate(
                         (ready_tele_data.left_wrist_pose, ready_tele_data.right_wrist_pose),
                         measured_wrist_poses,
                         ready_tele_data.controller_sample_timestamp,
                         ARM_REQUEST_TIMESTAMP,
                     )
+                    if calibrated:
+                        first_controller_targets = arm_calibration.consume_first_target()
+                        if first_controller_targets is not None:
+                            break
                     continue
                 break
 
@@ -628,7 +652,10 @@ if __name__ == '__main__':
             # with zero feed-forward torque instead of advancing stale IK.
             controller_targets = None
             if args.arm == "G1_29":
-                if arm_calibration.calibrated and controller_pose_is_fresh:
+                if first_controller_targets is not None:
+                    controller_targets = first_controller_targets
+                    first_controller_targets = None
+                elif arm_calibration.calibrated and controller_pose_is_fresh:
                     controller_targets = arm_calibration.targets(
                         (tele_data.left_wrist_pose, tele_data.right_wrist_pose),
                         tele_data.controller_sample_timestamp,
@@ -649,20 +676,17 @@ if __name__ == '__main__':
                 )
                 time_ik_end = time.time()
                 logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
-            if (
-                controller_targets is not None
-                and
+            final_sample_fresh = (
                 controller_pose_is_fresh
                 and controller_sample_is_fresh(tele_data.controller_sample_timestamp)
-            ):
-                arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
-            else:
-                # The sample expired during IK; discard its target and hold the
-                # most recently measured arm position instead.
-                arm_ctrl.ctrl_dual_arm(
-                    arm_ctrl.get_current_dual_arm_q().copy(),
-                    np.zeros_like(current_lr_arm_q),
-                )
+            )
+            _publish_arm_target_if_authorized(
+                arm_ctrl,
+                sol_q,
+                sol_tauff,
+                target_accepted=controller_targets is not None,
+                sample_fresh=final_sample_fresh,
+            )
 
             # record data
             if args.record:

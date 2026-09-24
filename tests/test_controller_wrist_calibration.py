@@ -101,6 +101,53 @@ def test_jump_and_out_of_workspace_targets_are_rejected_and_never_returned():
     assert calibrator.targets((pose(1.0, 0.0, 0.0, math.pi), pose(-1.0)), 10.22, 10.22) is None
 
 
+def test_absolute_robot_waist_workspace_rejection_is_distinct_from_sample_jump_rejection():
+    api = calibration_api()
+    calibrator = api.ControllerWristCalibrator()
+    controllers = (pose(1.0), pose(-1.0))
+    measured = (pose(0.40, 0.20, 0.70), pose(0.40, -0.20, 0.70))
+    assert calibrator.calibrate(controllers, measured, 10.1, 10.0, 10.1)
+
+    # A small controller step produces a target beyond the conservative G1
+    # waist-frame x envelope, so this is not a jump rejection.
+    assert calibrator.targets((pose(1.10), pose(-1.0)), 10.2, 10.2) is None
+
+    calibrator = api.ControllerWristCalibrator()
+    assert calibrator.calibrate(controllers, measured, 10.1, 10.0, 10.1)
+    # The target stays in the absolute envelope, but the controller sample
+    # itself jumps too far and must be rejected independently.
+    assert calibrator.targets((pose(1.0, 0.0, 0.0, math.radians(50.0)), pose(-1.0)), 10.2, 10.2) is None
+
+
+def test_slow_cumulative_drift_eventually_hits_absolute_envelope():
+    api = calibration_api()
+    calibrator = api.ControllerWristCalibrator()
+    measured = (pose(0.40, 0.20, 0.70), pose(0.40, -0.20, 0.70))
+    assert calibrator.calibrate((pose(1.0), pose(-1.0)), measured, 10.1, 10.0, 10.1)
+
+    accepted = 0
+    for index in range(1, 20):
+        x = 1.0 + index * 0.02
+        result = calibrator.targets((pose(x), pose(-1.0)), 10.1 + index / 10, 10.1 + index / 10)
+        if result is None:
+            break
+        accepted += 1
+    assert accepted > 1
+    assert result is None
+
+
+def test_calibration_preserves_and_consumes_exact_first_measured_target():
+    api = calibration_api()
+    calibrator = api.ControllerWristCalibrator()
+    measured = (pose(0.40, 0.20, 0.70), pose(0.40, -0.20, 0.70))
+    sample = (pose(1.0), pose(-1.0))
+    assert calibrator.calibrate(sample, measured, 10.1, 10.0, 10.1)
+    first = calibrator.consume_first_target()
+    assert np.array_equal(first[0], measured[0])
+    assert np.array_equal(first[1], measured[1])
+    assert calibrator.consume_first_target() is None
+
+
 def test_each_new_start_request_resets_calibration():
     api = calibration_api()
     calibrator = api.ControllerWristCalibrator()
