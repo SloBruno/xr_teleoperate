@@ -79,7 +79,7 @@ ensure_teleimager() {
     (
         cd "$teleimager_dir"
         setsid nohup "$teleimager_python" -s -m teleimager.image_server --rs --no-affinity \
-            >>"$teleimager_log" 2>&1 < /dev/null &
+            >>"$teleimager_log" 2>&1 < /dev/null 9>&- &
         echo "$!" >"$teleimager_pid_file"
     )
 

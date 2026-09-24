@@ -32,6 +32,10 @@ class G1QuestDex3LauncherTest(unittest.TestCase):
         self.assertIn("/home/unitree/.local/state/xr_teleoperate", source)
         self.assertNotIn("trap", source)
 
+    def test_teleimager_child_does_not_inherit_launcher_lock_fd(self):
+        source = LAUNCHER.read_text(encoding="utf-8")
+        self.assertIn('2>&1 < /dev/null 9>&- &', source)
+
     def test_health_check_requires_expected_ports_and_real_bgr_frames(self):
         source = LAUNCHER.read_text(encoding="utf-8")
         for port in ("60000", "55555", "55556"):
