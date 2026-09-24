@@ -17,6 +17,30 @@ import numpy as np
 from .quest_safety import controller_sample_is_fresh
 
 
+class _FrozenMappingSnapshot(tuple):
+    """Immutable mapping snapshot thawed only by the writer thread."""
+
+
+def _freeze_payload(value: object) -> object:
+    if isinstance(value, Mapping):
+        return _FrozenMappingSnapshot(
+            (key, _freeze_payload(item)) for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_payload(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return tuple(_freeze_payload(item) for item in value)
+    return value
+
+
+def _thaw_payload(value: object) -> object:
+    if isinstance(value, _FrozenMappingSnapshot):
+        return {key: _thaw_payload(item) for key, item in value}
+    if isinstance(value, tuple):
+        return [_thaw_payload(item) for item in value]
+    return value
+
+
 def _finite_timestamp(value: float) -> float | None:
     try:
         value = float(value)
@@ -76,9 +100,11 @@ def _utc_timestamp(timestamp: float) -> str:
     ).replace("+00:00", "Z")
 
 
-def build_lifecycle_event(event: str, *, timestamp: float, timestamp_monotonic: float) -> dict:
+def build_lifecycle_event(
+    event: str, *, timestamp: float, timestamp_monotonic: float, cause: str | None = None
+) -> dict:
     """Build a lifecycle snapshot without JSON or filesystem work."""
-    return {
+    record = {
         "schema_version": 1,
         "event": str(event),
         "timestamp_utc": _utc_timestamp(timestamp),
@@ -88,12 +114,15 @@ def build_lifecycle_event(event: str, *, timestamp: float, timestamp_monotonic: 
             "timestamp_monotonic": "monotonic",
         },
     }
+    if cause is not None:
+        record["cause"] = str(cause)
+    return record
 
 
 def build_pose_record(
     *,
     timestamp: float,
-    timestamp_monotonic: float | None = None,
+    timestamp_monotonic: float,
     lifecycle: str,
     controller_sample_timestamp: float,
     left_wrist_pose: object,
@@ -103,21 +132,47 @@ def build_pose_record(
     dex3_measured_q: object = None,
     dex3_commanded_q: object = None,
     dex3_configured: bool = False,
+    dex3_sample_metadata: Mapping[str, Mapping[str, object]] | None = None,
     drop_count: int = 0,
     now: float | None = None,
 ) -> dict:
     """Build a serializable snapshot without doing JSON or filesystem I/O."""
+    monotonic_timestamp = _finite_timestamp(timestamp_monotonic)
+    if monotonic_timestamp is None:
+        raise ValueError("timestamp_monotonic must be a finite positive monotonic timestamp")
     sample_timestamp = _finite_timestamp(controller_sample_timestamp)
-    freshness_now = timestamp if now is None else now
-    dex3_measured = _split_dex3(_vector_or_none(dex3_measured_q, expected_size=14))
-    dex3_commanded = _split_dex3(_vector_or_none(dex3_commanded_q, expected_size=14))
-    dex3_available = dex3_measured_q is not None or dex3_commanded_q is not None
-    dex3_reason = (
-        "dex3_sample_available" if dex3_available
-        else "dex3_configured_no_sample" if dex3_configured
-        else "dex3_not_configured"
-    )
-    monotonic_timestamp = timestamp if timestamp_monotonic is None else timestamp_monotonic
+    freshness_now = monotonic_timestamp if now is None else now
+    measured_values = _split_dex3(_vector_or_none(dex3_measured_q, expected_size=14))
+    commanded_values = _split_dex3(_vector_or_none(dex3_commanded_q, expected_size=14))
+    dex3_sample_metadata = dex3_sample_metadata or {}
+    dex3 = {}
+    sample_count = 0
+    for side in ("left", "right"):
+        metadata = dex3_sample_metadata.get(side, {})
+        state_valid = bool(metadata.get("state_valid", False)) and _finite_timestamp(
+            metadata.get("state_timestamp")
+        ) is not None
+        action_valid = bool(metadata.get("action_valid", False)) and _finite_timestamp(
+            metadata.get("action_timestamp")
+        ) is not None
+        sample_count += int(state_valid) + int(action_valid)
+        dex3[side] = {
+            "state_valid": state_valid,
+            "state_timestamp": _finite_timestamp(metadata.get("state_timestamp")) if state_valid else None,
+            "action_valid": action_valid,
+            "action_timestamp": _finite_timestamp(metadata.get("action_timestamp")) if action_valid else None,
+            "measured_q": measured_values[side] if state_valid else None,
+            "commanded_q": commanded_values[side] if action_valid else None,
+        }
+    dex3_available = sample_count > 0
+    if not dex3_configured:
+        dex3_reason = "dex3_not_configured"
+    elif sample_count == 0:
+        dex3_reason = "dex3_configured_no_sample"
+    elif sample_count < 4:
+        dex3_reason = "dex3_partially_sampled"
+    else:
+        dex3_reason = "dex3_sampled"
     return {
         "schema_version": 1,
         "event": "full_pose_telemetry",
@@ -155,14 +210,8 @@ def build_pose_record(
         "dex3": {
             "available": dex3_available,
             "reason": dex3_reason,
-            "left": {
-                "measured_q": dex3_measured["left"],
-                "commanded_q": dex3_commanded["left"],
-            },
-            "right": {
-                "measured_q": dex3_measured["right"],
-                "commanded_q": dex3_commanded["right"],
-            },
+            "left": dex3["left"],
+            "right": dex3["right"],
         },
         "achieved_cartesian_pose": {"left": None, "right": None},
         "achieved_cartesian_pose_reason": "not_available_from_controller_state",
@@ -188,7 +237,7 @@ class PoseTelemetryJsonlSink:
         session = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         self.path = self.directory / f"pose-telemetry-{session}-{uuid.uuid4().hex}.jsonl"
         self._warn = warn or (lambda message: None)
-        self._queue: Queue[Mapping[str, object]] = Queue(maxsize=queue_size)
+        self._queue: Queue[object] = Queue(maxsize=queue_size)
         self._close_timeout_s = close_timeout_s
         self._closed = False
         self._state_lock = threading.Lock()
@@ -209,7 +258,7 @@ class PoseTelemetryJsonlSink:
             if self._closed:
                 return False
             try:
-                self._queue.put_nowait(record)
+                self._queue.put_nowait(_freeze_payload(record))
                 return True
             except Full:
                 with self._drop_lock:
@@ -236,7 +285,9 @@ class PoseTelemetryJsonlSink:
                     except Empty:
                         continue
                     try:
-                        telemetry_log.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+                        telemetry_log.write(json.dumps(
+                            _thaw_payload(record), ensure_ascii=False, separators=(",", ":")
+                        ) + "\n")
                         telemetry_log.flush()
                     finally:
                         self._queue.task_done()

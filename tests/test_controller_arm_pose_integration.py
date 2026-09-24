@@ -73,6 +73,14 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         ):
             self.assertIn(event, source)
 
+    def test_shutdown_records_interruption_or_exception_cause_before_finalization(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('shutdown_cause = "shutdown_interrupted"', source)
+        self.assertIn('shutdown_cause = "shutdown_exception"', source)
+        self.assertLess(source.index('shutdown_cause = "shutdown_interrupted"'), source.index('"shutdown_finalization"'))
+        self.assertLess(source.index('shutdown_cause = "shutdown_exception"'), source.index('"shutdown_finalization"'))
+        self.assertIn("raise", source[source.index("except Exception:"):source.index("finally:")])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -214,6 +214,10 @@ if __name__ == '__main__':
     outputs_activated = False
     hand_outputs_activated = False
     pose_telemetry_sink = None
+    status_sink = None
+    img_client = None
+    tv_wrapper = None
+    shutdown_cause = None
 
     try:
         # setup dds communication domains id
@@ -484,12 +488,11 @@ if __name__ == '__main__':
             ready_pressure_timestamps = (0.0, 0.0)
             ready_dex3_measured_q = None
             ready_dex3_commanded_q = None
+            ready_dex3_metadata = None
             if args.ee == "dex3":
                 left_pressure_sample, right_pressure_sample = hand_ctrl.get_pressure_samples()
                 ready_pressure_timestamps = (left_pressure_sample[1], right_pressure_sample[1])
-                with dual_hand_data_lock:
-                    ready_dex3_measured_q = np.asarray(dual_hand_state_array[:], dtype=float).copy()
-                    ready_dex3_commanded_q = np.asarray(dual_hand_action_array[:], dtype=float).copy()
+                ready_dex3_measured_q, ready_dex3_commanded_q, ready_dex3_metadata = hand_ctrl.get_pose_samples()
             status_monitor.observe(
                 now=time.monotonic(),
                 lifecycle="ready",
@@ -512,6 +515,7 @@ if __name__ == '__main__':
                 dex3_configured=args.ee == "dex3",
                 dex3_measured_q=ready_dex3_measured_q,
                 dex3_commanded_q=ready_dex3_commanded_q,
+                dex3_sample_metadata=ready_dex3_metadata,
                 drop_count=pose_telemetry_sink.drop_count,
                 now=time.monotonic(),
             ))
@@ -704,10 +708,9 @@ if __name__ == '__main__':
 
             dex3_measured_q = None
             dex3_commanded_q = None
+            dex3_metadata = None
             if args.ee == "dex3":
-                with dual_hand_data_lock:
-                    dex3_measured_q = np.asarray(dual_hand_state_array[:], dtype=float).copy()
-                    dex3_commanded_q = np.asarray(dual_hand_action_array[:], dtype=float).copy()
+                dex3_measured_q, dex3_commanded_q, dex3_metadata = hand_ctrl.get_pose_samples()
             tracking_wall_clock = time.time()
             pose_telemetry_sink.emit(build_pose_record(
                 timestamp=tracking_wall_clock,
@@ -721,6 +724,7 @@ if __name__ == '__main__':
                 dex3_configured=args.ee == "dex3",
                 dex3_measured_q=dex3_measured_q,
                 dex3_commanded_q=dex3_commanded_q,
+                dex3_sample_metadata=dex3_metadata,
                 drop_count=pose_telemetry_sink.drop_count,
                 now=time.monotonic(),
             ))
@@ -885,13 +889,24 @@ if __name__ == '__main__':
             logger_mp.debug(f"main process sleep: {sleep_time}")
 
     except KeyboardInterrupt:
+        shutdown_cause = "shutdown_interrupted"
         logger_mp.info("⛔ KeyboardInterrupt, exiting program...")
+        raise
     except Exception:
+        shutdown_cause = "shutdown_exception"
         import traceback
         logger_mp.error(traceback.format_exc())
+        raise
     finally:
         _emit_lifecycle_events(pose_telemetry_sink)
         if pose_telemetry_sink is not None:
+            if shutdown_cause is not None:
+                pose_telemetry_sink.emit(build_lifecycle_event(
+                    shutdown_cause,
+                    cause=shutdown_cause,
+                    timestamp=time.time(),
+                    timestamp_monotonic=time.monotonic(),
+                ))
             pose_telemetry_sink.emit(build_lifecycle_event(
                 "shutdown_finalization", timestamp=time.time(), timestamp_monotonic=time.monotonic()))
         # Dex3 is an independent post-r output. Stop its child process before
@@ -934,7 +949,8 @@ if __name__ == '__main__':
             logger_mp.error(f"Failed to close image client: {e}")
 
         try:
-            tv_wrapper.close()
+            if tv_wrapper is not None:
+                tv_wrapper.close()
         except Exception as e:
             logger_mp.error(f"Failed to close televuer wrapper: {e}")
 
@@ -945,7 +961,8 @@ if __name__ == '__main__':
             logger_mp.warning(f"Failed to close pose telemetry sink: {e}")
 
         try:
-            status_sink.close()
+            if status_sink is not None:
+                status_sink.close()
         except Exception as e:
             logger_mp.warning(f"Failed to close teleop status sink: {e}")
 
@@ -969,4 +986,3 @@ if __name__ == '__main__':
         except Exception as e:
             logger_mp.error(f"Failed to close recorder: {e}")
         logger_mp.info("✅ Finally, exiting program.")
-        exit(0)

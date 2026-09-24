@@ -98,6 +98,19 @@ class Dex3_1_Controller:
         self.right_pressure = Value('d', 0.0, lock=True)
         self.left_pressure_timestamp = Value('d', 0.0, lock=True)
         self.right_pressure_timestamp = Value('d', 0.0, lock=True)
+        self._telemetry_lock = threading.Lock()
+        self._left_state_valid = False
+        self._right_state_valid = False
+        self._left_state_timestamp = 0.0
+        self._right_state_timestamp = 0.0
+        self._left_action_valid = False
+        self._right_action_valid = False
+        self._left_action_timestamp = 0.0
+        self._right_action_timestamp = 0.0
+        self._left_action = np.zeros(Dex3_Num_Motors)
+        self._right_action = np.zeros(Dex3_Num_Motors)
+        self._left_state_sampled = threading.Event()
+        self._right_state_sampled = threading.Event()
 
         # initialize subscribe thread
         self.subscribe_state_thread = threading.Thread(target=self._subscribe_hand_state)
@@ -105,7 +118,7 @@ class Dex3_1_Controller:
         self.subscribe_state_thread.start()
 
         while True:
-            if any(self.left_hand_state_array) and any(self.right_hand_state_array):
+            if self._left_state_sampled.is_set() and self._right_state_sampled.is_set():
                 break
             time.sleep(0.01)
             logger_mp.warning("[Dex3_1_Controller] Waiting to subscribe dds...")
@@ -154,16 +167,26 @@ class Dex3_1_Controller:
             right_hand_msg = self.RightHandState_subscriber.Read()
             if left_hand_msg is not None:
                 # Update left hand state
-                for idx, id in enumerate(Dex3_1_Left_JointIndex):
-                    self.left_hand_state_array[idx] = left_hand_msg.motor_state[id].q
+                with self.left_hand_state_array.get_lock():
+                    for idx, id in enumerate(Dex3_1_Left_JointIndex):
+                        self.left_hand_state_array[idx] = left_hand_msg.motor_state[id].q
+                with self._telemetry_lock:
+                    self._left_state_valid = True
+                    self._left_state_timestamp = time.monotonic()
+                self._left_state_sampled.set()
                 with self.left_pressure.get_lock():
                     self.left_pressure.value = extract_dex3_pressure(left_hand_msg)
                 with self.left_pressure_timestamp.get_lock():
                     self.left_pressure_timestamp.value = time.monotonic()
             if right_hand_msg is not None:
                 # Update right hand state
-                for idx, id in enumerate(Dex3_1_Right_JointIndex):
-                    self.right_hand_state_array[idx] = right_hand_msg.motor_state[id].q
+                with self.right_hand_state_array.get_lock():
+                    for idx, id in enumerate(Dex3_1_Right_JointIndex):
+                        self.right_hand_state_array[idx] = right_hand_msg.motor_state[id].q
+                with self._telemetry_lock:
+                    self._right_state_valid = True
+                    self._right_state_timestamp = time.monotonic()
+                self._right_state_sampled.set()
                 with self.right_pressure.get_lock():
                     self.right_pressure.value = extract_dex3_pressure(right_hand_msg)
                 with self.right_pressure_timestamp.get_lock():
@@ -177,6 +200,31 @@ class Dex3_1_Controller:
         with self.right_pressure.get_lock(), self.right_pressure_timestamp.get_lock():
             right = (self.right_pressure.value, self.right_pressure_timestamp.value)
         return left, right
+
+    def get_pose_samples(self):
+        """Return only DDS/control samples that have actually been observed."""
+        with self.left_hand_state_array.get_lock():
+            left_state = np.asarray(self.left_hand_state_array[:], dtype=float).copy()
+        with self.right_hand_state_array.get_lock():
+            right_state = np.asarray(self.right_hand_state_array[:], dtype=float).copy()
+        with self._telemetry_lock:
+            left_action = self._left_action.copy()
+            right_action = self._right_action.copy()
+            metadata = {
+                "left": {
+                    "state_valid": self._left_state_valid,
+                    "state_timestamp": self._left_state_timestamp,
+                    "action_valid": self._left_action_valid,
+                    "action_timestamp": self._left_action_timestamp,
+                },
+                "right": {
+                    "state_valid": self._right_state_valid,
+                    "state_timestamp": self._right_state_timestamp,
+                    "action_valid": self._right_action_valid,
+                    "action_timestamp": self._right_action_timestamp,
+                },
+            }
+        return np.concatenate((left_state, right_state)), np.concatenate((left_action, right_action)), metadata
     
     class _RIS_Mode:
         def __init__(self, id=0, status=0x01, timeout=0):
@@ -315,6 +363,14 @@ class Dex3_1_Controller:
                     with dual_hand_data_lock:
                         dual_hand_state_array_out[:] = state_data
                         dual_hand_action_array_out[:] = action_data
+                with self._telemetry_lock:
+                    self._left_action = left_q_target.copy()
+                    self._right_action = right_q_target.copy()
+                    action_timestamp = time.monotonic()
+                    self._left_action_timestamp = action_timestamp
+                    self._right_action_timestamp = action_timestamp
+                    self._left_action_valid = True
+                    self._right_action_valid = True
 
                 current_time = time.time()
                 time_elapsed = current_time - start_time

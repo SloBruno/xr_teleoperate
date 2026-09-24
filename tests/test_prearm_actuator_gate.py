@@ -56,6 +56,17 @@ class PrearmActuatorGateTest(unittest.TestCase):
         control = source[control_start:control_end]
         self.assertNotIn("self.running = True", control)
 
+    def test_dex3_pose_telemetry_uses_explicit_per_side_sample_metadata(self):
+        source = HAND.read_text(encoding="utf-8")
+        self.assertIn("def get_pose_samples(self):", source)
+        self.assertIn("self._left_state_valid = False", source)
+        self.assertIn("self._left_action_valid = False", source)
+        self.assertIn("state_timestamp", source)
+        self.assertIn("action_timestamp", source)
+        launcher = TELEOP.read_text(encoding="utf-8")
+        self.assertIn("dex3_sample_metadata=ready_dex3_metadata", launcher)
+        self.assertIn("dex3_sample_metadata=dex3_metadata", launcher)
+
     def test_launcher_prepares_arms_before_the_prearm_loop(self):
         source = TELEOP.read_text(encoding="utf-8")
         prearm = source.index("        READY = True")

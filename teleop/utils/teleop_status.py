@@ -15,6 +15,33 @@ from typing import Any, Callable, Mapping, Sequence
 from teleop.utils.quest_safety import controller_sample_is_fresh
 
 
+class _FrozenMappingSnapshot(tuple):
+    """Immutable mapping snapshot that can be thawed by the writer thread."""
+
+
+def _freeze_payload(value: object) -> object:
+    if isinstance(value, Mapping):
+        return _FrozenMappingSnapshot(
+            (key, _freeze_payload(item)) for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_payload(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return tuple(_freeze_payload(item) for item in value)
+    return value
+
+
+def _thaw_payload(value: object) -> object:
+    if isinstance(value, _FrozenMappingSnapshot):
+        return {key: _thaw_payload(item) for key, item in value}
+    if isinstance(value, tuple):
+        return [_thaw_payload(item) for item in value]
+    return value
+
+
+_STATUS_SENTINEL = object()
+
+
 def camera_frame_is_usable(image: object) -> bool:
     """Return whether an image wrapper contains a usable BGR frame."""
     return image is not None and getattr(image, "bgr", None) is not None
@@ -38,33 +65,35 @@ class AsyncStatusFileSink:
         self._warn = warn
         self._queue = Queue(maxsize=queue_size)
         self._closed = False
+        self._state_lock = threading.Lock()
+        self._close_requested = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def emit(self, payload: str | Mapping[str, Any]) -> None:
+    def emit(self, payload: str | Mapping[str, Any]) -> bool:
         """Queue telemetry without I/O or JSON encoding on the control path."""
-        if self._closed:
-            return
-        try:
-            self._queue.put_nowait(payload)
-        except Full:
-            return
+        with self._state_lock:
+            if self._closed:
+                return False
+            try:
+                self._queue.put_nowait(
+                    payload if isinstance(payload, str) else _freeze_payload(payload)
+                )
+                return True
+            except Full:
+                return False
 
     def close(self) -> None:
         """Flush queued records briefly during normal program shutdown."""
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self._queue.put_nowait(None)
-        except Full:
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._close_requested.set()
             try:
-                self._queue.get_nowait()
-            except Exception:
-                pass
-            try:
-                self._queue.put_nowait(None)
+                self._queue.put_nowait(_STATUS_SENTINEL)
             except Full:
+                # The writer exits after draining the existing bounded queue.
                 pass
         self._thread.join(timeout=1.0)
 
@@ -75,17 +104,29 @@ class AsyncStatusFileSink:
                 os.makedirs(directory, exist_ok=True)
             with open(self._path, "a", encoding="utf-8") as status_log:
                 while True:
-                    payload = self._queue.get()
-                    if payload is None:
+                    try:
+                        payload = self._queue.get(timeout=0.05)
+                    except Exception:
+                        if self._close_requested.is_set() and self._queue.empty():
+                            return
+                        continue
+                    if payload is _STATUS_SENTINEL:
                         return
                     if isinstance(payload, str):
                         serialized = payload
                     else:
-                        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                        serialized = json.dumps(
+                            _thaw_payload(payload), sort_keys=True, separators=(",", ":")
+                        )
                     status_log.write(serialized + "\n")
                     status_log.flush()
+                    self._queue.task_done()
+                    if self._close_requested.is_set() and self._queue.empty():
+                        return
         except OSError as error:
             self._warn(f"Could not initialize teleop status log: {error}")
+        except (TypeError, ValueError) as error:
+            self._warn(f"Could not serialize teleop status record: {error}")
 
 
 class _DisabledStatusSink:

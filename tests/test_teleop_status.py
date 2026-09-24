@@ -17,6 +17,29 @@ def test_status_file_sink_writes_asynchronously_without_control_path_file_io(tmp
     assert warnings == []
 
 
+def test_status_file_sink_snapshots_nested_mapping_before_enqueue(tmp_path):
+    import json
+    from teleop.utils.teleop_status import AsyncStatusFileSink
+
+    target = tmp_path / "status.jsonl"
+    sink = AsyncStatusFileSink(str(target), lambda _: None)
+    payload = {"nested": {"items": [1, {"value": "before"}]}}
+    assert sink.emit(payload) is True
+    payload["nested"]["items"][1]["value"] = "after"
+    payload["nested"]["items"].append(2)
+    sink.close()
+
+    assert json.loads(target.read_text()) == {"nested": {"items": [1, {"value": "before"}]}}
+
+
+def test_status_file_sink_rejects_emit_after_close(tmp_path):
+    from teleop.utils.teleop_status import AsyncStatusFileSink
+
+    sink = AsyncStatusFileSink(str(tmp_path / "status.jsonl"), lambda _: None)
+    sink.close()
+    assert sink.emit({"event": "late"}) is False
+
+
 def test_status_file_sink_degrades_to_noop_when_storage_setup_fails(monkeypatch):
     from teleop.utils import teleop_status
 

@@ -1,6 +1,7 @@
 import json
 import sys
 import time
+import unittest
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,7 @@ def test_build_record_preserves_controller_wrist_matrices_and_joint_snapshots():
     right_wrist = (np.arange(16, dtype=float) + 100).reshape(4, 4)
     record = build_pose_record(
         timestamp=12.5,
+        timestamp_monotonic=12.5,
         lifecycle="tracking",
         controller_sample_timestamp=12.4,
         left_wrist_pose=left_wrist,
@@ -23,6 +25,10 @@ def test_build_record_preserves_controller_wrist_matrices_and_joint_snapshots():
         commanded_arm_q=np.arange(14, dtype=float) + 0.5,
         dex3_measured_q=np.arange(14, dtype=float) + 10,
         dex3_commanded_q=np.arange(14, dtype=float) + 20,
+        dex3_sample_metadata={
+            "left": {"state_valid": True, "state_timestamp": 10.0, "action_valid": True, "action_timestamp": 10.0},
+            "right": {"state_valid": True, "state_timestamp": 10.0, "action_valid": True, "action_timestamp": 10.0},
+        },
         drop_count=3,
         now=12.5,
     )
@@ -49,6 +55,7 @@ def test_build_record_uses_explicit_null_and_reason_when_dex3_is_unavailable():
 
     record = build_pose_record(
         timestamp=2.0,
+        timestamp_monotonic=2.0,
         lifecycle="ready",
         controller_sample_timestamp=0.0,
         left_wrist_pose=None,
@@ -66,8 +73,22 @@ def test_build_record_uses_explicit_null_and_reason_when_dex3_is_unavailable():
     assert record["dex3"] == {
         "available": False,
         "reason": "dex3_not_configured",
-        "left": {"measured_q": None, "commanded_q": None},
-        "right": {"measured_q": None, "commanded_q": None},
+        "left": {
+            "state_valid": False,
+            "state_timestamp": None,
+            "action_valid": False,
+            "action_timestamp": None,
+            "measured_q": None,
+            "commanded_q": None,
+        },
+        "right": {
+            "state_valid": False,
+            "state_timestamp": None,
+            "action_valid": False,
+            "action_timestamp": None,
+            "measured_q": None,
+            "commanded_q": None,
+        },
     }
 
 
@@ -86,6 +107,10 @@ def test_build_record_distinguishes_configured_dex3_without_a_sample():
         dex3_configured=True,
         dex3_measured_q=None,
         dex3_commanded_q=None,
+        dex3_sample_metadata={
+            "left": {"state_valid": False, "state_timestamp": None, "action_valid": False, "action_timestamp": None},
+            "right": {"state_valid": False, "state_timestamp": None, "action_valid": False, "action_timestamp": None},
+        },
         drop_count=0,
         now=8.0,
     )
@@ -99,6 +124,101 @@ def test_build_record_distinguishes_configured_dex3_without_a_sample():
     }
     assert record["dex3"]["available"] is False
     assert record["dex3"]["reason"] == "dex3_configured_no_sample"
+
+
+def test_build_record_does_not_treat_zero_arrays_as_dex3_samples():
+    from teleop.utils.full_pose_telemetry import build_pose_record
+
+    record = build_pose_record(
+        timestamp=2.0,
+        timestamp_monotonic=8.0,
+        lifecycle="ready",
+        controller_sample_timestamp=0.0,
+        left_wrist_pose=None,
+        right_wrist_pose=None,
+        measured_arm_q=np.zeros(14),
+        commanded_arm_q=np.zeros(14),
+        dex3_configured=True,
+        dex3_measured_q=np.zeros(14),
+        dex3_commanded_q=np.zeros(14),
+        dex3_sample_metadata={
+            "left": {"state_valid": False, "state_timestamp": None, "action_valid": False, "action_timestamp": None},
+            "right": {"state_valid": False, "state_timestamp": None, "action_valid": False, "action_timestamp": None},
+        },
+        drop_count=0,
+        now=8.0,
+    )
+
+    assert record["dex3"]["available"] is False
+    assert record["dex3"]["reason"] == "dex3_configured_no_sample"
+    assert record["dex3"]["left"] == {
+        "state_valid": False,
+        "state_timestamp": None,
+        "action_valid": False,
+        "action_timestamp": None,
+        "measured_q": None,
+        "commanded_q": None,
+    }
+
+
+def test_build_record_distinguishes_partial_and_complete_dex3_sampling():
+    from teleop.utils.full_pose_telemetry import build_pose_record
+
+    common = dict(
+        timestamp=2.0,
+        timestamp_monotonic=8.0,
+        lifecycle="ready",
+        controller_sample_timestamp=0.0,
+        left_wrist_pose=None,
+        right_wrist_pose=None,
+        measured_arm_q=np.zeros(14),
+        commanded_arm_q=np.zeros(14),
+        dex3_configured=True,
+        dex3_measured_q=np.arange(14, dtype=float),
+        dex3_commanded_q=np.arange(14, dtype=float) + 1,
+        drop_count=0,
+        now=8.0,
+    )
+    partial = build_pose_record(
+        **common,
+        dex3_sample_metadata={
+            "left": {"state_valid": True, "state_timestamp": 7.0, "action_valid": False, "action_timestamp": None},
+            "right": {"state_valid": False, "state_timestamp": None, "action_valid": False, "action_timestamp": None},
+        },
+    )
+    sampled = build_pose_record(
+        **common,
+        dex3_sample_metadata={
+            "left": {"state_valid": True, "state_timestamp": 7.0, "action_valid": True, "action_timestamp": 7.0},
+            "right": {"state_valid": True, "state_timestamp": 7.0, "action_valid": True, "action_timestamp": 7.0},
+        },
+    )
+
+    assert partial["dex3"]["reason"] == "dex3_partially_sampled"
+    assert partial["dex3"]["left"]["measured_q"] == list(range(7))
+    assert partial["dex3"]["left"]["commanded_q"] is None
+    assert partial["dex3"]["right"]["measured_q"] is None
+    assert partial["dex3"]["right"]["commanded_q"] is None
+    assert sampled["dex3"]["reason"] == "dex3_sampled"
+
+
+def test_build_record_requires_an_explicit_valid_monotonic_timestamp():
+    from teleop.utils.full_pose_telemetry import build_pose_record
+
+    kwargs = dict(
+        timestamp=100.0,
+        lifecycle="tracking",
+        controller_sample_timestamp=1.0,
+        left_wrist_pose=None,
+        right_wrist_pose=None,
+        measured_arm_q=np.zeros(14),
+        commanded_arm_q=np.zeros(14),
+    )
+    with unittest.TestCase().assertRaises(TypeError):
+        build_pose_record(**kwargs)
+    for invalid in (0.0, -1.0, float("nan"), float("inf")):
+        with unittest.TestCase().assertRaises(ValueError):
+            build_pose_record(**kwargs, timestamp_monotonic=invalid)
 
 
 def test_lifecycle_event_record_is_structured_without_serialization():
@@ -159,6 +279,20 @@ def test_jsonl_sink_is_bounded_nonblocking_and_uses_unique_session_paths(tmp_pat
 
     payloads = [json.loads(line) for line in first.path.read_text().splitlines()]
     assert payloads == [{"event": "one"}]
+
+
+def test_jsonl_sink_snapshots_nested_mapping_before_enqueue(tmp_path):
+    from teleop.utils.full_pose_telemetry import PoseTelemetryJsonlSink
+
+    sink = PoseTelemetryJsonlSink(tmp_path, close_timeout_s=0.2)
+    payload = {"nested": {"items": [1, {"value": "before"}]}}
+    assert sink.emit(payload) is True
+    payload["nested"]["items"][1]["value"] = "after"
+    payload["nested"]["items"].append(2)
+    sink.close()
+
+    payloads = [json.loads(line) for line in sink.path.read_text().splitlines()]
+    assert payloads == [{"nested": {"items": [1, {"value": "before"}]}}]
 
 
 def test_jsonl_sink_warns_and_stays_usable_when_storage_fails(monkeypatch, tmp_path):
