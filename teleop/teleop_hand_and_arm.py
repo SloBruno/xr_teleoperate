@@ -8,6 +8,14 @@ import logging_mp
 logging_mp.basicConfig(level=logging_mp.INFO)
 logger_mp = logging_mp.getLogger(__name__)
 
+
+def _log_best_effort(level, message):
+    """Never let diagnostic logging interrupt lifecycle cleanup."""
+    try:
+        getattr(logger_mp, level)(message)
+    except BaseException:
+        pass
+
 import os 
 import sys
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +41,7 @@ from teleop.utils.teleop_status import (
 # from teleop.utils.teleop_status import AsyncStatusFileSink, TeleopStatusMonitor, camera_frame_is_usable
 from teleop.utils.full_pose_telemetry import (
     PoseTelemetryJsonlSink,
+    ArmPublicationTelemetryBridge,
     build_lifecycle_event,
     build_pose_record,
     create_pose_telemetry_sink,
@@ -428,6 +437,9 @@ if __name__ == '__main__':
             "/home/unitree/.local/state/xr_teleoperate",
         )
         pose_telemetry_sink = create_pose_telemetry_sink(pose_log_dir, logger_mp.warning)
+        arm_publication_telemetry = ArmPublicationTelemetryBridge(
+            pose_telemetry_sink, profile=args.arm
+        )
 
         # Match the original launcher behavior: connecting the arm motors moves
         # the arms to the all-zero preparation pose immediately, before r.
@@ -719,7 +731,7 @@ if __name__ == '__main__':
             if args.ee == "dex3":
                 dex3_measured_q, dex3_commanded_q, dex3_metadata = hand_ctrl.get_pose_samples()
             tracking_wall_clock = time.time()
-            pose_telemetry_sink.emit(build_pose_record(
+            arm_publication_telemetry.emit_cycle(build_pose_record(
                 timestamp=tracking_wall_clock,
                 timestamp_monotonic=time.monotonic(),
                 lifecycle="tracking",
@@ -740,7 +752,7 @@ if __name__ == '__main__':
                 dex3_sample_metadata=dex3_metadata,
                 drop_count=pose_telemetry_sink.drop_count,
                 now=time.monotonic(),
-            ))
+            ), arm_ctrl)
 
             # record data
             if args.record:
@@ -921,7 +933,7 @@ if __name__ == '__main__':
             try:
                 hand_ctrl.deactivate()
             except Exception as e:
-                logger_mp.error(f"Failed to deactivate Dex3 output: {e}")
+                _log_best_effort("error", f"Failed to deactivate Dex3 output: {e}")
         if args.arm == "G1_29":
             if outputs_activated:
                 try:
@@ -930,15 +942,15 @@ if __name__ == '__main__':
                     arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)
                     arm_ctrl.deactivate()
                 except Exception as e:
-                    logger_mp.error(f"Failed to deactivate arm output: {e}")
-                logger_mp.info("Arm preparation output ended; exiting.")
+                    _log_best_effort("error", f"Failed to deactivate arm output: {e}")
+                _log_best_effort("info", "Arm preparation output ended; exiting.")
         else:
             # Legacy arm profiles publish continuously from construction;
             # preserve the previous shutdown behavior of returning home.
             try:
                 arm_ctrl.ctrl_dual_arm_go_home()
             except Exception as e:
-                logger_mp.error(f"Failed to ctrl_dual_arm_go_home: {e}")
+                _log_best_effort("error", f"Failed to ctrl_dual_arm_go_home: {e}")
         try:
             if args.ipc:
                 ipc_server.stop()
@@ -946,31 +958,31 @@ if __name__ == '__main__':
                 stop_listening()
                 listen_keyboard_thread.join()
         except Exception as e:
-            logger_mp.error(f"Failed to stop keyboard listener or ipc server: {e}")
+            _log_best_effort("error", f"Failed to stop keyboard listener or ipc server: {e}")
         
         try:
             if img_client is not None:
                 img_client.close()
         except Exception as e:
-            logger_mp.error(f"Failed to close image client: {e}")
+            _log_best_effort("error", f"Failed to close image client: {e}")
 
         try:
             if tv_wrapper is not None:
                 tv_wrapper.close()
         except Exception as e:
-            logger_mp.error(f"Failed to close televuer wrapper: {e}")
+            _log_best_effort("error", f"Failed to close televuer wrapper: {e}")
 
         try:
             if pose_telemetry_sink is not None:
                 pose_telemetry_sink.close()
         except Exception as e:
-            logger_mp.warning(f"Failed to close pose telemetry sink: {e}")
+            _log_best_effort("warning", f"Failed to close pose telemetry sink: {e}")
 
         try:
             if status_sink is not None:
                 status_sink.close()
         except Exception as e:
-            logger_mp.warning(f"Failed to close teleop status sink: {e}")
+            _log_best_effort("warning", f"Failed to close teleop status sink: {e}")
 
         try:
             if not args.motion:
@@ -978,17 +990,17 @@ if __name__ == '__main__':
                 # status, result = motion_switcher.Exit_Debug_Mode()
                 # logger_mp.info(f"Exit debug mode: {'Success' if status == 3104 else 'Failed'}")
         except Exception as e:
-            logger_mp.error(f"Failed to exit debug mode: {e}")
+            _log_best_effort("error", f"Failed to exit debug mode: {e}")
 
         try:
             if args.sim:
                 sim_state_subscriber.stop_subscribe()
         except Exception as e:
-            logger_mp.error(f"Failed to stop sim state subscriber: {e}")
+            _log_best_effort("error", f"Failed to stop sim state subscriber: {e}")
         
         try:
             if args.record:
                 recorder.close()
         except Exception as e:
-            logger_mp.error(f"Failed to close recorder: {e}")
-        logger_mp.info("✅ Finally, exiting program.")
+            _log_best_effort("error", f"Failed to close recorder: {e}")
+        _log_best_effort("info", "✅ Finally, exiting program.")

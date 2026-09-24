@@ -95,5 +95,13 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         self.assertIn("hand_ctrl.deactivate()", finally_block)
         self.assertIn("arm_ctrl.deactivate()", finally_block)
 
+    def test_cleanup_logging_cannot_interrupt_later_cleanup(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        finally_block = source[source.index("finally:"):]
+        self.assertIn("def _log_best_effort", source)
+        self.assertNotIn("logger_mp.error", finally_block)
+        self.assertNotIn("logger_mp.warning", finally_block)
+        self.assertNotIn("\n        logger_mp.info", finally_block)
+
 if __name__ == "__main__":
     unittest.main()

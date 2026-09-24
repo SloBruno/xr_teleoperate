@@ -8,6 +8,7 @@ import math
 import os
 import time
 from pathlib import Path
+from collections import deque
 from queue import Empty, Full, Queue
 import threading
 import uuid
@@ -165,7 +166,10 @@ def emit_lifecycle_event_best_effort(
             timestamp_monotonic=time.monotonic(),
         ))
     except Exception as error:
-        warn(f"Failed to emit lifecycle telemetry {event}: {error}")
+        try:
+            warn(f"Failed to emit lifecycle telemetry {event}: {error}")
+        except BaseException:
+            pass
         return False
     return True
 
@@ -316,7 +320,7 @@ class ArmCommandTelemetry:
 
 
 def publish_arm_command_for_telemetry(controller, q_target, tauff_target):
-    """Submit immediately and attach a completed receipt only when already available."""
+    """Submit immediately without draining the asynchronous publication receipts."""
     arm_joint_split = _normalize_arm_joint_split(
         getattr(controller, "arm_joint_split", (7, 7))
     )
@@ -346,15 +350,10 @@ def publish_arm_command_for_telemetry(controller, q_target, tauff_target):
         published_q = getattr(publication, "published_q", None)
         reason = getattr(publication, "reason", None)
         request_id = publication if isinstance(publication, (int, np.integer)) else getattr(publication, "request_id", None)
-    if request_id is not None and hasattr(controller, "drain_arm_publication_receipts"):
-        for receipt in controller.drain_arm_publication_receipts():
-            receipt_id = receipt.get("request_id") if isinstance(receipt, Mapping) else getattr(receipt, "request_id", None)
-            if receipt_id == int(request_id):
-                published_q = receipt.get("published_q") if isinstance(receipt, Mapping) else getattr(receipt, "published_q", None)
-                reason = receipt.get("reason") if isinstance(receipt, Mapping) else getattr(receipt, "reason", None)
-                break
-        else:
-            return ArmCommandTelemetry(None, "arm_command_publication_pending", int(request_id), requested_q, requested_q.copy())
+    if request_id is not None and published_q is None and reason is None:
+        return ArmCommandTelemetry(
+            None, "arm_command_publication_pending", int(request_id), requested_q, requested_q.copy()
+        )
     published_size = _vector_size(published_q)
     if published_size != expected_size:
         return ArmCommandTelemetry(None, (
@@ -368,6 +367,97 @@ def publish_arm_command_for_telemetry(controller, q_target, tauff_target):
             publication_reason = "arm_command_publication_invalid"
         return ArmCommandTelemetry(None, publication_reason, request_id, requested_q, requested_q.copy())
     return ArmCommandTelemetry(np.asarray(published_q, dtype=float), str(reason or "published"), request_id, requested_q, requested_q.copy())
+
+
+def build_arm_publication_event(receipt: object, *, profile: str) -> dict:
+    """Build one append-only event from one completed controller receipt."""
+    def value(name, default=None):
+        return receipt.get(name, default) if isinstance(receipt, Mapping) else getattr(receipt, name, default)
+
+    split = _normalize_arm_joint_split(value("arm_joint_split", (7, 7)))
+    published_q = _vector_or_none(value("published_q"), expected_size=sum(split))
+    reason = str(value("reason", "arm_command_publication_unavailable"))
+    if value("published_q") is not None and published_q is None:
+        published_q = None
+        reason = f"arm_publication_invalid_q:{reason}"
+    timestamp_monotonic = _finite_timestamp(value("timestamp_monotonic"))
+    if timestamp_monotonic is None:
+        raise ValueError("arm publication receipt timestamp must be finite and positive")
+    return {
+        "schema_version": 1,
+        "event": "arm_publication",
+        "request_id": int(value("request_id")),
+        "published_q": published_q,
+        "reason": reason,
+        "timestamp_monotonic": timestamp_monotonic,
+        "clock_domain": {"timestamp_monotonic": "monotonic"},
+        "profile": str(profile),
+        "arm_joint_split": list(split),
+    }
+
+
+class ArmPublicationTelemetryBridge:
+    """Correlate bounded asynchronous arm receipts with append-only telemetry."""
+
+    def __init__(self, sink, *, profile: str, pending_capacity: int = 64):
+        if pending_capacity <= 0:
+            raise ValueError("pending_capacity must be positive")
+        self._sink = sink
+        self._profile = str(profile)
+        self._pending = deque()
+        self._pending_capacity = int(pending_capacity)
+        self._pending_buffer_drop_count = 0
+        self._telemetry_sink_overflow_count = 0
+        self._last_controller_receipt_drop_count = 0
+
+    @property
+    def pending_buffer_drop_count(self) -> int:
+        return self._pending_buffer_drop_count
+
+    @property
+    def telemetry_sink_overflow_count(self) -> int:
+        return self._telemetry_sink_overflow_count
+
+    def _try_emit(self, record: Mapping[str, object]) -> bool:
+        try:
+            accepted = bool(self._sink.emit(record))
+        except BaseException:
+            accepted = False
+        if not accepted:
+            self._telemetry_sink_overflow_count += 1
+        return accepted
+
+    def _retain_or_drop(self, record: Mapping[str, object]) -> None:
+        if len(self._pending) >= self._pending_capacity:
+            self._pending_buffer_drop_count += 1
+            return
+        self._pending.append(record)
+
+    def _flush_pending(self) -> None:
+        while self._pending:
+            record = self._pending[0]
+            if not self._try_emit(record):
+                return
+            self._pending.popleft()
+
+    def _emit_receipt(self, receipt: object) -> None:
+        event = build_arm_publication_event(receipt, profile=self._profile)
+        if not self._try_emit(event):
+            self._retain_or_drop(event)
+
+    def emit_cycle(self, pose_record: dict, controller) -> bool:
+        """Flush retries, drain all completed receipts, then enqueue this cycle's pose."""
+        self._flush_pending()
+        for receipt in controller.drain_arm_publication_receipts():
+            self._emit_receipt(receipt)
+        controller_drop_count = int(getattr(controller, "publication_receipt_drop_count", 0))
+        pose_record["telemetry_overflow"] = {
+            "controller_receipt_drop_count": controller_drop_count,
+            "pending_buffer_drop_count": self._pending_buffer_drop_count,
+            "telemetry_sink_overflow_count": self._telemetry_sink_overflow_count,
+        }
+        self._last_controller_receipt_drop_count = controller_drop_count
+        return self._try_emit(pose_record)
 
 
 class PoseTelemetryJsonlSink:
@@ -398,6 +488,12 @@ class PoseTelemetryJsonlSink:
         self._thread = threading.Thread(target=self._run, name="pose-telemetry-writer", daemon=True)
         self._thread.start()
 
+    def _warn_best_effort(self, message: str) -> None:
+        try:
+            self._warn(message)
+        except BaseException:
+            pass
+
     @property
     def drop_count(self) -> int:
         with self._drop_lock:
@@ -424,7 +520,7 @@ class PoseTelemetryJsonlSink:
             self._close_requested.set()
         self._thread.join(timeout=self._close_timeout_s)
         if self._thread.is_alive():
-            self._warn("Pose telemetry writer did not stop before close timeout")
+            self._warn_best_effort("Pose telemetry writer did not stop before close timeout")
 
     def _run(self) -> None:
         try:
@@ -443,9 +539,9 @@ class PoseTelemetryJsonlSink:
                     finally:
                         self._queue.task_done()
         except OSError as error:
-            self._warn(f"Could not initialize pose telemetry log: {error}")
+            self._warn_best_effort(f"Could not initialize pose telemetry log: {error}")
         except (TypeError, ValueError) as error:
-            self._warn(f"Could not serialize pose telemetry record: {error}")
+            self._warn_best_effort(f"Could not serialize pose telemetry record: {error}")
 
 
 class _DisabledPoseTelemetrySink:
@@ -466,5 +562,8 @@ def create_pose_telemetry_sink(
     try:
         return PoseTelemetryJsonlSink(directory, warn)
     except Exception as error:
-        warn(f"Could not initialize pose telemetry sink: {error}")
+        try:
+            warn(f"Could not initialize pose telemetry sink: {error}")
+        except BaseException:
+            pass
         return _DisabledPoseTelemetrySink()

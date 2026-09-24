@@ -379,13 +379,13 @@ def test_build_pose_record_separates_requested_q_from_exact_published_q():
     assert record["arm"]["left"]["commanded_q"] is None
 
 
-def test_completed_receipt_is_correlated_and_exact_q_is_used():
+def test_submission_records_request_and_waits_for_later_receipt_event():
     from teleop.utils.full_pose_telemetry import publish_arm_command_for_telemetry
 
     requested = np.arange(10, dtype=float)
     clipped = requested * 0.1
 
-    class CompletedController:
+    class AsyncController:
         arm_joint_split = (5, 5)
 
         def ctrl_dual_arm(self, q_target, tauff_target):
@@ -398,13 +398,13 @@ def test_completed_receipt_is_correlated_and_exact_q_is_used():
                 "reason": "published",
             },)
 
-    publication = publish_arm_command_for_telemetry(
-        CompletedController(), requested, np.zeros(10)
-    )
+    controller = AsyncController()
+    publication = publish_arm_command_for_telemetry(controller, requested, np.zeros(10))
 
     assert publication.request_id == 7
-    assert publication.reason == "published"
-    np.testing.assert_array_equal(publication.published_q, clipped)
+    assert publication.reason == "arm_command_publication_pending"
+    np.testing.assert_array_equal(publication.requested_q, requested)
+    np.testing.assert_array_equal(controller.drain_arm_publication_receipts()[0]["published_q"], clipped)
 
 
 def test_lifecycle_emit_is_best_effort_for_builder_and_sink_failures(monkeypatch):
@@ -428,6 +428,30 @@ def test_lifecycle_emit_is_best_effort_for_builder_and_sink_failures(monkeypatch
         object(), "two", warn=warnings.append
     ) is False
     assert len(warnings) == 2
+
+
+def test_lifecycle_builder_and_sink_failures_swallow_a_raising_warning_callback(monkeypatch):
+    from teleop.utils import full_pose_telemetry
+
+    def fail_builder(*args, **kwargs):
+        raise ValueError("builder failed")
+
+    def fail_warn(message):
+        raise RuntimeError("logger failed")
+
+    monkeypatch.setattr(full_pose_telemetry, "build_lifecycle_event", fail_builder)
+    assert full_pose_telemetry.emit_lifecycle_event_best_effort(
+        object(), "cleanup", warn=fail_warn
+    ) is False
+
+    class FailingSink:
+        def emit(self, record):
+            raise OSError("sink failed")
+
+    monkeypatch.setattr(full_pose_telemetry, "build_lifecycle_event", lambda *a, **k: {})
+    assert full_pose_telemetry.emit_lifecycle_event_best_effort(
+        FailingSink(), "cleanup", warn=fail_warn
+    ) is False
 
 
 def test_arm_publication_rejects_returned_dimension_mismatch_explicitly():

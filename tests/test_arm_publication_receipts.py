@@ -1,8 +1,11 @@
 import sys
 import time
 import types
+from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def _load_robot_arm(monkeypatch):
@@ -70,3 +73,118 @@ def test_failed_receipt_has_null_q_and_reason(monkeypatch):
     assert receipt.request_id == 3
     assert receipt.published_q is None
     assert receipt.reason == "arm_command_publication_failed:RuntimeError"
+
+
+def test_submission_does_not_drain_delayed_or_unrelated_receipts(monkeypatch):
+    from teleop.utils.full_pose_telemetry import publish_arm_command_for_telemetry
+
+    class Controller:
+        arm_joint_split = (1, 1)
+
+        def __init__(self):
+            self.receipts = []
+
+        def ctrl_dual_arm(self, q_target, tauff_target):
+            return 3
+
+        def drain_arm_publication_receipts(self):
+            receipts, self.receipts = tuple(self.receipts), []
+            return receipts
+
+    controller = Controller()
+    controller.receipts.append({"request_id": 1, "published_q": (1.0, 2.0), "reason": "published"})
+    result = publish_arm_command_for_telemetry(controller, np.zeros(2), np.zeros(2))
+    assert result.request_id == 3
+    assert controller.receipts, "submission must not drain receipts"
+
+
+def test_publication_bridge_emits_delayed_out_of_order_and_multiple_receipts_once(monkeypatch):
+    from teleop.utils.full_pose_telemetry import ArmPublicationTelemetryBridge
+
+    class Sink:
+        def __init__(self):
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+            return True
+
+    class Controller:
+        arm_joint_split = (1, 1)
+        publication_receipt_drop_count = 0
+
+        def __init__(self):
+            self.cycles = [
+                (),
+                (
+                    {"request_id": 2, "published_q": (2.0, 2.5), "reason": "published", "timestamp_monotonic": 2.2, "arm_joint_split": (1, 1)},
+                    {"request_id": 1, "published_q": (1.0, 1.5), "reason": "published", "timestamp_monotonic": 1.2, "arm_joint_split": (1, 1)},
+                ),
+                ({"request_id": 3, "published_q": None, "reason": "arm_command_publication_failed:RuntimeError", "timestamp_monotonic": 3.2, "arm_joint_split": (1, 1)},),
+            ]
+
+        def drain_arm_publication_receipts(self):
+            return self.cycles.pop(0)
+
+    sink = Sink()
+    controller = Controller()
+    bridge = ArmPublicationTelemetryBridge(sink, profile="G1_29")
+    for _ in range(3):
+        bridge.emit_cycle({}, controller)
+    publications = [record for record in sink.records if record.get("event") == "arm_publication"]
+    assert [record["request_id"] for record in publications] == [2, 1, 3]
+    assert publications[0]["published_q"] == [2.0, 2.5]
+    assert publications[2]["published_q"] is None
+    assert publications[0]["profile"] == "G1_29"
+    assert len(publications) == len({record["request_id"] for record in publications})
+
+
+def test_publication_bridge_retains_failed_writes_and_counts_pending_overflow():
+    from teleop.utils.full_pose_telemetry import ArmPublicationTelemetryBridge
+
+    class Sink:
+        def __init__(self):
+            self.accept = False
+            self.records = []
+
+        def emit(self, record):
+            if not self.accept:
+                return False
+            self.records.append(record)
+            return True
+
+    class Controller:
+        arm_joint_split = (1, 1)
+        publication_receipt_drop_count = 0
+
+        def __init__(self):
+            self.drained = False
+
+        def drain_arm_publication_receipts(self):
+            if self.drained:
+                return ()
+            self.drained = True
+            return tuple({"request_id": n, "published_q": (float(n), float(n)), "reason": "published", "timestamp_monotonic": float(n + 1), "arm_joint_split": (1, 1)} for n in range(4))
+
+    sink = Sink()
+    bridge = ArmPublicationTelemetryBridge(sink, profile="G1_29", pending_capacity=2)
+    controller = Controller()
+    bridge.emit_cycle({}, controller)
+    assert bridge.pending_buffer_drop_count == 2
+    sink.accept = True
+    bridge.emit_cycle({}, controller)
+    assert [record["request_id"] for record in sink.records if record.get("event") == "arm_publication"] == [0, 1]
+    assert bridge.pending_buffer_drop_count == 2
+
+
+def test_lifecycle_warning_callback_is_swallowed(monkeypatch):
+    from teleop.utils.full_pose_telemetry import emit_lifecycle_event_best_effort
+
+    class Sink:
+        def emit(self, record):
+            raise RuntimeError("sink failure")
+
+    def raising_warn(message):
+        raise RuntimeError("logger failure")
+
+    assert emit_lifecycle_event_best_effort(Sink(), "shutdown_finalization", warn=raising_warn) is False

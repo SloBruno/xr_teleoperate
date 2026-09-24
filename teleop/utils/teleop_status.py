@@ -70,6 +70,12 @@ class AsyncStatusFileSink:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def _warn_best_effort(self, message: str) -> None:
+        try:
+            self._warn(message)
+        except BaseException:
+            pass
+
     def emit(self, payload: str | Mapping[str, Any]) -> bool:
         """Queue telemetry without I/O or JSON encoding on the control path."""
         with self._state_lock:
@@ -124,9 +130,9 @@ class AsyncStatusFileSink:
                     if self._close_requested.is_set() and self._queue.empty():
                         return
         except OSError as error:
-            self._warn(f"Could not initialize teleop status log: {error}")
+            self._warn_best_effort(f"Could not initialize teleop status log: {error}")
         except (TypeError, ValueError) as error:
-            self._warn(f"Could not serialize teleop status record: {error}")
+            self._warn_best_effort(f"Could not serialize teleop status record: {error}")
 
 
 class _DisabledStatusSink:
@@ -144,7 +150,10 @@ def create_status_sink(
     try:
         return AsyncStatusFileSink(path, warn, queue_size=queue_size)
     except Exception as error:
-        warn(f"Could not initialize teleop status sink: {error}")
+        try:
+            warn(f"Could not initialize teleop status sink: {error}")
+        except BaseException:
+            pass
         return _DisabledStatusSink()
 
 
