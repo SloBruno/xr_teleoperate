@@ -27,6 +27,14 @@ def pose(x=0.0, y=0.0, z=0.0, angle=0.0):
     )
 
 
+def roll_pose(x=0.0, y=0.0, z=0.0, angle=0.0):
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array(
+        [[1.0, 0.0, 0.0, x], [0.0, c, -s, y], [0.0, s, c, z], [0.0, 0.0, 0.0, 1.0]],
+        dtype=float,
+    )
+
+
 # Provenance: independently composed from the zero-angle joint origins and
 # fixed waist chain in assets/g1/g1_body29_hand14.urdf, including the L_ee/R_ee
 # Pinocchio operational-frame +[0.05, 0, 0] offset in robot_arm_ik.py.
@@ -154,8 +162,35 @@ def test_relative_controller_translation_and_rotation_maps_consistently_per_side
 
     moved = (pose(0.1, 0.0, 0.0, 0.2), pose(-0.1, 0.0, 0.0, -0.2))
     targets = calibrator.targets(moved, sample_timestamp=10.2, now=10.2)
-    assert np.allclose(targets[0], moved[0] @ np.linalg.inv(controllers[0]) @ measured[0])
-    assert np.allclose(targets[1], moved[1] @ np.linalg.inv(controllers[1]) @ measured[1])
+    assert targets[0][0, 3] == pytest.approx(measured[0][0, 3] + 0.1)
+    assert targets[1][0, 3] == pytest.approx(measured[1][0, 3] - 0.1)
+    np.testing.assert_allclose(
+        targets[0][:3, :3], moved[0][:3, :3] @ measured[0][:3, :3]
+    )
+    np.testing.assert_allclose(
+        targets[1][:3, :3], moved[1][:3, :3] @ measured[1][:3, :3]
+    )
+
+
+def test_controller_rotation_in_place_does_not_translate_wrist_target():
+    api = calibration_api()
+    calibrator = api.ControllerWristCalibrator()
+    measured = measured_zero_fk()
+    controllers = (
+        roll_pose(0.15, 0.25, 0.55),
+        roll_pose(0.15, -0.25, 0.55),
+    )
+    assert calibrator.calibrate(controllers, measured, 10.1, 10.0, 10.1)
+
+    rotated = (
+        roll_pose(0.15, 0.25, 0.55, math.radians(10.0)),
+        roll_pose(0.15, -0.25, 0.55, math.radians(-10.0)),
+    )
+    targets = calibrator.targets(rotated, 10.2, 10.2)
+
+    assert targets is not None
+    np.testing.assert_allclose(targets[0][:3, 3], measured[0][:3, 3], atol=1e-9)
+    np.testing.assert_allclose(targets[1][:3, 3], measured[1][:3, 3], atol=1e-9)
 
 
 def test_left_and_right_calibration_offsets_are_independent():

@@ -11,9 +11,14 @@ workspace is documented as pelvis-root, not “waist”.
 robot convention, makes them head-relative (yaw-only by default), and then
 adds the fixed synthetic translation `[+0.15, 0, +0.45]` m. That returned
 `TeleData.left/right_wrist_pose` is the controller input to calibration; it is
-not assumed to share the Pinocchio root origin. Calibration derives the
-controller-to-measured-pose offset from one fresh sample, returns the exact
-measured FK pose once, and validates every later mapped target in pelvis-root.
+not assumed to share the Pinocchio root origin. Calibration therefore keeps
+translation and rotation deltas separate: controller translation is added to
+the measured wrist position, while controller relative rotation is composed
+with the measured wrist orientation. It must not use one rigid
+`inv(controller) @ wrist` offset, because rotating that cross-origin offset
+would make an in-place controller rotation translate the wrist target.
+Calibration returns the exact measured FK pose once and validates every later
+mapped target in pelvis-root.
 
 The workspace gate uses the URDF shoulder origins after the fixed pelvis →
 waist-yaw → waist-roll → torso chain: left `[-0.0000072, +0.10022,

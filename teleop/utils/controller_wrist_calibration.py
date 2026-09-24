@@ -91,8 +91,17 @@ class ControllerWristCalibrator:
         if not self._within_absolute_workspace(measured_wrist_poses):
             return False
 
+        # Position and orientation must be calibrated independently because the
+        # controller poses and Pinocchio wrist poses use different origins.
+        # A full ``inv(controller) @ wrist`` SE(3) offset would make an
+        # in-place controller rotation orbit the wrist around the controller.
         self._offsets = tuple(
-            np.linalg.inv(np.asarray(controller, dtype=float)) @ np.asarray(measured, dtype=float)
+            (
+                np.asarray(measured, dtype=float)[:3, 3]
+                - np.asarray(controller, dtype=float)[:3, 3],
+                np.asarray(controller, dtype=float)[:3, :3].T
+                @ np.asarray(measured, dtype=float)[:3, :3],
+            )
             for controller, measured in zip(controller_poses, measured_wrist_poses)
         )
         self._measured_wrist_poses = tuple(pose.copy() for pose in measured_wrist_poses)
@@ -121,7 +130,15 @@ class ControllerWristCalibrator:
             if _rotation_distance(previous, current) > MAX_SAMPLE_ROTATION_JUMP_RAD:
                 return None
 
-        targets = tuple(current @ offset for current, offset in zip(controller_poses, self._offsets))
+        offsets = self._offsets
+        assert offsets is not None
+        targets = []
+        for current, (translation_offset, rotation_offset) in zip(controller_poses, offsets):
+            target = np.eye(4)
+            target[:3, :3] = current[:3, :3] @ rotation_offset
+            target[:3, 3] = current[:3, 3] + translation_offset
+            targets.append(target)
+        targets = tuple(targets)
         if not self._valid_pair(targets):
             return None
         for target, measured in zip(targets, self._measured_wrist_poses):
