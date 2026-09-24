@@ -1,14 +1,20 @@
 """Fail-closed Quest-controller to G1 wrist pose calibration.
 
-The absolute envelope is expressed in the G1 torso/waist reference frame used
-by the arm IK targets.  It is deliberately smaller than the reachable volume:
-the supplied G1_29 URDF places the shoulder origins at x~=0, y=+/-0.10 m,
-z~=0.25 m from ``torso_link`` and the arm chain adds about 0.19 m of nominal
-forward wrist-link offsets before the hand.  The bounds below retain margin
-from the torso, shoulder, and full joint-limit reach.  They are rejection
-limits, never clipping limits.  Runtime FK validation against the deployed
-Pinocchio model remains required before deployment; Pinocchio is optional in
-this test environment.
+Frame contract: ``G1_29_ArmIK.forward_kinematics`` returns the exact
+``reduced_robot.data.oMf[L_ee/R_ee]`` operational frames, and ``solve_ik``
+consumes targets in that same reduced Pinocchio model root frame.  For the
+checked-in URDF, the reduced root is the pelvis; this module deliberately
+does not call it a waist frame.  ``tv_wrapper`` produces incoming controller
+poses in a synthetic head-relative frame with +[0.15, 0, 0.45] origin
+translation, but calibration maps those poses to the measured Pinocchio FK
+sample before validating every resulting target.
+
+The workspace is a shoulder-relative spherical annulus in the pelvis-root
+frame.  Shoulder origins are taken from the URDF fixed zero waist chain;
+0.18 m is a conservative torso-clearance inner radius and 0.50 m is below
+the loose sum of the checked-in arm-link lengths plus margin.  The left/right
+half-space constraints keep a target on its own URDF shoulder side.  These
+are rejection limits, never clipping limits.
 """
 
 import math
@@ -26,16 +32,14 @@ MAX_TARGET_ROTATION_FROM_CALIBRATION_RAD = math.radians(90.0)
 MAX_SAMPLE_TRANSLATION_JUMP_M = 0.15
 MAX_SAMPLE_ROTATION_JUMP_RAD = math.radians(45.0)
 
-# Conservative per-side wrist-center bounds in the robot torso/waist frame.
-# Source geometry: assets/g1/g1_body29_hand14.urdf, shoulder origins
-# (x=0.0039563, y=+/-0.10022, z=0.24778), elbow origin x=0.015783,
-# wrist-roll origin x=0.100, wrist-pitch x=0.038, wrist-yaw x=0.046.
-# The x lower bound keeps the wrist in front of the torso; the side-specific
-# y bounds keep each wrist on its own side; z excludes hip/neck-level targets.
-G1_29_WRIST_WORKSPACE_M = {
-    "left": {"x": (0.05, 0.48), "y": (0.02, 0.62), "z": (0.45, 1.30)},
-    "right": {"x": (0.05, 0.48), "y": (-0.62, -0.02), "z": (0.45, 1.30)},
+# Derived from pelvis->waist_yaw(0)->waist_roll origin [-.0039635,0,.044]
+# -> torso_link -> shoulder_pitch origins in assets/g1/g1_body29_hand14.urdf.
+G1_29_SHOULDER_ORIGINS_M = {
+    "left": np.array([-0.0000072, 0.10022, 0.29178]),
+    "right": np.array([-0.0000072, -0.10021, 0.29178]),
 }
+G1_29_MIN_SHOULDER_REACH_M = 0.18
+G1_29_MAX_SHOULDER_REACH_M = 0.50
 
 
 def _is_rigid_se3(transform):
@@ -148,10 +152,13 @@ class ControllerWristCalibrator:
     @staticmethod
     def _within_absolute_workspace(poses):
         for side, pose in zip(("left", "right"), poses):
-            bounds = G1_29_WRIST_WORKSPACE_M[side]
             position = pose[:3, 3]
-            for axis, value in zip(("x", "y", "z"), position):
-                lower, upper = bounds[axis]
-                if not lower <= float(value) <= upper:
-                    return False
+            shoulder = G1_29_SHOULDER_ORIGINS_M[side]
+            reach = float(np.linalg.norm(position - shoulder))
+            if not G1_29_MIN_SHOULDER_REACH_M <= reach <= G1_29_MAX_SHOULDER_REACH_M:
+                return False
+            if side == "left" and position[1] < 0.0:
+                return False
+            if side == "right" and position[1] > 0.0:
+                return False
         return True

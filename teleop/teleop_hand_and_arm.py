@@ -26,6 +26,7 @@ from teleop.utils.quest_controls import joystick_to_locomotion
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
 from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
 from teleop.utils.arm_command_gate import publish_if_authorized
+from teleop.utils.arm_tracking_orchestration import run_arm_tracking_cycle
 from teleop.utils.teleop_status import AsyncStatusFileSink, TeleopStatusMonitor, camera_frame_is_usable
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -647,46 +648,30 @@ if __name__ == '__main__':
             # part of the controller-pose freshness window.
             controller_pose_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)
 
-            # Only solve new arm targets while the controller poses are fresh.
-            # On loss of controller authority, hold the measured joint position
-            # with zero feed-forward torque instead of advancing stale IK.
-            controller_targets = None
-            if args.arm == "G1_29":
-                if first_controller_targets is not None:
-                    controller_targets = first_controller_targets
-                    first_controller_targets = None
-                elif arm_calibration.calibrated and controller_pose_is_fresh:
-                    controller_targets = arm_calibration.targets(
-                        (tele_data.left_wrist_pose, tele_data.right_wrist_pose),
-                        tele_data.controller_sample_timestamp,
-                    )
-            elif controller_pose_is_fresh:
-                controller_targets = (tele_data.left_wrist_pose, tele_data.right_wrist_pose)
-
-            if controller_targets is None:
-                sol_q = current_lr_arm_q.copy()
-                sol_tauff = np.zeros_like(current_lr_arm_q)
-            else:
-                time_ik_start = time.time()
-                sol_q, sol_tauff = arm_ik.solve_ik(
-                    controller_targets[0],
-                    controller_targets[1],
-                    current_lr_arm_q,
-                    current_lr_arm_dq,
-                )
-                time_ik_end = time.time()
-                logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
-            final_sample_fresh = (
-                controller_pose_is_fresh
-                and controller_sample_is_fresh(tele_data.controller_sample_timestamp)
+            candidate_targets = None
+            calibration = arm_calibration if args.arm == "G1_29" else None
+            first_target = first_controller_targets if args.arm == "G1_29" else None
+            if args.arm != "G1_29" and controller_pose_is_fresh:
+                candidate_targets = (tele_data.left_wrist_pose, tele_data.right_wrist_pose)
+            time_ik_start = time.time()
+            cycle = run_arm_tracking_cycle(
+                arm_ctrl=arm_ctrl,
+                arm_ik=arm_ik,
+                calibrator=calibration,
+                controller_poses=(tele_data.left_wrist_pose, tele_data.right_wrist_pose),
+                sample_timestamp=tele_data.controller_sample_timestamp,
+                current_q=current_lr_arm_q,
+                current_dq=current_lr_arm_dq,
+                first_target=first_target,
+                candidate_targets=candidate_targets,
+                lifecycle_lock=LIFECYCLE_LOCK,
+                is_started=lambda: START,
+                is_stopped=lambda: STOP,
             )
-            _publish_arm_target_if_authorized(
-                arm_ctrl,
-                sol_q,
-                sol_tauff,
-                target_accepted=controller_targets is not None,
-                sample_fresh=final_sample_fresh,
-            )
+            if first_target is not None:
+                first_controller_targets = None
+            if cycle.target_accepted:
+                logger_mp.debug(f"ik:\t{round(time.time() - time_ik_start, 6)}")
 
             # record data
             if args.record:

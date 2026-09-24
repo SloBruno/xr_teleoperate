@@ -34,27 +34,17 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
 
     def test_stale_controller_pose_holds_measured_arm_position_without_solving_ik(self):
         source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("if controller_pose_is_fresh:", source)
-        self.assertIn("sol_q = current_lr_arm_q.copy()", source)
-        self.assertIn("sol_tauff = np.zeros_like(current_lr_arm_q)", source)
+        self.assertIn("run_arm_tracking_cycle(", source)
+        self.assertIn("sample_timestamp=tele_data.controller_sample_timestamp", source)
 
     def test_controller_freshness_is_rechecked_before_and_after_ik(self):
         source = SCRIPT.read_text(encoding="utf-8")
+        helper = (Path(__file__).parents[1] / "teleop/utils/arm_tracking_orchestration.py").read_text()
         state_read = source.index("current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()")
-        ik_call = source.index("arm_ik.solve_ik")
-        arm_write = source.index("_publish_arm_target_if_authorized(", ik_call)
-        pre_ik_check = source.index(
-            "controller_pose_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)",
-            state_read,
-        )
-        post_ik_check = source.index(
-            "and controller_sample_is_fresh(tele_data.controller_sample_timestamp)",
-            ik_call,
-        )
-        self.assertLess(state_read, pre_ik_check)
-        self.assertLess(pre_ik_check, ik_call)
-        self.assertLess(ik_call, post_ik_check)
-        self.assertLess(post_ik_check, arm_write)
+        cycle = source.index("run_arm_tracking_cycle(", state_read)
+        self.assertLess(state_read, cycle)
+        self.assertEqual(helper.count("controller_sample_is_fresh(sample_timestamp, now)"), 2)
+        self.assertIn("publish_if_authorized(", helper)
 
     def test_g1_29_uses_measured_fk_for_per_start_controller_wrist_calibration(self):
         source = SCRIPT.read_text(encoding="utf-8")
@@ -65,22 +55,19 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
 
     def test_arm_ik_is_never_called_until_calibration_has_succeeded(self):
         source = SCRIPT.read_text(encoding="utf-8")
-        ik_call = source.index("arm_ik.solve_ik")
-        calibration_guard = source.index("if arm_calibration.calibrated and controller_pose_is_fresh:")
-        self.assertLess(calibration_guard, ik_call)
+        self.assertIn("calibration = arm_calibration if args.arm == \"G1_29\" else None", source)
+        self.assertIn("calibrator=calibration", source)
 
     def test_invalid_controller_target_holds_measured_q_without_new_ik_or_arm_write(self):
         source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("controller_targets = arm_calibration.targets(", source)
-        self.assertIn("sol_q = current_lr_arm_q.copy()", source)
-        self.assertIn("sol_tauff = np.zeros_like(current_lr_arm_q)", source)
-        self.assertIn("if controller_targets is None:", source)
+        self.assertIn("target_accepted=target is not None", (Path(__file__).parents[1] / "teleop/utils/arm_tracking_orchestration.py").read_text())
+        self.assertIn("calibrator.targets(controller_poses, sample_timestamp", (Path(__file__).parents[1] / "teleop/utils/arm_tracking_orchestration.py").read_text())
 
     def test_alternate_arm_profiles_do_not_use_controller_wrist_calibration(self):
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn('if args.arm == "G1_29":', source)
         self.assertIn('if args.arm == "G1_29" and not arm_calibration.calibrated:', source)
-        self.assertIn('elif controller_pose_is_fresh:', source)
+        self.assertIn('if args.arm != "G1_29" and controller_pose_is_fresh:', source)
 
     def test_prearm_sample_is_carried_into_first_tracking_command(self):
         source = SCRIPT.read_text(encoding="utf-8")
@@ -88,7 +75,7 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         consume = source.index("first_controller_targets = arm_calibration.consume_first_target()", calibrate)
         first_break = source.index("break", consume)
         tracking_loop = source.index("# main loop. robot start to follow VR user's motion")
-        first_use = source.index("controller_targets = first_controller_targets", tracking_loop)
+        first_use = source.index("first_target = first_controller_targets", tracking_loop)
         self.assertLess(calibrate, consume)
         self.assertLess(consume, first_break)
         self.assertLess(first_break, first_use)
@@ -104,17 +91,15 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
 
     def test_final_arm_publication_is_serialized_and_stop_holds_measured_q(self):
         source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("_publish_arm_target_if_authorized", source)
+        self.assertIn("run_arm_tracking_cycle(", source)
         self.assertIn("lifecycle_lock=LIFECYCLE_LOCK", source)
         self.assertIn("is_stopped=lambda: STOP", source)
-        self.assertIn("np.zeros_like(current_lr_arm_q)", source)
         self.assertNotIn("arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)", source)
 
     def test_rejected_target_path_does_not_publish_ik_solution(self):
         source = SCRIPT.read_text(encoding="utf-8")
-        reject_path = source[source.index("if controller_targets is None:"):source.index("# record data")]
-        self.assertNotIn("ctrl_dual_arm(sol_q", reject_path)
-        self.assertIn("controller_targets is not None", reject_path)
+        self.assertIn("cycle.target_accepted", source)
+        self.assertIn("run_arm_tracking_cycle", source)
 
 
 if __name__ == "__main__":
