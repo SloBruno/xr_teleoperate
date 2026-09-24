@@ -332,6 +332,104 @@ def test_arm_publication_preserves_exact_profile_sized_q(split):
     assert reason == "published"
 
 
+def test_pending_arm_publication_keeps_request_id_without_calling_it_published():
+    from teleop.utils.full_pose_telemetry import publish_arm_command_for_telemetry
+
+    class PendingController:
+        arm_joint_split = (5, 5)
+
+        def ctrl_dual_arm(self, q_target, tauff_target):
+            return 41
+
+        def drain_arm_publication_receipts(self):
+            return ()
+
+    publication = publish_arm_command_for_telemetry(
+        PendingController(), np.ones(10), np.zeros(10)
+    )
+
+    assert publication.published_q is None
+    assert publication.reason == "arm_command_publication_pending"
+    assert publication.request_id == 41
+    np.testing.assert_array_equal(publication.requested_q, np.ones(10))
+
+
+def test_build_pose_record_separates_requested_q_from_exact_published_q():
+    from teleop.utils.full_pose_telemetry import build_pose_record
+
+    record = build_pose_record(
+        timestamp=10.0,
+        timestamp_monotonic=10.0,
+        lifecycle="tracking",
+        controller_sample_timestamp=9.9,
+        left_wrist_pose=None,
+        right_wrist_pose=None,
+        measured_arm_q=np.zeros(10),
+        commanded_arm_q=None,
+        commanded_arm_q_reason="arm_command_publication_pending",
+        arm_joint_split=(5, 5),
+        arm_command_request_id=41,
+        requested_arm_q=np.ones(10),
+        selected_arm_q=np.ones(10),
+    )
+
+    assert record["arm"]["request_id"] == 41
+    assert record["arm"]["left"]["requested_q"] == [1.0] * 5
+    assert record["arm"]["right"]["selected_q"] == [1.0] * 5
+    assert record["arm"]["left"]["commanded_q"] is None
+
+
+def test_completed_receipt_is_correlated_and_exact_q_is_used():
+    from teleop.utils.full_pose_telemetry import publish_arm_command_for_telemetry
+
+    requested = np.arange(10, dtype=float)
+    clipped = requested * 0.1
+
+    class CompletedController:
+        arm_joint_split = (5, 5)
+
+        def ctrl_dual_arm(self, q_target, tauff_target):
+            return 7
+
+        def drain_arm_publication_receipts(self):
+            return ({
+                "request_id": 7,
+                "published_q": clipped,
+                "reason": "published",
+            },)
+
+    publication = publish_arm_command_for_telemetry(
+        CompletedController(), requested, np.zeros(10)
+    )
+
+    assert publication.request_id == 7
+    assert publication.reason == "published"
+    np.testing.assert_array_equal(publication.published_q, clipped)
+
+
+def test_lifecycle_emit_is_best_effort_for_builder_and_sink_failures(monkeypatch):
+    from teleop.utils import full_pose_telemetry
+
+    warnings = []
+
+    class FailingSink:
+        def emit(self, record):
+            raise RuntimeError("sink failed")
+
+    assert full_pose_telemetry.emit_lifecycle_event_best_effort(
+        FailingSink(), "one", warn=warnings.append
+    ) is False
+    monkeypatch.setattr(
+        full_pose_telemetry,
+        "build_lifecycle_event",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("invalid event")),
+    )
+    assert full_pose_telemetry.emit_lifecycle_event_best_effort(
+        object(), "two", warn=warnings.append
+    ) is False
+    assert len(warnings) == 2
+
+
 def test_arm_publication_rejects_returned_dimension_mismatch_explicitly():
     from teleop.utils.full_pose_telemetry import publish_arm_command_for_telemetry
 

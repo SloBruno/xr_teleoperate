@@ -1,6 +1,7 @@
 import numpy as np
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -74,16 +75,20 @@ class DataBuffer:
 
 
 @dataclass(frozen=True)
-class ArmCommandPublication:
-    published_q: object
+class ArmPublicationReceipt:
+    request_id: int
+    published_q: tuple[float, ...] | None
     reason: str
+    timestamp_monotonic: float
+    arm_joint_split: tuple[int, int]
 
 
 class _ArmPublicationMixin:
     def _init_arm_publication_state(self):
-        self._publication_condition = threading.Condition()
         self._command_request_id = 0
-        self._published_commands = {}
+        self._publication_receipts = deque(maxlen=64)
+        self._publication_receipt_drop_count = 0
+        self._publication_receipt_lock = threading.Lock()
 
     def _capture_arm_command(self):
         with self.ctrl_lock:
@@ -101,30 +106,37 @@ class _ArmPublicationMixin:
             return self._command_request_id
 
     def _record_arm_publication(self, request_id, published_q, reason):
-        with self._publication_condition:
-            self._published_commands[request_id] = ArmCommandPublication(
-                None if published_q is None else np.asarray(published_q, dtype=float).copy(),
-                reason,
-            )
-            while len(self._published_commands) > 32:
-                del self._published_commands[min(self._published_commands)]
-            self._publication_condition.notify_all()
+        if published_q is None:
+            frozen_q = None
+        else:
+            frozen_q = tuple(float(value) for value in np.asarray(published_q, dtype=float).reshape(-1))
+        receipt = ArmPublicationReceipt(
+            request_id=int(request_id),
+            published_q=frozen_q,
+            reason=str(reason),
+            timestamp_monotonic=time.monotonic(),
+            arm_joint_split=tuple(self.arm_joint_split),
+        )
+        with self._publication_receipt_lock:
+            if len(self._publication_receipts) == self._publication_receipts.maxlen:
+                self._publication_receipt_drop_count += 1
+            self._publication_receipts.append(receipt)
 
-    def _await_arm_publication(self, request_id):
-        deadline = time.monotonic() + 0.1
-        with self._publication_condition:
-            while request_id not in self._published_commands:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0.0:
-                    return ArmCommandPublication(None, "arm_command_publication_timeout")
-                if any(published_id > request_id for published_id in self._published_commands):
-                    return ArmCommandPublication(None, "arm_command_publication_superseded")
-                self._publication_condition.wait(timeout=remaining)
-            publication = self._published_commands[request_id]
-            return ArmCommandPublication(
-                None if publication.published_q is None else publication.published_q.copy(),
-                publication.reason,
-            )
+    def drain_arm_publication_receipts(self):
+        with self._publication_receipt_lock:
+            receipts = tuple(self._publication_receipts)
+            self._publication_receipts.clear()
+            return receipts
+
+    @property
+    def publication_receipt_drop_count(self):
+        with self._publication_receipt_lock:
+            return self._publication_receipt_drop_count
+
+    def _record_failed_arm_publication(self, request_id, error):
+        self._record_arm_publication(
+            request_id, None, f"arm_command_publication_failed:{type(error).__name__}"
+        )
 
 
 class G1_29_ArmController(_ArmPublicationMixin):
@@ -273,11 +285,9 @@ class G1_29_ArmController(_ArmPublicationMixin):
             try:
                 self.lowcmd_publisher.Write(self.msg)
             except Exception as error:
-                self._record_arm_publication(
-                    request_id, None, f"arm_command_publication_failed:{type(error).__name__}"
-                )
-                raise
-            self._record_arm_publication(request_id, cliped_arm_q_target, "published")
+                self._record_failed_arm_publication(request_id, error)
+            else:
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -293,7 +303,7 @@ class G1_29_ArmController(_ArmPublicationMixin):
     def ctrl_dual_arm(self, q_target, tauff_target):
         '''Set control target values q & tau of the left and right arm motors.'''
         request_id = self._set_arm_command(q_target, tauff_target)
-        return self._await_arm_publication(request_id)
+        return request_id
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
@@ -565,11 +575,9 @@ class G1_23_ArmController(_ArmPublicationMixin):
             try:
                 self.lowcmd_publisher.Write(self.msg)
             except Exception as error:
-                self._record_arm_publication(
-                    request_id, None, f"arm_command_publication_failed:{type(error).__name__}"
-                )
-                raise
-            self._record_arm_publication(request_id, cliped_arm_q_target, "published")
+                self._record_failed_arm_publication(request_id, error)
+            else:
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -585,7 +593,7 @@ class G1_23_ArmController(_ArmPublicationMixin):
     def ctrl_dual_arm(self, q_target, tauff_target):
         '''Set control target values q & tau of the left and right arm motors.'''
         request_id = self._set_arm_command(q_target, tauff_target)
-        return self._await_arm_publication(request_id)
+        return request_id
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
@@ -847,11 +855,9 @@ class H1_2_ArmController(_ArmPublicationMixin):
             try:
                 self.lowcmd_publisher.Write(self.msg)
             except Exception as error:
-                self._record_arm_publication(
-                    request_id, None, f"arm_command_publication_failed:{type(error).__name__}"
-                )
-                raise
-            self._record_arm_publication(request_id, cliped_arm_q_target, "published")
+                self._record_failed_arm_publication(request_id, error)
+            else:
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -867,7 +873,7 @@ class H1_2_ArmController(_ArmPublicationMixin):
     def ctrl_dual_arm(self, q_target, tauff_target):
         '''Set control target values q & tau of the left and right arm motors.'''
         request_id = self._set_arm_command(q_target, tauff_target)
-        return self._await_arm_publication(request_id)
+        return request_id
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
@@ -1120,11 +1126,9 @@ class H1_ArmController(_ArmPublicationMixin):
             try:
                 self.lowcmd_publisher.Write(self.msg)
             except Exception as error:
-                self._record_arm_publication(
-                    request_id, None, f"arm_command_publication_failed:{type(error).__name__}"
-                )
-                raise
-            self._record_arm_publication(request_id, cliped_arm_q_target, "published")
+                self._record_failed_arm_publication(request_id, error)
+            else:
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -1140,7 +1144,7 @@ class H1_ArmController(_ArmPublicationMixin):
     def ctrl_dual_arm(self, q_target, tauff_target):
         '''Set control target values q & tau of the left and right arm motors.'''
         request_id = self._set_arm_command(q_target, tauff_target)
-        return self._await_arm_publication(request_id)
+        return request_id
     
     def get_current_motor_q(self):
         '''Return current state q of all body motors.'''
@@ -1363,11 +1367,9 @@ class H2_ArmController(_ArmPublicationMixin):
             try:
                 self.lowcmd_publisher.Write(self.msg)
             except Exception as error:
-                self._record_arm_publication(
-                    request_id, None, f"arm_command_publication_failed:{type(error).__name__}"
-                )
-                raise
-            self._record_arm_publication(request_id, cliped_arm_q_target, "published")
+                self._record_failed_arm_publication(request_id, error)
+            else:
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -1381,7 +1383,7 @@ class H2_ArmController(_ArmPublicationMixin):
     def ctrl_dual_arm(self, q_target, tauff_target):
         """Set control target values q & tau of the left and right arm motors."""
         request_id = self._set_arm_command(q_target, tauff_target)
-        return self._await_arm_publication(request_id)
+        return request_id
 
     def get_mode_machine(self):
         """Return current dds mode machine."""

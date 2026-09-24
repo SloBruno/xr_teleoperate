@@ -146,6 +146,11 @@ class PrearmActuatorGateTest(unittest.TestCase):
         hold = activate.index("lowstate.motor_state[id].q for id in G1_29_JointArmIndex")
         start = activate.index("self.publish_thread.start()")
         self.assertLess(hold, start)
+
+    def test_all_ctrl_dual_arm_paths_return_without_publication_wait(self):
+        source = ARM.read_text(encoding="utf-8")
+        self.assertNotIn("_await_arm_publication", source)
+        self.assertEqual(source.count("return request_id"), 5)
     def test_constructors_create_no_dds_command_publishers(self):
         arm_init = ast.get_source_segment(
             ARM.read_text(encoding="utf-8"),

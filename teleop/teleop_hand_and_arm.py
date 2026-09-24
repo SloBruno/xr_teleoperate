@@ -36,6 +36,7 @@ from teleop.utils.full_pose_telemetry import (
     build_lifecycle_event,
     build_pose_record,
     create_pose_telemetry_sink,
+    emit_lifecycle_event_best_effort,
     publish_arm_command_for_telemetry,
 )
 from sshkeyboard import listen_keyboard, stop_listening
@@ -100,9 +101,11 @@ def _emit_lifecycle_events(sink):
     if sink is None:
         return
     for event in events:
-        wall_clock = time.time()
-        sink.emit(build_lifecycle_event(
-            event, timestamp=wall_clock, timestamp_monotonic=time.monotonic()))
+        emit_lifecycle_event_best_effort(sink, event, warn=logger_mp.warning)
+
+
+def _safe_emit_lifecycle_event(sink, event, *, cause=None):
+    emit_lifecycle_event_best_effort(sink, event, cause=cause, warn=logger_mp.warning)
 
 
 def on_press(key):
@@ -447,8 +450,7 @@ if __name__ == '__main__':
                     outputs_activated = False
                     raise RuntimeError("Arm preparation pose was not reached; refusing tracking.")
             PREPARATION_COMPLETE = True
-        pose_telemetry_sink.emit(build_lifecycle_event(
-            "preparation_ready", timestamp=time.time(), timestamp_monotonic=time.monotonic()))
+        _safe_emit_lifecycle_event(pose_telemetry_sink, "preparation_ready")
 
         # Initialize before the pre-arm loop: some display modes intentionally do
         # not fetch local frames, but their status must remain observable.
@@ -552,8 +554,7 @@ if __name__ == '__main__':
             raise KeyboardInterrupt
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
-        pose_telemetry_sink.emit(build_lifecycle_event(
-            "tracking_started", timestamp=time.time(), timestamp_monotonic=time.monotonic()))
+        _safe_emit_lifecycle_event(pose_telemetry_sink, "tracking_started")
         arm_ctrl.speed_gradual_max()
 
         head_img = None
@@ -699,16 +700,18 @@ if __name__ == '__main__':
                 controller_pose_is_fresh
                 and controller_sample_is_fresh(tele_data.controller_sample_timestamp)
             ):
-                commanded_arm_q, commanded_arm_q_reason = publish_arm_command_for_telemetry(
+                arm_publication = publish_arm_command_for_telemetry(
                     arm_ctrl, sol_q, sol_tauff
                 )
             else:
                 # The sample expired during IK; discard its target and hold the
                 # most recently measured arm position instead.
                 hold_q = arm_ctrl.get_current_dual_arm_q().copy()
-                commanded_arm_q, commanded_arm_q_reason = publish_arm_command_for_telemetry(
+                arm_publication = publish_arm_command_for_telemetry(
                     arm_ctrl, hold_q, np.zeros_like(current_lr_arm_q)
                 )
+            commanded_arm_q = arm_publication.published_q
+            commanded_arm_q_reason = arm_publication.reason
 
             dex3_measured_q = None
             dex3_commanded_q = None
@@ -726,6 +729,10 @@ if __name__ == '__main__':
                 measured_arm_q=current_lr_arm_q,
                 commanded_arm_q=commanded_arm_q,
                 commanded_arm_q_reason=commanded_arm_q_reason,
+                arm_command_request_id=arm_publication.request_id,
+                requested_arm_q=arm_publication.requested_q,
+                selected_arm_q=arm_publication.selected_q,
+                arm_publication_drop_count=getattr(arm_ctrl, "publication_receipt_drop_count", 0),
                 arm_joint_split=arm_ctrl.arm_joint_split,
                 dex3_configured=args.ee == "dex3",
                 dex3_measured_q=dex3_measured_q,
@@ -897,7 +904,6 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         shutdown_cause = "shutdown_interrupted"
         logger_mp.info("⛔ KeyboardInterrupt, exiting program...")
-        raise
     except Exception:
         shutdown_cause = "shutdown_exception"
         import traceback
@@ -906,14 +912,9 @@ if __name__ == '__main__':
         _emit_lifecycle_events(pose_telemetry_sink)
         if pose_telemetry_sink is not None:
             if shutdown_cause is not None:
-                pose_telemetry_sink.emit(build_lifecycle_event(
-                    shutdown_cause,
-                    cause=shutdown_cause,
-                    timestamp=time.time(),
-                    timestamp_monotonic=time.monotonic(),
-                ))
-            pose_telemetry_sink.emit(build_lifecycle_event(
-                "shutdown_finalization", timestamp=time.time(), timestamp_monotonic=time.monotonic()))
+                _safe_emit_lifecycle_event(
+                    pose_telemetry_sink, shutdown_cause, cause=shutdown_cause)
+            _safe_emit_lifecycle_event(pose_telemetry_sink, "shutdown_finalization")
         # Dex3 is an independent post-r output. Stop its child process before
         # the potentially slower arm return-to-preparation motion.
         if hand_outputs_activated:

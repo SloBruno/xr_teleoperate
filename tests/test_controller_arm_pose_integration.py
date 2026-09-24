@@ -83,5 +83,17 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         exception_handler = source[source.index("except Exception:"):source.index("finally:")]
         self.assertNotIn("raise", exception_handler)
 
+    def test_keyboard_interrupt_continues_to_finally_cleanup(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        interrupt_handler = source[source.index("except KeyboardInterrupt:"):source.index("except Exception:")]
+        self.assertNotIn("raise", interrupt_handler)
+
+    def test_lifecycle_shutdown_emits_are_guarded_individually(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        finally_block = source[source.index("finally:"):]
+        self.assertIn("emit_lifecycle_event_best_effort", source)
+        self.assertIn("hand_ctrl.deactivate()", finally_block)
+        self.assertIn("arm_ctrl.deactivate()", finally_block)
+
 if __name__ == "__main__":
     unittest.main()

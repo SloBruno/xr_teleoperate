@@ -6,11 +6,13 @@ from datetime import datetime, timezone
 import json
 import math
 import os
+import time
 from pathlib import Path
 from queue import Empty, Full, Queue
 import threading
 import uuid
 from typing import Callable, Mapping
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -145,6 +147,29 @@ def build_lifecycle_event(
     return record
 
 
+def emit_lifecycle_event_best_effort(
+    sink,
+    event: str,
+    *,
+    warn: Callable[[str], None],
+    cause: str | None = None,
+) -> bool:
+    """Build and enqueue one lifecycle event without affecting control/cleanup."""
+    if sink is None:
+        return False
+    try:
+        sink.emit(build_lifecycle_event(
+            event,
+            cause=cause,
+            timestamp=time.time(),
+            timestamp_monotonic=time.monotonic(),
+        ))
+    except Exception as error:
+        warn(f"Failed to emit lifecycle telemetry {event}: {error}")
+        return False
+    return True
+
+
 def build_pose_record(
     *,
     timestamp: float,
@@ -156,6 +181,10 @@ def build_pose_record(
     measured_arm_q: object,
     commanded_arm_q: object,
     commanded_arm_q_reason: str | None = None,
+    arm_command_request_id: int | None = None,
+    requested_arm_q: object = None,
+    selected_arm_q: object = None,
+    arm_publication_drop_count: int = 0,
     dex3_measured_q: object = None,
     dex3_commanded_q: object = None,
     dex3_configured: bool = False,
@@ -217,13 +246,24 @@ def build_pose_record(
             "commanded_q": arm_commanded["right"],
         },
     }
+    if any(value is not None for value in (arm_command_request_id, requested_arm_q, selected_arm_q)):
+        arm_record["request_id"] = None if arm_command_request_id is None else int(arm_command_request_id)
+        for side in ("left", "right"):
+            arm_record[side]["requested_q"] = _split_arm(
+                _vector_or_none(requested_arm_q, expected_size=arm_expected_size), arm_joint_split
+            )[side]
+            arm_record[side]["selected_q"] = _split_arm(
+                _vector_or_none(selected_arm_q, expected_size=arm_expected_size), arm_joint_split
+            )[side]
+    if arm_publication_drop_count:
+        arm_record["publication_drop_count"] = max(0, int(arm_publication_drop_count))
     if commanded_arm_q is not None and commanded_values is None:
         commanded_arm_q_reason = (
             f"arm_command_dimension_mismatch:expected={arm_expected_size}:"
             f"actual={_vector_size(commanded_arm_q)}"
         )
     if commanded_arm_q_reason is not None:
-        for side in arm_record.values():
+        for side in (arm_record["left"], arm_record["right"]):
             side["commanded_q_reason"] = str(commanded_arm_q_reason)
     return {
         "schema_version": 1,
@@ -262,8 +302,21 @@ def build_pose_record(
     }
 
 
+@dataclass(frozen=True)
+class ArmCommandTelemetry:
+    published_q: object
+    reason: str
+    request_id: int | None = None
+    requested_q: object = None
+    selected_q: object = None
+
+    def __iter__(self):
+        yield self.published_q
+        yield self.reason
+
+
 def publish_arm_command_for_telemetry(controller, q_target, tauff_target):
-    """Return the controller's published q snapshot and an explicit outcome reason."""
+    """Submit immediately and attach a completed receipt only when already available."""
     arm_joint_split = _normalize_arm_joint_split(
         getattr(controller, "arm_joint_split", (7, 7))
     )
@@ -272,36 +325,49 @@ def publish_arm_command_for_telemetry(controller, q_target, tauff_target):
     tauff_size = _vector_size(tauff_target)
     if target_size != expected_size or tauff_size != expected_size:
         actual_size = target_size if target_size != expected_size else tauff_size
-        return None, f"arm_command_target_dimension_mismatch:expected={expected_size}:actual={actual_size}"
+        return ArmCommandTelemetry(None, f"arm_command_target_dimension_mismatch:expected={expected_size}:actual={actual_size}")
     if _vector_or_none(q_target, expected_size=expected_size) is None:
-        return None, "arm_command_target_invalid"
+        return ArmCommandTelemetry(None, "arm_command_target_invalid")
     if _vector_or_none(tauff_target, expected_size=expected_size) is None:
-        return None, "arm_command_tauff_target_invalid"
+        return ArmCommandTelemetry(None, "arm_command_tauff_target_invalid")
     try:
         publication = controller.ctrl_dual_arm(q_target, tauff_target)
     except Exception as error:
-        return None, f"arm_command_publication_failed:{type(error).__name__}"
+        return ArmCommandTelemetry(None, f"arm_command_publication_failed:{type(error).__name__}")
     if publication is None:
-        return None, "arm_command_publication_unavailable"
+        return ArmCommandTelemetry(None, "arm_command_publication_unavailable")
+    requested_q = np.asarray(q_target, dtype=float).copy()
+    request_id = None
     if isinstance(publication, Mapping):
         published_q = publication.get("published_q")
         reason = publication.get("reason")
+        request_id = publication.get("request_id")
     else:
         published_q = getattr(publication, "published_q", None)
         reason = getattr(publication, "reason", None)
+        request_id = publication if isinstance(publication, (int, np.integer)) else getattr(publication, "request_id", None)
+    if request_id is not None and hasattr(controller, "drain_arm_publication_receipts"):
+        for receipt in controller.drain_arm_publication_receipts():
+            receipt_id = receipt.get("request_id") if isinstance(receipt, Mapping) else getattr(receipt, "request_id", None)
+            if receipt_id == int(request_id):
+                published_q = receipt.get("published_q") if isinstance(receipt, Mapping) else getattr(receipt, "published_q", None)
+                reason = receipt.get("reason") if isinstance(receipt, Mapping) else getattr(receipt, "reason", None)
+                break
+        else:
+            return ArmCommandTelemetry(None, "arm_command_publication_pending", int(request_id), requested_q, requested_q.copy())
     published_size = _vector_size(published_q)
     if published_size != expected_size:
-        return None, (
+        return ArmCommandTelemetry(None, (
             f"arm_command_publication_dimension_mismatch:expected={expected_size}:"
             f"actual={published_size}"
-        )
+        ), request_id, requested_q, requested_q.copy())
     published_q = _vector_or_none(published_q, expected_size=expected_size)
     if published_q is None:
         publication_reason = str(reason or "arm_command_publication_unavailable")
         if publication_reason == "published":
             publication_reason = "arm_command_publication_invalid"
-        return None, publication_reason
-    return np.asarray(published_q, dtype=float), str(reason or "published")
+        return ArmCommandTelemetry(None, publication_reason, request_id, requested_q, requested_q.copy())
+    return ArmCommandTelemetry(np.asarray(published_q, dtype=float), str(reason or "published"), request_id, requested_q, requested_q.copy())
 
 
 class PoseTelemetryJsonlSink:
