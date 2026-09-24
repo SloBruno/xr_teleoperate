@@ -233,6 +233,81 @@ def test_lifecycle_event_record_is_structured_without_serialization():
     assert event["timestamp_monotonic"] == 20.0
 
 
+def test_lifecycle_event_rejects_nonpositive_or_nonfinite_monotonic_timestamps():
+    from teleop.utils.full_pose_telemetry import build_lifecycle_event
+
+    for invalid in (0.0, -1.0, float("nan"), float("inf")):
+        with unittest.TestCase().assertRaises(ValueError):
+            build_lifecycle_event(
+                "tracking_started", timestamp=10.0, timestamp_monotonic=invalid
+            )
+
+
+def test_arm_telemetry_uses_the_exact_published_target_from_the_controller():
+    from teleop.utils.full_pose_telemetry import (
+        build_pose_record,
+        publish_arm_command_for_telemetry,
+    )
+
+    requested = np.arange(14, dtype=float) + 100.0
+    published = np.arange(14, dtype=float) + 0.25
+
+    class FakeLimiter:
+        def ctrl_dual_arm(self, q_target, tauff_target):
+            assert np.array_equal(q_target, requested)
+            return {"published_q": published, "reason": "published"}
+
+    published_q, reason = publish_arm_command_for_telemetry(
+        FakeLimiter(), requested, np.zeros(14)
+    )
+    record = build_pose_record(
+        timestamp=10.0,
+        timestamp_monotonic=10.0,
+        lifecycle="tracking",
+        controller_sample_timestamp=9.9,
+        left_wrist_pose=None,
+        right_wrist_pose=None,
+        measured_arm_q=np.zeros(14),
+        commanded_arm_q=published_q,
+        commanded_arm_q_reason=reason,
+    )
+
+    assert record["arm"]["left"]["commanded_q"] == published[:7].tolist()
+    assert record["arm"]["right"]["commanded_q"] == published[7:].tolist()
+    assert record["arm"]["left"]["commanded_q"] != requested[:7].tolist()
+
+
+def test_arm_telemetry_records_null_and_reason_when_publication_is_unavailable():
+    from teleop.utils.full_pose_telemetry import (
+        build_pose_record,
+        publish_arm_command_for_telemetry,
+    )
+
+    class UnavailableController:
+        def ctrl_dual_arm(self, q_target, tauff_target):
+            return None
+
+    published_q, reason = publish_arm_command_for_telemetry(
+        UnavailableController(), np.ones(14), np.zeros(14)
+    )
+    record = build_pose_record(
+        timestamp=10.0,
+        timestamp_monotonic=10.0,
+        lifecycle="tracking",
+        controller_sample_timestamp=9.9,
+        left_wrist_pose=None,
+        right_wrist_pose=None,
+        measured_arm_q=np.zeros(14),
+        commanded_arm_q=published_q,
+        commanded_arm_q_reason=reason,
+    )
+
+    assert record["arm"]["left"]["commanded_q"] is None
+    assert record["arm"]["right"]["commanded_q"] is None
+    assert record["arm"]["left"]["commanded_q_reason"] == "arm_command_publication_unavailable"
+    assert record["arm"]["right"]["commanded_q_reason"] == "arm_command_publication_unavailable"
+
+
 def test_failed_telemetry_initialization_returns_nonblocking_sink(monkeypatch, tmp_path):
     from teleop.utils import full_pose_telemetry
 

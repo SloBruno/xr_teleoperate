@@ -22,7 +22,8 @@ def test_teleop_main_loop_records_full_pose_without_serializing_in_control_path(
     assert 'left_wrist_pose=getattr(tele_data, "left_wrist_pose", None)' in source
     assert 'right_wrist_pose=getattr(tele_data, "right_wrist_pose", None)' in source
     assert "measured_arm_q=current_lr_arm_q" in source
-    assert "commanded_arm_q=sol_q" in source
+    assert "commanded_arm_q=commanded_arm_q" in source
+    assert "commanded_arm_q_reason=commanded_arm_q_reason" in source
     assert "dex3_measured_q=dex3_measured_q" in source
     assert "dex3_commanded_q=dex3_commanded_q" in source
     assert "pose_telemetry_sink.emit" in source

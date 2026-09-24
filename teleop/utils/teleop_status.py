@@ -130,8 +130,8 @@ class AsyncStatusFileSink:
 
 
 class _DisabledStatusSink:
-    def emit(self, payload: str | Mapping[str, Any]) -> None:
-        return None
+    def emit(self, payload: str | Mapping[str, Any]) -> bool:
+        return False
 
     def close(self) -> None:
         return None

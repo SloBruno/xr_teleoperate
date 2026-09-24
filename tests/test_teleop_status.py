@@ -57,6 +57,12 @@ def test_status_file_sink_degrades_to_noop_when_storage_setup_fails(monkeypatch)
     assert warnings == ["Could not initialize teleop status log: read-only"]
 
 
+def test_disabled_status_sink_emit_returns_false():
+    from teleop.utils.teleop_status import _DisabledStatusSink
+
+    assert _DisabledStatusSink().emit({"event": "ignored"}) is False
+
+
 
 def test_status_monitor_emits_structured_heartbeat_with_control_ages():
     from teleop.utils.teleop_status import TeleopStatusMonitor

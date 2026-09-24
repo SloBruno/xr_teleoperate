@@ -104,11 +104,14 @@ def build_lifecycle_event(
     event: str, *, timestamp: float, timestamp_monotonic: float, cause: str | None = None
 ) -> dict:
     """Build a lifecycle snapshot without JSON or filesystem work."""
+    monotonic_timestamp = _finite_timestamp(timestamp_monotonic)
+    if monotonic_timestamp is None:
+        raise ValueError("timestamp_monotonic must be a finite positive monotonic timestamp")
     record = {
         "schema_version": 1,
         "event": str(event),
         "timestamp_utc": _utc_timestamp(timestamp),
-        "timestamp_monotonic": float(timestamp_monotonic),
+        "timestamp_monotonic": monotonic_timestamp,
         "clock_domain": {
             "timestamp": "wall_clock_utc",
             "timestamp_monotonic": "monotonic",
@@ -129,6 +132,7 @@ def build_pose_record(
     right_wrist_pose: object,
     measured_arm_q: object,
     commanded_arm_q: object,
+    commanded_arm_q_reason: str | None = None,
     dex3_measured_q: object = None,
     dex3_commanded_q: object = None,
     dex3_configured: bool = False,
@@ -173,6 +177,21 @@ def build_pose_record(
         dex3_reason = "dex3_partially_sampled"
     else:
         dex3_reason = "dex3_sampled"
+    arm_measured = _split_arm(_vector_or_none(measured_arm_q, expected_size=14))
+    arm_commanded = _split_arm(_vector_or_none(commanded_arm_q, expected_size=14))
+    arm_record = {
+        "left": {
+            "measured_q": arm_measured["left"],
+            "commanded_q": arm_commanded["left"],
+        },
+        "right": {
+            "measured_q": arm_measured["right"],
+            "commanded_q": arm_commanded["right"],
+        },
+    }
+    if commanded_arm_q_reason is not None:
+        for side in arm_record.values():
+            side["commanded_q_reason"] = str(commanded_arm_q_reason)
     return {
         "schema_version": 1,
         "event": "full_pose_telemetry",
@@ -197,16 +216,7 @@ def build_pose_record(
                 "right": _matrix_or_none(right_wrist_pose),
             },
         },
-        "arm": {
-            "left": {
-                "measured_q": _split_arm(_vector_or_none(measured_arm_q, expected_size=14))["left"],
-                "commanded_q": _split_arm(_vector_or_none(commanded_arm_q, expected_size=14))["left"],
-            },
-            "right": {
-                "measured_q": _split_arm(_vector_or_none(measured_arm_q, expected_size=14))["right"],
-                "commanded_q": _split_arm(_vector_or_none(commanded_arm_q, expected_size=14))["right"],
-            },
-        },
+        "arm": arm_record,
         "dex3": {
             "available": dex3_available,
             "reason": dex3_reason,
@@ -217,6 +227,26 @@ def build_pose_record(
         "achieved_cartesian_pose_reason": "not_available_from_controller_state",
         "drop_count": max(0, int(drop_count)),
     }
+
+
+def publish_arm_command_for_telemetry(controller, q_target, tauff_target):
+    """Return the controller's published q snapshot and an explicit outcome reason."""
+    try:
+        publication = controller.ctrl_dual_arm(q_target, tauff_target)
+    except Exception as error:
+        return None, f"arm_command_publication_failed:{type(error).__name__}"
+    if publication is None:
+        return None, "arm_command_publication_unavailable"
+    if isinstance(publication, Mapping):
+        published_q = publication.get("published_q")
+        reason = publication.get("reason")
+    else:
+        published_q = getattr(publication, "published_q", None)
+        reason = getattr(publication, "reason", None)
+    published_q = _vector_or_none(published_q, expected_size=14)
+    if published_q is None:
+        return None, str(reason or "arm_command_publication_unavailable")
+    return np.asarray(published_q, dtype=float), str(reason or "published")
 
 
 class PoseTelemetryJsonlSink:

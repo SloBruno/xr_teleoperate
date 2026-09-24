@@ -36,6 +36,7 @@ from teleop.utils.full_pose_telemetry import (
     build_lifecycle_event,
     build_pose_record,
     create_pose_telemetry_sink,
+    publish_arm_command_for_telemetry,
 )
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -692,19 +693,22 @@ if __name__ == '__main__':
             else:
                 sol_q = current_lr_arm_q.copy()
                 sol_tauff = np.zeros_like(current_lr_arm_q)
-            commanded_arm_q = sol_q
-            command_was_sent = False
+            commanded_arm_q = None
+            commanded_arm_q_reason = "arm_command_publication_unavailable"
             if (
                 controller_pose_is_fresh
                 and controller_sample_is_fresh(tele_data.controller_sample_timestamp)
             ):
-                arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
-                command_was_sent = True
+                commanded_arm_q, commanded_arm_q_reason = publish_arm_command_for_telemetry(
+                    arm_ctrl, sol_q, sol_tauff
+                )
             else:
                 # The sample expired during IK; discard its target and hold the
                 # most recently measured arm position instead.
-                commanded_arm_q = arm_ctrl.get_current_dual_arm_q().copy()
-                arm_ctrl.ctrl_dual_arm(commanded_arm_q, np.zeros_like(current_lr_arm_q))
+                hold_q = arm_ctrl.get_current_dual_arm_q().copy()
+                commanded_arm_q, commanded_arm_q_reason = publish_arm_command_for_telemetry(
+                    arm_ctrl, hold_q, np.zeros_like(current_lr_arm_q)
+                )
 
             dex3_measured_q = None
             dex3_commanded_q = None
@@ -720,7 +724,8 @@ if __name__ == '__main__':
                 left_wrist_pose=getattr(tele_data, "left_wrist_pose", None),
                 right_wrist_pose=getattr(tele_data, "right_wrist_pose", None),
                 measured_arm_q=current_lr_arm_q,
-                commanded_arm_q=sol_q if command_was_sent else commanded_arm_q,
+                commanded_arm_q=commanded_arm_q,
+                commanded_arm_q_reason=commanded_arm_q_reason,
                 dex3_configured=args.ee == "dex3",
                 dex3_measured_q=dex3_measured_q,
                 dex3_commanded_q=dex3_commanded_q,

@@ -41,7 +41,7 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         source = SCRIPT.read_text(encoding="utf-8")
         state_read = source.index("current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()")
         ik_call = source.index("arm_ik.solve_ik")
-        arm_write = source.index("arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)")
+        arm_write = source.index("publish_arm_command_for_telemetry(")
         pre_ik_check = source.index(
             "controller_pose_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)",
             state_read,
@@ -58,8 +58,9 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
     def test_telemetry_uses_the_exact_command_sent_after_stale_ik_hold(self):
         source = SCRIPT.read_text(encoding="utf-8")
         hold = source.index("# The sample expired during IK")
-        telemetry = source.index("commanded_arm_q=sol_q if command_was_sent else commanded_arm_q", hold)
-        self.assertIn("commanded_arm_q = arm_ctrl.get_current_dual_arm_q().copy()", source[hold:telemetry])
+        telemetry = source.index("commanded_arm_q=commanded_arm_q", hold)
+        self.assertIn("hold_q = arm_ctrl.get_current_dual_arm_q().copy()", source[hold:telemetry])
+        self.assertIn("commanded_arm_q_reason=commanded_arm_q_reason", source[telemetry:])
 
     def test_lifecycle_events_cover_requested_accepted_tracking_and_shutdown(self):
         source = SCRIPT.read_text(encoding="utf-8")
