@@ -95,6 +95,19 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         self.assertIn("hand_ctrl.deactivate()", finally_block)
         self.assertIn("arm_ctrl.deactivate()", finally_block)
 
+    def test_control_loop_pose_publication_uses_best_effort_builder_boundary(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertGreaterEqual(source.count("emit_pose_record_best_effort("), 2)
+        self.assertNotIn("pose_telemetry_sink.emit(build_pose_record(", source)
+        self.assertNotIn("arm_publication_telemetry.emit_cycle(build_pose_record(", source)
+
+    def test_pose_telemetry_close_cannot_skip_actuator_cleanup(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        helper_start = source.index("def _close_telemetry_best_effort")
+        helper_end = source.index("\ndef on_press", helper_start)
+        self.assertIn("except BaseException", source[helper_start:helper_end])
+        self.assertLess(source.index("arm_ctrl.ctrl_dual_arm_go_home"), source.index("_close_telemetry_best_effort(pose_telemetry_sink"))
+
     def test_cleanup_logging_cannot_interrupt_later_cleanup(self):
         source = SCRIPT.read_text(encoding="utf-8")
         finally_block = source[source.index("finally:"):]

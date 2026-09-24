@@ -46,6 +46,7 @@ from teleop.utils.full_pose_telemetry import (
     build_pose_record,
     create_pose_telemetry_sink,
     emit_lifecycle_event_best_effort,
+    emit_pose_record_best_effort,
     publish_arm_command_for_telemetry,
 )
 from sshkeyboard import listen_keyboard, stop_listening
@@ -115,6 +116,18 @@ def _emit_lifecycle_events(sink):
 
 def _safe_emit_lifecycle_event(sink, event, *, cause=None):
     emit_lifecycle_event_best_effort(sink, event, cause=cause, warn=logger_mp.warning)
+
+
+# The best-effort producer owns build_pose_record(...) and the sink handoff.
+
+
+def _close_telemetry_best_effort(sink, label):
+    if sink is None:
+        return
+    try:
+        sink.close()
+    except BaseException as error:
+        _log_best_effort("warning", f"Failed to close {label}: {type(error).__name__}")
 
 
 def on_press(key):
@@ -438,7 +451,7 @@ if __name__ == '__main__':
         )
         pose_telemetry_sink = create_pose_telemetry_sink(pose_log_dir, logger_mp.warning)
         arm_publication_telemetry = ArmPublicationTelemetryBridge(
-            pose_telemetry_sink, profile=args.arm
+            pose_telemetry_sink, profile=args.arm, warn=logger_mp.warning
         )
 
         # Match the original launcher behavior: connecting the arm motors moves
@@ -518,7 +531,9 @@ if __name__ == '__main__':
             get_ready_arm_q = getattr(arm_ctrl, "get_current_dual_arm_q", None)
             ready_arm_q = get_ready_arm_q() if get_ready_arm_q is not None else np.zeros(14)
             ready_wall_clock = time.time()
-            pose_telemetry_sink.emit(build_pose_record(
+            emit_pose_record_best_effort(
+                pose_telemetry_sink.emit,
+                warn=logger_mp.warning,
                 timestamp=ready_wall_clock,
                 timestamp_monotonic=time.monotonic(),
                 lifecycle="ready",
@@ -533,7 +548,7 @@ if __name__ == '__main__':
                 dex3_sample_metadata=ready_dex3_metadata,
                 drop_count=pose_telemetry_sink.drop_count,
                 now=time.monotonic(),
-            ))
+            )
             # Dex3 has controller/trigger authority only. Start its command
             # process after a post-r controller sample, independently of hand
             # skeleton availability needed by arm IK.
@@ -731,7 +746,9 @@ if __name__ == '__main__':
             if args.ee == "dex3":
                 dex3_measured_q, dex3_commanded_q, dex3_metadata = hand_ctrl.get_pose_samples()
             tracking_wall_clock = time.time()
-            arm_publication_telemetry.emit_cycle(build_pose_record(
+            emit_pose_record_best_effort(
+                lambda record: arm_publication_telemetry.emit_cycle(record, arm_ctrl),
+                warn=logger_mp.warning,
                 timestamp=tracking_wall_clock,
                 timestamp_monotonic=time.monotonic(),
                 lifecycle="tracking",
@@ -752,7 +769,7 @@ if __name__ == '__main__':
                 dex3_sample_metadata=dex3_metadata,
                 drop_count=pose_telemetry_sink.drop_count,
                 now=time.monotonic(),
-            ), arm_ctrl)
+            )
 
             # record data
             if args.record:
@@ -972,17 +989,8 @@ if __name__ == '__main__':
         except Exception as e:
             _log_best_effort("error", f"Failed to close televuer wrapper: {e}")
 
-        try:
-            if pose_telemetry_sink is not None:
-                pose_telemetry_sink.close()
-        except Exception as e:
-            _log_best_effort("warning", f"Failed to close pose telemetry sink: {e}")
-
-        try:
-            if status_sink is not None:
-                status_sink.close()
-        except Exception as e:
-            _log_best_effort("warning", f"Failed to close teleop status sink: {e}")
+        _close_telemetry_best_effort(pose_telemetry_sink, "pose telemetry sink")
+        _close_telemetry_best_effort(status_sink, "teleop status sink")
 
         try:
             if not args.motion:

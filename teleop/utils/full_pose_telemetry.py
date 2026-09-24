@@ -59,6 +59,14 @@ def _age_ms(timestamp: float | None, now: float) -> int | None:
     return round((now - timestamp) * 1000)
 
 
+def _warn_best_effort(warn: Callable[[str], None] | None, message: str) -> None:
+    try:
+        if warn is not None:
+            warn(message)
+    except BaseException:
+        pass
+
+
 def _matrix_or_none(pose: object) -> list[list[float]] | None:
     if pose is None:
         return None
@@ -165,13 +173,28 @@ def emit_lifecycle_event_best_effort(
             timestamp=time.time(),
             timestamp_monotonic=time.monotonic(),
         ))
-    except Exception as error:
-        try:
-            warn(f"Failed to emit lifecycle telemetry {event}: {error}")
-        except BaseException:
-            pass
+    except BaseException as error:
+        _warn_best_effort(warn, f"Failed to emit lifecycle telemetry {event}: {type(error).__name__}")
         return False
     return True
+
+
+def emit_pose_record_best_effort(
+    emit: Callable[[Mapping[str, object]], object],
+    builder: Callable[..., Mapping[str, object]] | None = None,
+    *,
+    warn: Callable[[str], None] | None,
+    **kwargs,
+) -> bool:
+    """Build and hand off one pose record without affecting control."""
+    try:
+        if builder is None:
+            builder = build_pose_record
+        record = builder(**kwargs)
+        return bool(emit(record))
+    except BaseException as error:
+        _warn_best_effort(warn, f"Failed to emit pose telemetry: {type(error).__name__}")
+        return False
 
 
 def build_pose_record(
@@ -375,11 +398,11 @@ def build_arm_publication_event(receipt: object, *, profile: str) -> dict:
         return receipt.get(name, default) if isinstance(receipt, Mapping) else getattr(receipt, name, default)
 
     split = _normalize_arm_joint_split(value("arm_joint_split", (7, 7)))
-    published_q = _vector_or_none(value("published_q"), expected_size=sum(split))
+    raw_published_q = value("published_q")
+    published_q = _vector_or_none(raw_published_q, expected_size=sum(split))
     reason = str(value("reason", "arm_command_publication_unavailable"))
-    if value("published_q") is not None and published_q is None:
-        published_q = None
-        reason = f"arm_publication_invalid_q:{reason}"
+    if raw_published_q is not None and published_q is None:
+        raise ValueError("arm publication receipt published_q has invalid dimensions or values")
     timestamp_monotonic = _finite_timestamp(value("timestamp_monotonic"))
     if timestamp_monotonic is None:
         raise ValueError("arm publication receipt timestamp must be finite and positive")
@@ -399,7 +422,14 @@ def build_arm_publication_event(receipt: object, *, profile: str) -> dict:
 class ArmPublicationTelemetryBridge:
     """Correlate bounded asynchronous arm receipts with append-only telemetry."""
 
-    def __init__(self, sink, *, profile: str, pending_capacity: int = 64):
+    def __init__(
+        self,
+        sink,
+        *,
+        profile: str,
+        pending_capacity: int = 64,
+        warn: Callable[[str], None] | None = None,
+    ):
         if pending_capacity <= 0:
             raise ValueError("pending_capacity must be positive")
         self._sink = sink
@@ -409,6 +439,9 @@ class ArmPublicationTelemetryBridge:
         self._pending_buffer_drop_count = 0
         self._telemetry_sink_overflow_count = 0
         self._last_controller_receipt_drop_count = 0
+        self._invalid_receipt_count = 0
+        self._receipt_drain_failure_count = 0
+        self._warn = warn
 
     @property
     def pending_buffer_drop_count(self) -> int:
@@ -418,45 +451,94 @@ class ArmPublicationTelemetryBridge:
     def telemetry_sink_overflow_count(self) -> int:
         return self._telemetry_sink_overflow_count
 
+    @property
+    def invalid_receipt_count(self) -> int:
+        return self._invalid_receipt_count
+
+    @property
+    def receipt_drain_failure_count(self) -> int:
+        return self._receipt_drain_failure_count
+
     def _try_emit(self, record: Mapping[str, object]) -> bool:
         try:
             accepted = bool(self._sink.emit(record))
-        except BaseException:
+        except BaseException as error:
+            _warn_best_effort(self._warn, f"Failed to emit arm telemetry: {type(error).__name__}")
             accepted = False
         if not accepted:
             self._telemetry_sink_overflow_count += 1
         return accepted
 
     def _retain_or_drop(self, record: Mapping[str, object]) -> None:
-        if len(self._pending) >= self._pending_capacity:
+        try:
+            if len(self._pending) >= self._pending_capacity:
+                self._pending_buffer_drop_count += 1
+                _warn_best_effort(self._warn, "Dropped arm telemetry from full pending buffer")
+                return
+            self._pending.append(record)
+        except BaseException as error:
             self._pending_buffer_drop_count += 1
-            return
-        self._pending.append(record)
+            _warn_best_effort(self._warn, f"Failed to retain arm telemetry: {type(error).__name__}")
 
     def _flush_pending(self) -> None:
-        while self._pending:
-            record = self._pending[0]
-            if not self._try_emit(record):
-                return
-            self._pending.popleft()
+        try:
+            while self._pending:
+                record = self._pending[0]
+                if not self._try_emit(record):
+                    return
+                self._pending.popleft()
+        except BaseException as error:
+            _warn_best_effort(self._warn, f"Failed to flush pending arm telemetry: {type(error).__name__}")
+
+    def _invalid_receipt_event(self, receipt: object, error: BaseException) -> dict:
+        try:
+            request_id = receipt.get("request_id") if isinstance(receipt, Mapping) else getattr(receipt, "request_id", None)
+        except BaseException:
+            request_id = None
+        return {
+            "schema_version": 1,
+            "event": "arm_publication_invalid",
+            "request_id": request_id,
+            "reason": f"invalid_receipt:{type(error).__name__}",
+            "profile": self._profile,
+        }
 
     def _emit_receipt(self, receipt: object) -> None:
-        event = build_arm_publication_event(receipt, profile=self._profile)
+        try:
+            event = build_arm_publication_event(receipt, profile=self._profile)
+        except BaseException as error:
+            self._invalid_receipt_count += 1
+            _warn_best_effort(self._warn, f"Dropped invalid arm publication receipt: {type(error).__name__}")
+            self._try_emit(self._invalid_receipt_event(receipt, error))
+            return
         if not self._try_emit(event):
             self._retain_or_drop(event)
 
     def emit_cycle(self, pose_record: dict, controller) -> bool:
         """Flush retries, drain all completed receipts, then enqueue this cycle's pose."""
-        self._flush_pending()
-        for receipt in controller.drain_arm_publication_receipts():
-            self._emit_receipt(receipt)
-        controller_drop_count = int(getattr(controller, "publication_receipt_drop_count", 0))
-        pose_record["telemetry_overflow"] = {
-            "controller_receipt_drop_count": controller_drop_count,
-            "pending_buffer_drop_count": self._pending_buffer_drop_count,
-            "telemetry_sink_overflow_count": self._telemetry_sink_overflow_count,
-        }
-        self._last_controller_receipt_drop_count = controller_drop_count
+        try:
+            self._flush_pending()
+        except BaseException as error:
+            _warn_best_effort(self._warn, f"Failed to flush arm telemetry: {type(error).__name__}")
+        try:
+            receipts = controller.drain_arm_publication_receipts()
+            for receipt in receipts:
+                self._emit_receipt(receipt)
+        except BaseException as error:
+            self._receipt_drain_failure_count += 1
+            _warn_best_effort(self._warn, f"Failed to drain arm publication receipts: {type(error).__name__}")
+        try:
+            controller_drop_count = int(getattr(controller, "publication_receipt_drop_count", 0))
+            pose_record["telemetry_overflow"] = {
+                "controller_receipt_drop_count": controller_drop_count,
+                "pending_buffer_drop_count": self._pending_buffer_drop_count,
+                "telemetry_sink_overflow_count": self._telemetry_sink_overflow_count,
+                "invalid_receipt_count": self._invalid_receipt_count,
+                "receipt_drain_failure_count": self._receipt_drain_failure_count,
+            }
+            self._last_controller_receipt_drop_count = controller_drop_count
+        except BaseException as error:
+            _warn_best_effort(self._warn, f"Failed to annotate arm telemetry: {type(error).__name__}")
         return self._try_emit(pose_record)
 
 

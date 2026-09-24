@@ -188,3 +188,100 @@ def test_lifecycle_warning_callback_is_swallowed(monkeypatch):
         raise RuntimeError("logger failure")
 
     assert emit_lifecycle_event_best_effort(Sink(), "shutdown_finalization", warn=raising_warn) is False
+
+
+def test_lifecycle_helper_swallow_all_telemetry_component_failures():
+    from teleop.utils.full_pose_telemetry import emit_lifecycle_event_best_effort
+
+    class Sink:
+        def emit(self, record):
+            raise SystemExit("telemetry component failed")
+
+    assert emit_lifecycle_event_best_effort(
+        Sink(), "shutdown_finalization", warn=lambda message: (_ for _ in ()).throw(KeyboardInterrupt())
+    ) is False
+
+
+def test_publication_bridge_swallow_all_boundaries_and_count_invalid_receipts():
+    from teleop.utils.full_pose_telemetry import ArmPublicationTelemetryBridge
+
+    warnings = []
+
+    class Sink:
+        def __init__(self):
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+            return True
+
+    class Controller:
+        publication_receipt_drop_count = 0
+
+        def __init__(self):
+            self.calls = 0
+
+        def drain_arm_publication_receipts(self):
+            self.calls += 1
+            if self.calls == 1:
+                return (
+                    {"request_id": 4, "published_q": (1.0, 2.0), "timestamp_monotonic": float("nan"), "arm_joint_split": (1, 1)},
+                    {"request_id": 5, "published_q": (1.0,), "timestamp_monotonic": 1.0, "arm_joint_split": (1, 1)},
+                )
+            raise SystemExit("receipt drain failed")
+
+    sink = Sink()
+    bridge = ArmPublicationTelemetryBridge(
+        sink, profile="G1_29", warn=lambda message: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
+    controller = Controller()
+    bridge.emit_cycle({}, controller)
+    assert bridge.invalid_receipt_count == 2
+    assert len([record for record in sink.records if record.get("event") == "arm_publication_invalid"]) == 2
+
+    bridge.emit_cycle({}, controller)
+    assert bridge.receipt_drain_failure_count == 1
+
+
+def test_publication_bridge_swallow_all_pending_and_sink_failures():
+    from teleop.utils.full_pose_telemetry import ArmPublicationTelemetryBridge
+
+    class Sink:
+        def emit(self, record):
+            raise KeyboardInterrupt("sink failure")
+
+    class Controller:
+        publication_receipt_drop_count = 0
+
+        def drain_arm_publication_receipts(self):
+            return ({"request_id": 1, "published_q": (1.0, 2.0), "timestamp_monotonic": 1.0, "arm_joint_split": (1, 1)},)
+
+    bridge = ArmPublicationTelemetryBridge(Sink(), profile="G1_29")
+    assert bridge.emit_cycle({}, Controller()) is False
+    assert bridge.telemetry_sink_overflow_count == 2
+    assert bridge.pending_buffer_drop_count == 0
+
+
+def test_pose_record_best_effort_swallow_builder_sink_and_warning_failures(monkeypatch):
+    from teleop.utils import full_pose_telemetry
+
+    def raising_warn(message):
+        raise SystemExit("logger failed")
+
+    monkeypatch.setattr(
+        full_pose_telemetry,
+        "build_pose_record",
+        lambda **kwargs: (_ for _ in ()).throw(KeyboardInterrupt("builder failed")),
+    )
+    assert full_pose_telemetry.emit_pose_record_best_effort(
+        lambda record: (_ for _ in ()).throw(RuntimeError("sink failed")),
+        warn=raising_warn,
+        timestamp=1.0,
+        timestamp_monotonic=1.0,
+        lifecycle="tracking",
+        controller_sample_timestamp=1.0,
+        left_wrist_pose=None,
+        right_wrist_pose=None,
+        measured_arm_q=(0.0, 0.0),
+        commanded_arm_q=(0.0, 0.0),
+    ) is False
