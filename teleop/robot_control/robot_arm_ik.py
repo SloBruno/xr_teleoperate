@@ -15,6 +15,25 @@ sys.path.append(parent2_dir)
 
 from teleop.utils.weighted_moving_filter import WeightedMovingFilter
 
+
+def _add_g1_29_operational_frames(reduced_robot):
+    reduced_robot.model.addFrame(
+        pin.Frame('L_ee',
+                  reduced_robot.model.getJointId('left_wrist_yaw_joint'),
+                  pin.SE3(np.eye(3),
+                          np.array([0.05, 0, 0]).T),
+                  pin.FrameType.OP_FRAME)
+    )
+    reduced_robot.model.addFrame(
+        pin.Frame('R_ee',
+                  reduced_robot.model.getJointId('right_wrist_yaw_joint'),
+                  pin.SE3(np.eye(3),
+                          np.array([0.05, 0, 0]).T),
+                  pin.FrameType.OP_FRAME)
+    )
+    reduced_robot.data = reduced_robot.model.createData()
+
+
 class G1_29_ArmIK:
     def __init__(self, Unit_Test = False, Visualization = False):
         np.set_printoptions(precision=5, suppress=True, linewidth=200)
@@ -79,20 +98,7 @@ class G1_29_ArmIK:
                 reference_configuration=np.array([0.0] * self.robot.model.nq),
             )
 
-            self.reduced_robot.model.addFrame(
-                pin.Frame('L_ee',
-                          self.reduced_robot.model.getJointId('left_wrist_yaw_joint'),
-                          pin.SE3(np.eye(3),
-                                  np.array([0.05,0,0]).T),
-                          pin.FrameType.OP_FRAME)
-            )
-            self.reduced_robot.model.addFrame(
-                pin.Frame('R_ee',
-                          self.reduced_robot.model.getJointId('right_wrist_yaw_joint'),
-                          pin.SE3(np.eye(3),
-                                  np.array([0.05,0,0]).T),
-                          pin.FrameType.OP_FRAME)
-            )
+            _add_g1_29_operational_frames(self.reduced_robot)
             # Save cache (only after everything is built)
             if not os.path.exists(self.cache_path):
                 self.save_cache()
