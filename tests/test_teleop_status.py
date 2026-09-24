@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
@@ -131,3 +133,54 @@ def test_status_monitor_reports_missing_camera_and_nonfinite_timestamps_as_unhea
     assert status["controller"] == {"fresh": False, "age_ms": None}
     assert status["cameras"] == {"head": False, "left_wrist": False}
     assert status["dex3_pressure"] == {"left_age_ms": None, "right_age_ms": None}
+
+
+def test_status_monitor_contains_ordinary_sink_and_warning_failures():
+    from teleop.utils.teleop_status import TeleopStatusMonitor
+
+    calls = []
+
+    def emit(payload):
+        calls.append(payload)
+        raise RuntimeError("status sink failed")
+
+    monitor = TeleopStatusMonitor(emit, interval_s=1.0)
+    assert monitor.observe(now=10.0, lifecycle="tracking", controller_sample_timestamp=9.9) is not None
+    assert monitor.observe(now=10.3, lifecycle="tracking", controller_sample_timestamp=9.9) is None
+    assert len(calls) == 2
+
+
+def test_status_monitor_propagates_keyboard_interrupt_from_normal_emit():
+    from teleop.utils.teleop_status import TeleopStatusMonitor
+
+    monitor = TeleopStatusMonitor(lambda payload: (_ for _ in ()).throw(KeyboardInterrupt("operator stop")))
+    with pytest.raises(KeyboardInterrupt):
+        monitor.observe(now=10.0, lifecycle="tracking", controller_sample_timestamp=9.9)
+
+
+def test_status_monitor_contains_malformed_status_data():
+    from teleop.utils.teleop_status import TeleopStatusMonitor
+
+    monitor = TeleopStatusMonitor(lambda payload: None)
+    assert monitor.observe(
+        now=10.0,
+        lifecycle="tracking",
+        controller_sample_timestamp=9.9,
+        locomotion=(object(),),
+    ) is None
+
+
+def test_status_file_sink_contains_ordinary_buffer_fault_but_propagates_keyboard_interrupt(tmp_path, monkeypatch):
+    from teleop.utils import teleop_status
+
+    sink = teleop_status.AsyncStatusFileSink(str(tmp_path / "status.jsonl"), lambda _: None)
+    monkeypatch.setattr(sink._queue, "put_nowait", lambda payload: (_ for _ in ()).throw(OSError("buffer fault")))
+    assert sink.emit({"event": "teleop_status"}) is False
+    sink.close()
+
+    sink = teleop_status.AsyncStatusFileSink(str(tmp_path / "status-2.jsonl"), lambda _: None)
+    monkeypatch.setattr(sink._queue, "put_nowait", lambda payload: (_ for _ in ()).throw(KeyboardInterrupt("operator stop")))
+    with pytest.raises(KeyboardInterrupt):
+        sink.emit({"event": "teleop_status"})
+    monkeypatch.undo()
+    sink.close()

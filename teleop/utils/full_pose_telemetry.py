@@ -8,7 +8,7 @@ import math
 import os
 import time
 from pathlib import Path
-from collections import deque
+from collections import OrderedDict, deque
 from queue import Empty, Full, Queue
 import threading
 import uuid
@@ -63,7 +63,7 @@ def _warn_best_effort(warn: Callable[[str], None] | None, message: str) -> None:
     try:
         if warn is not None:
             warn(message)
-    except BaseException:
+    except Exception:
         pass
 
 
@@ -173,7 +173,7 @@ def emit_lifecycle_event_best_effort(
             timestamp=time.time(),
             timestamp_monotonic=time.monotonic(),
         ))
-    except BaseException as error:
+    except Exception as error:
         _warn_best_effort(warn, f"Failed to emit lifecycle telemetry {event}: {type(error).__name__}")
         return False
     return True
@@ -192,7 +192,7 @@ def emit_pose_record_best_effort(
             builder = build_pose_record
         record = builder(**kwargs)
         return bool(emit(record))
-    except BaseException as error:
+    except Exception as error:
         _warn_best_effort(warn, f"Failed to emit pose telemetry: {type(error).__name__}")
         return False
 
@@ -420,7 +420,16 @@ def build_arm_publication_event(receipt: object, *, profile: str) -> dict:
 
 
 class ArmPublicationTelemetryBridge:
-    """Correlate bounded asynchronous arm receipts with append-only telemetry."""
+    """Correlate bounded asynchronous arm receipts with append-only telemetry.
+
+    A request ID enters the bounded LRU only after its publication event is
+    accepted by the sink. IDs already pending are treated as duplicates so a
+    delayed retry cannot create another pending record. Once an ID is evicted,
+    it may be accepted again; this is the intentional wrap/restart contract
+    because request IDs have no durable session epoch. A producer restart also
+    starts with an empty window, so callers needing cross-session uniqueness
+    must provide a session identity in their surrounding telemetry.
+    """
 
     def __init__(
         self,
@@ -428,19 +437,26 @@ class ArmPublicationTelemetryBridge:
         *,
         profile: str,
         pending_capacity: int = 64,
+        dedup_capacity: int = 1024,
         warn: Callable[[str], None] | None = None,
     ):
         if pending_capacity <= 0:
             raise ValueError("pending_capacity must be positive")
+        if dedup_capacity <= 0:
+            raise ValueError("dedup_capacity must be positive")
         self._sink = sink
         self._profile = str(profile)
         self._pending = deque()
         self._pending_capacity = int(pending_capacity)
+        self._dedup_capacity = int(dedup_capacity)
+        self._seen_request_ids = OrderedDict()
+        self._pending_request_ids = set()
         self._pending_buffer_drop_count = 0
         self._telemetry_sink_overflow_count = 0
         self._last_controller_receipt_drop_count = 0
         self._invalid_receipt_count = 0
         self._receipt_drain_failure_count = 0
+        self._duplicate_receipt_count = 0
         self._warn = warn
 
     @property
@@ -459,15 +475,30 @@ class ArmPublicationTelemetryBridge:
     def receipt_drain_failure_count(self) -> int:
         return self._receipt_drain_failure_count
 
+    @property
+    def duplicate_receipt_count(self) -> int:
+        return self._duplicate_receipt_count
+
+    @property
+    def seen_request_ids(self) -> tuple[int, ...]:
+        return tuple(self._seen_request_ids)
+
     def _try_emit(self, record: Mapping[str, object]) -> bool:
         try:
             accepted = bool(self._sink.emit(record))
-        except BaseException as error:
+        except Exception as error:
             _warn_best_effort(self._warn, f"Failed to emit arm telemetry: {type(error).__name__}")
             accepted = False
         if not accepted:
             self._telemetry_sink_overflow_count += 1
         return accepted
+
+    def _mark_seen(self, request_id: int) -> None:
+        self._pending_request_ids.discard(request_id)
+        self._seen_request_ids[request_id] = None
+        self._seen_request_ids.move_to_end(request_id)
+        while len(self._seen_request_ids) > self._dedup_capacity:
+            self._seen_request_ids.popitem(last=False)
 
     def _retain_or_drop(self, record: Mapping[str, object]) -> None:
         try:
@@ -476,7 +507,8 @@ class ArmPublicationTelemetryBridge:
                 _warn_best_effort(self._warn, "Dropped arm telemetry from full pending buffer")
                 return
             self._pending.append(record)
-        except BaseException as error:
+            self._pending_request_ids.add(int(record["request_id"]))
+        except Exception as error:
             self._pending_buffer_drop_count += 1
             _warn_best_effort(self._warn, f"Failed to retain arm telemetry: {type(error).__name__}")
 
@@ -487,13 +519,14 @@ class ArmPublicationTelemetryBridge:
                 if not self._try_emit(record):
                     return
                 self._pending.popleft()
-        except BaseException as error:
+                self._mark_seen(int(record["request_id"]))
+        except Exception as error:
             _warn_best_effort(self._warn, f"Failed to flush pending arm telemetry: {type(error).__name__}")
 
-    def _invalid_receipt_event(self, receipt: object, error: BaseException) -> dict:
+    def _invalid_receipt_event(self, receipt: object, error: Exception) -> dict:
         try:
             request_id = receipt.get("request_id") if isinstance(receipt, Mapping) else getattr(receipt, "request_id", None)
-        except BaseException:
+        except Exception:
             request_id = None
         return {
             "schema_version": 1,
@@ -506,25 +539,38 @@ class ArmPublicationTelemetryBridge:
     def _emit_receipt(self, receipt: object) -> None:
         try:
             event = build_arm_publication_event(receipt, profile=self._profile)
-        except BaseException as error:
+        except Exception as error:
             self._invalid_receipt_count += 1
             _warn_best_effort(self._warn, f"Dropped invalid arm publication receipt: {type(error).__name__}")
             self._try_emit(self._invalid_receipt_event(receipt, error))
             return
+        request_id = int(event["request_id"])
+        if request_id in self._seen_request_ids or request_id in self._pending_request_ids:
+            self._duplicate_receipt_count += 1
+            self._try_emit({
+                "schema_version": 1,
+                "event": "arm_publication_duplicate",
+                "request_id": request_id,
+                "duplicate_count": self._duplicate_receipt_count,
+                "profile": self._profile,
+            })
+            return
         if not self._try_emit(event):
             self._retain_or_drop(event)
+        else:
+            self._mark_seen(request_id)
 
     def emit_cycle(self, pose_record: dict, controller) -> bool:
         """Flush retries, drain all completed receipts, then enqueue this cycle's pose."""
         try:
             self._flush_pending()
-        except BaseException as error:
+        except Exception as error:
             _warn_best_effort(self._warn, f"Failed to flush arm telemetry: {type(error).__name__}")
         try:
             receipts = controller.drain_arm_publication_receipts()
             for receipt in receipts:
                 self._emit_receipt(receipt)
-        except BaseException as error:
+        except Exception as error:
             self._receipt_drain_failure_count += 1
             _warn_best_effort(self._warn, f"Failed to drain arm publication receipts: {type(error).__name__}")
         try:
@@ -535,9 +581,10 @@ class ArmPublicationTelemetryBridge:
                 "telemetry_sink_overflow_count": self._telemetry_sink_overflow_count,
                 "invalid_receipt_count": self._invalid_receipt_count,
                 "receipt_drain_failure_count": self._receipt_drain_failure_count,
+                "duplicate_receipt_count": self._duplicate_receipt_count,
             }
             self._last_controller_receipt_drop_count = controller_drop_count
-        except BaseException as error:
+        except Exception as error:
             _warn_best_effort(self._warn, f"Failed to annotate arm telemetry: {type(error).__name__}")
         return self._try_emit(pose_record)
 

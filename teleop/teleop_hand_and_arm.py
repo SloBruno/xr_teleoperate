@@ -122,12 +122,21 @@ def _safe_emit_lifecycle_event(sink, event, *, cause=None):
 
 
 def _close_telemetry_best_effort(sink, label):
+    """Cleanup-only guard: telemetry must not prevent later shutdown steps."""
     if sink is None:
         return
     try:
         sink.close()
     except BaseException as error:
         _log_best_effort("warning", f"Failed to close {label}: {type(error).__name__}")
+
+
+def _cleanup_telemetry_event_best_effort(sink, event, *, cause=None):
+    """Guard optional cleanup telemetry after actuator shutdown has started."""
+    try:
+        _safe_emit_lifecycle_event(sink, event, cause=cause)
+    except BaseException as error:
+        _log_best_effort("warning", f"Failed to emit cleanup telemetry {event}: {type(error).__name__}")
 
 
 def on_press(key):
@@ -938,12 +947,6 @@ if __name__ == '__main__':
         import traceback
         logger_mp.error(traceback.format_exc())
     finally:
-        _emit_lifecycle_events(pose_telemetry_sink)
-        if pose_telemetry_sink is not None:
-            if shutdown_cause is not None:
-                _safe_emit_lifecycle_event(
-                    pose_telemetry_sink, shutdown_cause, cause=shutdown_cause)
-            _safe_emit_lifecycle_event(pose_telemetry_sink, "shutdown_finalization")
         # Dex3 is an independent post-r output. Stop its child process before
         # the potentially slower arm return-to-preparation motion.
         if hand_outputs_activated:
@@ -968,6 +971,20 @@ if __name__ == '__main__':
                 arm_ctrl.ctrl_dual_arm_go_home()
             except Exception as e:
                 _log_best_effort("error", f"Failed to ctrl_dual_arm_go_home: {e}")
+
+        # Normal control-path telemetry preserves KeyboardInterrupt/SystemExit
+        # for the outer shutdown handler. Cleanup telemetry is different: it is
+        # optional and fully guarded so one failing emit cannot skip later
+        # actuator, listener, client, or sink cleanup.
+        try:
+            _emit_lifecycle_events(pose_telemetry_sink)
+        except BaseException as error:
+            _log_best_effort("warning", f"Failed to emit queued cleanup telemetry: {type(error).__name__}")
+        if pose_telemetry_sink is not None:
+            if shutdown_cause is not None:
+                _cleanup_telemetry_event_best_effort(
+                    pose_telemetry_sink, shutdown_cause, cause=shutdown_cause)
+            _cleanup_telemetry_event_best_effort(pose_telemetry_sink, "shutdown_finalization")
         try:
             if args.ipc:
                 ipc_server.stop()

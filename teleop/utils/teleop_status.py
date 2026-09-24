@@ -73,7 +73,7 @@ class AsyncStatusFileSink:
     def _warn_best_effort(self, message: str) -> None:
         try:
             self._warn(message)
-        except BaseException:
+        except Exception:
             pass
 
     def emit(self, payload: str | Mapping[str, Any]) -> bool:
@@ -88,6 +88,9 @@ class AsyncStatusFileSink:
                 return True
             except Full:
                 return False
+            except Exception as error:
+                self._warn_best_effort(f"Could not queue teleop status record: {type(error).__name__}")
+                return False
 
     def close(self) -> None:
         """Flush queued records briefly during normal program shutdown."""
@@ -101,6 +104,8 @@ class AsyncStatusFileSink:
             except Full:
                 # The writer exits after draining the existing bounded queue.
                 pass
+            except Exception as error:
+                self._warn_best_effort(f"Could not close teleop status queue: {type(error).__name__}")
         self._thread.join(timeout=1.0)
 
     def _run(self) -> None:
@@ -168,7 +173,20 @@ class TeleopStatusMonitor:
         self._last_status_at: float | None = None
         self._last_controller_fresh: bool | None = None
 
-    def observe(
+    def _emit_best_effort(self, payload: Mapping[str, object]) -> None:
+        try:
+            self._emit(payload)
+        except Exception:
+            pass
+
+    def observe(self, **kwargs) -> dict | None:
+        """Observe one cycle without letting malformed telemetry affect control."""
+        try:
+            return self._observe(**kwargs)
+        except Exception:
+            return None
+
+    def _observe(
         self,
         *,
         now: float,
@@ -186,7 +204,7 @@ class TeleopStatusMonitor:
             self._last_controller_fresh = controller_fresh
         elif controller_fresh != self._last_controller_fresh:
             self._last_controller_fresh = controller_fresh
-            self._emit({
+            self._emit_best_effort({
                 "event": "controller_freshness_changed",
                 "fresh": controller_fresh,
                 "age_ms": controller_age_ms,
@@ -210,5 +228,5 @@ class TeleopStatusMonitor:
                 "right_age_ms": _age_ms(right_pressure_timestamp, now),
             },
         }
-        self._emit(status)
+        self._emit_best_effort(status)
         return status

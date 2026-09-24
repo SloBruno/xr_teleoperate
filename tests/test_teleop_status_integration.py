@@ -28,3 +28,13 @@ def test_teleop_main_loop_records_full_pose_without_serializing_in_control_path(
     assert "dex3_commanded_q=dex3_commanded_q" in source
     assert "pose_telemetry_sink.emit" in source
     assert "json.dumps" not in source[source.index("while not STOP:", source.index("# main loop")):source.index("except KeyboardInterrupt")]
+
+
+def test_cleanup_orders_actuator_shutdown_before_optional_telemetry_cleanup():
+    source = (Path(__file__).resolve().parents[1] / "teleop" / "teleop_hand_and_arm.py").read_text()
+
+    actuator_end = source.index("if hand_outputs_activated:")
+    cleanup_telemetry = source.index("# Normal control-path telemetry preserves")
+    assert actuator_end < cleanup_telemetry
+    assert source.index("_close_telemetry_best_effort(pose_telemetry_sink", cleanup_telemetry) > cleanup_telemetry
+    assert source.index("except KeyboardInterrupt:") < source.index("finally:")
