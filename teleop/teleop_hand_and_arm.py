@@ -26,7 +26,7 @@ from teleop.utils.quest_controls import joystick_to_locomotion
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
 from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
 from teleop.utils.arm_command_gate import publish_if_authorized
-from teleop.utils.arm_tracking_orchestration import arm_recording_actions, run_arm_tracking_cycle
+from teleop.utils.arm_tracking_orchestration import build_arm_recording_actions, run_arm_tracking_cycle
 from teleop.utils.teleop_status import AsyncStatusFileSink, TeleopStatusMonitor, camera_frame_is_usable
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -734,7 +734,7 @@ if __name__ == '__main__':
                 # arm state and action
                 left_arm_state  = current_lr_arm_q[:7]
                 right_arm_state = current_lr_arm_q[-7:]
-                recorded_arm_actions = arm_recording_actions(cycle)
+                recorded_arm_actions = build_arm_recording_actions(cycle)
                 left_arm_action = recorded_arm_actions["left_arm"]["qpos"]
                 right_arm_action = recorded_arm_actions["right_arm"]["qpos"]
                 if RECORD_RUNNING:
@@ -798,12 +798,12 @@ if __name__ == '__main__':
                     }
                     actions = {
                         "left_arm": {                                   
-                            "qpos":   left_arm_action.tolist(),       
+                            "qpos":   left_arm_action,
                             "qvel":   [],       
                             "torque": [],      
                         }, 
                         "right_arm": {                                   
-                            "qpos":   right_arm_action.tolist(),       
+                            "qpos":   right_arm_action,
                             "qvel":   [],       
                             "torque": [],       
                         },                         

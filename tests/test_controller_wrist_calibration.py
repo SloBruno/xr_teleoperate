@@ -1,6 +1,7 @@
 import math
 from pathlib import Path
 import sys
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import pytest
@@ -30,15 +31,61 @@ def pose(x=0.0, y=0.0, z=0.0, angle=0.0):
 # fixed waist chain in assets/g1/g1_body29_hand14.urdf, including the L_ee/R_ee
 # Pinocchio operational-frame +[0.05, 0, 0] offset in robot_arm_ik.py.
 G1_ZERO_FK = (
-    pose(0.24977428, 0.14865212, 0.09523008),
+    pose(0.24977428, 0.14865212467, 0.09523008),
     # Right shoulder origin is y=-0.10021 in the URDF (left is +0.10022),
-    # so the independently composed pelvis-root FK is 10 micrometres lower.
-    pose(0.24977428, -0.14866212, 0.09523008),
+    # so the independently composed pelvis-root FK is y=-0.14864212467.
+    pose(0.24977428, -0.14864212467, 0.09523008),
 )
 
 
 def measured_zero_fk():
     return tuple(p.copy() for p in G1_ZERO_FK)
+
+
+def _rpy_matrix(rpy):
+    roll, pitch, yaw = map(float, rpy)
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    return np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr],
+    ])
+
+
+def _urdf_zero_fk(link_name):
+    urdf = Path(__file__).parents[1] / "assets/g1/g1_body29_hand14.urdf"
+    root = ET.parse(urdf).getroot()
+    joints = {
+        joint.find("child").attrib["link"]: joint
+        for joint in root.findall("joint")
+        if joint.find("child") is not None
+    }
+    chain = []
+    while link_name != "pelvis":
+        joint = joints[link_name]
+        chain.append(joint.find("origin"))
+        link_name = joint.find("parent").attrib["link"]
+
+    transform = np.eye(4)
+    for origin in reversed(chain):
+        parent_rotation = transform[:3, :3].copy()
+        transform[:3, :3] = parent_rotation @ _rpy_matrix(
+            origin.attrib.get("rpy", "0 0 0").split()
+        )
+        transform[:3, 3] += parent_rotation @ np.fromstring(
+            origin.attrib.get("xyz", "0 0 0"), sep=" "
+        )
+    operational_frame = np.eye(4)
+    operational_frame[0, 3] = 0.05
+    return transform @ operational_frame
+
+
+def test_right_zero_fk_fixture_matches_independent_urdf_composition():
+    right_fk = _urdf_zero_fk("right_wrist_yaw_link")
+    np.testing.assert_allclose(right_fk[:3, 3], G1_ZERO_FK[1][:3, 3], atol=1e-11)
+    assert right_fk[1, 3] == pytest.approx(-0.14864212467, abs=1e-11)
 
 
 def test_preheld_controller_pose_maps_first_target_to_measured_fk_pose():
@@ -73,7 +120,7 @@ def test_independently_derived_all_zero_fk_reference_is_calibratable_with_tolera
     )
     first = calibrator.consume_first_target()
     np.testing.assert_allclose(first[0][:3, 3], [0.2498, 0.1487, 0.0952], atol=5e-4)
-    np.testing.assert_allclose(first[1][:3, 3], [0.24977428, -0.14866212, 0.09523008], atol=1e-9)
+    np.testing.assert_allclose(first[1][:3, 3], [0.24977428, -0.14864212467, 0.09523008], atol=1e-11)
 
 
 def test_shoulder_relative_workspace_rejects_forward_lateral_vertical_and_accepts_drift_until_limit():

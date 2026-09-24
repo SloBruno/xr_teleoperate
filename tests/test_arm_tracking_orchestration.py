@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from teleop.utils.arm_tracking_orchestration import (
     arm_recording_actions,
+    build_arm_recording_actions,
     run_arm_tracking_cycle,
 )
 
@@ -142,3 +143,22 @@ def test_record_enabled_runtime_flow_uses_each_current_cycle_command_decision():
     np.testing.assert_allclose(recorded[2]["left_arm"]["qpos"], stale_arm.measured_q[:7])
     np.testing.assert_allclose(recorded[3]["left_arm"]["qpos"], rejected_arm.measured_q[:7])
     np.testing.assert_allclose(recorded[4]["left_arm"]["qpos"], stopped_arm.measured_q[:7])
+
+
+def test_production_arm_record_payload_uses_fresh_ik_and_measured_hold_with_exact_splits():
+    fresh, _, _ = run(first_target=poses())
+    hold, hold_arm, _ = run(sample_timestamp=1.0, now=10.1)
+
+    fresh_payload = build_arm_recording_actions(fresh)
+    hold_payload = build_arm_recording_actions(hold)
+
+    assert fresh_payload["left_arm"]["qpos"] == [9.0] * 7
+    assert fresh_payload["right_arm"]["qpos"] == [9.0] * 7
+    assert hold_payload["left_arm"]["qpos"] == hold_arm.measured_q[:7].tolist()
+    assert hold_payload["right_arm"]["qpos"] == hold_arm.measured_q[-7:].tolist()
+    assert all(isinstance(value, list) for value in (
+        fresh_payload["left_arm"]["qpos"],
+        fresh_payload["right_arm"]["qpos"],
+        hold_payload["left_arm"]["qpos"],
+        hold_payload["right_arm"]["qpos"],
+    ))

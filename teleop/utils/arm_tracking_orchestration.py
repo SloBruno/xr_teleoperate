@@ -86,12 +86,15 @@ def run_arm_tracking_cycle(
     )
 
 
-def arm_recording_actions(cycle: ArmTrackingCycleResult):
-    """Build arm actions from this cycle's selected command.
+def build_arm_recording_actions(cycle: ArmTrackingCycleResult):
+    """Build JSON-ready arm actions from this cycle's selected command.
 
     ``selected_*`` is the command decision passed to the actuator, including
     a measured-q/zero-torque hold. It is pre-controller-limit telemetry;
     post-limit snapshots can be added separately without changing this record.
+
+    Serialization contract: every qpos field returned here is a plain Python
+    list, so production record builders must not call ``.tolist()`` on it.
     """
     left_q = cycle.selected_q[:7].tolist()
     right_q = cycle.selected_q[-7:].tolist()
@@ -99,3 +102,8 @@ def arm_recording_actions(cycle: ArmTrackingCycleResult):
         "left_arm": {"qpos": left_q, "qvel": [], "torque": []},
         "right_arm": {"qpos": right_q, "qvel": [], "torque": []},
     }
+
+
+def arm_recording_actions(cycle: ArmTrackingCycleResult):
+    """Backward-compatible name for the production arm-action builder."""
+    return build_arm_recording_actions(cycle)
