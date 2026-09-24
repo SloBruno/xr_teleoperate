@@ -24,8 +24,19 @@ from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.quest_controls import joystick_to_locomotion
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
-from teleop.utils.teleop_status import AsyncStatusFileSink, TeleopStatusMonitor, camera_frame_is_usable
-from teleop.utils.full_pose_telemetry import PoseTelemetryJsonlSink, build_pose_record
+from teleop.utils.teleop_status import (
+    AsyncStatusFileSink,
+    TeleopStatusMonitor,
+    camera_frame_is_usable,
+    create_status_sink,
+)
+# from teleop.utils.teleop_status import AsyncStatusFileSink, TeleopStatusMonitor, camera_frame_is_usable
+from teleop.utils.full_pose_telemetry import (
+    PoseTelemetryJsonlSink,
+    build_lifecycle_event,
+    build_pose_record,
+    create_pose_telemetry_sink,
+)
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -46,6 +57,7 @@ RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
 # Serializes r/q lifecycle decisions with the one-way output activation gate.
 LIFECYCLE_LOCK = threading.Lock()
+LIFECYCLE_EVENTS = []
 #  -------        ---------                -----------                -----------            ---------
 #   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
 #  -------        ---------      |         -----------      |         -----------      |     ---------
@@ -61,11 +73,13 @@ LIFECYCLE_LOCK = threading.Lock()
 def _request_start_locked():
     """Authorize tracking after preparation, without activating any output."""
     global START, ARM_REQUEST_TIMESTAMP
+    LIFECYCLE_EVENTS.append("start_requested")
     if not PREPARATION_COMPLETE:
         logger_mp.warning("[lifecycle] Ignoring start until arm preparation completes.")
         return False
     ARM_REQUEST_TIMESTAMP = time.monotonic()
     START = True
+    LIFECYCLE_EVENTS.append("start_accepted")
     return True
 
 
@@ -74,6 +88,20 @@ def _request_stop_locked():
     global STOP, START
     START = False
     STOP = True
+    LIFECYCLE_EVENTS.append("stop_requested")
+
+
+def _emit_lifecycle_events(sink):
+    """Move callback state markers to the nonblocking telemetry queue."""
+    with LIFECYCLE_LOCK:
+        events = list(LIFECYCLE_EVENTS)
+        del LIFECYCLE_EVENTS[:]
+    if sink is None:
+        return
+    for event in events:
+        wall_clock = time.time()
+        sink.emit(build_lifecycle_event(
+            event, timestamp=wall_clock, timestamp_monotonic=time.monotonic()))
 
 
 def on_press(key):
@@ -384,13 +412,14 @@ if __name__ == '__main__':
             "XR_TELEOP_STATUS_LOG",
             "/home/unitree/.local/state/xr_teleoperate/teleop-status.jsonl",
         )
-        status_sink = AsyncStatusFileSink(status_log_path, logger_mp.warning)
+        # status_sink = AsyncStatusFileSink(status_log_path, logger_mp.warning)
+        status_sink = create_status_sink(status_log_path, logger_mp.warning)
         status_monitor = TeleopStatusMonitor(status_sink.emit)
         pose_log_dir = os.environ.get(
             "XR_TELEOP_POSE_LOG_DIR",
             "/home/unitree/.local/state/xr_teleoperate",
         )
-        pose_telemetry_sink = PoseTelemetryJsonlSink(pose_log_dir, logger_mp.warning)
+        pose_telemetry_sink = create_pose_telemetry_sink(pose_log_dir, logger_mp.warning)
 
         # Match the original launcher behavior: connecting the arm motors moves
         # the arms to the all-zero preparation pose immediately, before r.
@@ -413,6 +442,8 @@ if __name__ == '__main__':
                     outputs_activated = False
                     raise RuntimeError("Arm preparation pose was not reached; refusing tracking.")
             PREPARATION_COMPLETE = True
+        pose_telemetry_sink.emit(build_lifecycle_event(
+            "preparation_ready", timestamp=time.time(), timestamp_monotonic=time.monotonic()))
 
         # Initialize before the pre-arm loop: some display modes intentionally do
         # not fetch local frames, but their status must remain observable.
@@ -435,6 +466,7 @@ if __name__ == '__main__':
         # must never be passed to IK.
         while not STOP:
             time.sleep(0.033)
+            _emit_lifecycle_events(pose_telemetry_sink)
             if camera_config['head_camera']['enable_zmq'] and xr_need_local_img:
                 head_img = img_client.get_head_frame()
                 if vertical_camera_stack:
@@ -450,9 +482,14 @@ if __name__ == '__main__':
             right_a_was_pressed, right_b_was_pressed = poll_controller_lifecycle(
                 ready_tele_data, right_a_was_pressed, right_b_was_pressed)
             ready_pressure_timestamps = (0.0, 0.0)
+            ready_dex3_measured_q = None
+            ready_dex3_commanded_q = None
             if args.ee == "dex3":
                 left_pressure_sample, right_pressure_sample = hand_ctrl.get_pressure_samples()
                 ready_pressure_timestamps = (left_pressure_sample[1], right_pressure_sample[1])
+                with dual_hand_data_lock:
+                    ready_dex3_measured_q = np.asarray(dual_hand_state_array[:], dtype=float).copy()
+                    ready_dex3_commanded_q = np.asarray(dual_hand_action_array[:], dtype=float).copy()
             status_monitor.observe(
                 now=time.monotonic(),
                 lifecycle="ready",
@@ -462,14 +499,19 @@ if __name__ == '__main__':
             )
             get_ready_arm_q = getattr(arm_ctrl, "get_current_dual_arm_q", None)
             ready_arm_q = get_ready_arm_q() if get_ready_arm_q is not None else np.zeros(14)
+            ready_wall_clock = time.time()
             pose_telemetry_sink.emit(build_pose_record(
-                timestamp=time.time(),
+                timestamp=ready_wall_clock,
+                timestamp_monotonic=time.monotonic(),
                 lifecycle="ready",
                 controller_sample_timestamp=ready_tele_data.controller_sample_timestamp,
                 left_wrist_pose=getattr(ready_tele_data, "left_wrist_pose", None),
                 right_wrist_pose=getattr(ready_tele_data, "right_wrist_pose", None),
                 measured_arm_q=ready_arm_q,
                 commanded_arm_q=ready_arm_q,
+                dex3_configured=args.ee == "dex3",
+                dex3_measured_q=ready_dex3_measured_q,
+                dex3_commanded_q=ready_dex3_commanded_q,
                 drop_count=pose_telemetry_sink.drop_count,
                 now=time.monotonic(),
             ))
@@ -505,6 +547,8 @@ if __name__ == '__main__':
             raise KeyboardInterrupt
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
+        pose_telemetry_sink.emit(build_lifecycle_event(
+            "tracking_started", timestamp=time.time(), timestamp_monotonic=time.monotonic()))
         arm_ctrl.speed_gradual_max()
 
         head_img = None
@@ -644,18 +688,19 @@ if __name__ == '__main__':
             else:
                 sol_q = current_lr_arm_q.copy()
                 sol_tauff = np.zeros_like(current_lr_arm_q)
+            commanded_arm_q = sol_q
+            command_was_sent = False
             if (
                 controller_pose_is_fresh
                 and controller_sample_is_fresh(tele_data.controller_sample_timestamp)
             ):
                 arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
+                command_was_sent = True
             else:
                 # The sample expired during IK; discard its target and hold the
                 # most recently measured arm position instead.
-                arm_ctrl.ctrl_dual_arm(
-                    arm_ctrl.get_current_dual_arm_q().copy(),
-                    np.zeros_like(current_lr_arm_q),
-                )
+                commanded_arm_q = arm_ctrl.get_current_dual_arm_q().copy()
+                arm_ctrl.ctrl_dual_arm(commanded_arm_q, np.zeros_like(current_lr_arm_q))
 
             dex3_measured_q = None
             dex3_commanded_q = None
@@ -663,14 +708,17 @@ if __name__ == '__main__':
                 with dual_hand_data_lock:
                     dex3_measured_q = np.asarray(dual_hand_state_array[:], dtype=float).copy()
                     dex3_commanded_q = np.asarray(dual_hand_action_array[:], dtype=float).copy()
+            tracking_wall_clock = time.time()
             pose_telemetry_sink.emit(build_pose_record(
-                timestamp=time.time(),
+                timestamp=tracking_wall_clock,
+                timestamp_monotonic=time.monotonic(),
                 lifecycle="tracking",
                 controller_sample_timestamp=tele_data.controller_sample_timestamp,
                 left_wrist_pose=getattr(tele_data, "left_wrist_pose", None),
                 right_wrist_pose=getattr(tele_data, "right_wrist_pose", None),
                 measured_arm_q=current_lr_arm_q,
-                commanded_arm_q=sol_q,
+                commanded_arm_q=sol_q if command_was_sent else commanded_arm_q,
+                dex3_configured=args.ee == "dex3",
                 dex3_measured_q=dex3_measured_q,
                 dex3_commanded_q=dex3_commanded_q,
                 drop_count=pose_telemetry_sink.drop_count,
@@ -842,6 +890,10 @@ if __name__ == '__main__':
         import traceback
         logger_mp.error(traceback.format_exc())
     finally:
+        _emit_lifecycle_events(pose_telemetry_sink)
+        if pose_telemetry_sink is not None:
+            pose_telemetry_sink.emit(build_lifecycle_event(
+                "shutdown_finalization", timestamp=time.time(), timestamp_monotonic=time.monotonic()))
         # Dex3 is an independent post-r output. Stop its child process before
         # the potentially slower arm return-to-preparation motion.
         if hand_outputs_activated:
@@ -890,12 +942,12 @@ if __name__ == '__main__':
             if pose_telemetry_sink is not None:
                 pose_telemetry_sink.close()
         except Exception as e:
-            logger_mp.error(f"Failed to close pose telemetry sink: {e}")
+            logger_mp.warning(f"Failed to close pose telemetry sink: {e}")
 
         try:
             status_sink.close()
         except Exception as e:
-            logger_mp.error(f"Failed to close teleop status sink: {e}")
+            logger_mp.warning(f"Failed to close teleop status sink: {e}")
 
         try:
             if not args.motion:

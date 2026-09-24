@@ -70,9 +70,30 @@ def _split_dex3(values: list[float] | None) -> dict[str, list[float] | None]:
     return {"left": values[:7], "right": values[7:]}
 
 
+def _utc_timestamp(timestamp: float) -> str:
+    return datetime.fromtimestamp(float(timestamp), timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+
+
+def build_lifecycle_event(event: str, *, timestamp: float, timestamp_monotonic: float) -> dict:
+    """Build a lifecycle snapshot without JSON or filesystem work."""
+    return {
+        "schema_version": 1,
+        "event": str(event),
+        "timestamp_utc": _utc_timestamp(timestamp),
+        "timestamp_monotonic": float(timestamp_monotonic),
+        "clock_domain": {
+            "timestamp": "wall_clock_utc",
+            "timestamp_monotonic": "monotonic",
+        },
+    }
+
+
 def build_pose_record(
     *,
     timestamp: float,
+    timestamp_monotonic: float | None = None,
     lifecycle: str,
     controller_sample_timestamp: float,
     left_wrist_pose: object,
@@ -81,6 +102,7 @@ def build_pose_record(
     commanded_arm_q: object,
     dex3_measured_q: object = None,
     dex3_commanded_q: object = None,
+    dex3_configured: bool = False,
     drop_count: int = 0,
     now: float | None = None,
 ) -> dict:
@@ -90,10 +112,23 @@ def build_pose_record(
     dex3_measured = _split_dex3(_vector_or_none(dex3_measured_q, expected_size=14))
     dex3_commanded = _split_dex3(_vector_or_none(dex3_commanded_q, expected_size=14))
     dex3_available = dex3_measured_q is not None or dex3_commanded_q is not None
+    dex3_reason = (
+        "dex3_sample_available" if dex3_available
+        else "dex3_configured_no_sample" if dex3_configured
+        else "dex3_not_configured"
+    )
+    monotonic_timestamp = timestamp if timestamp_monotonic is None else timestamp_monotonic
     return {
         "schema_version": 1,
         "event": "full_pose_telemetry",
         "timestamp": float(timestamp),
+        "timestamp_utc": _utc_timestamp(timestamp),
+        "timestamp_monotonic": float(monotonic_timestamp),
+        "clock_domain": {
+            "timestamp": "wall_clock_utc",
+            "timestamp_monotonic": "monotonic",
+            "controller_sample_timestamp": "monotonic",
+        },
         "lifecycle": str(lifecycle),
         "controller": {
             "sample_timestamp": sample_timestamp,
@@ -119,7 +154,7 @@ def build_pose_record(
         },
         "dex3": {
             "available": dex3_available,
-            "reason": None if dex3_available else "dex3_not_configured",
+            "reason": dex3_reason,
             "left": {
                 "measured_q": dex3_measured["left"],
                 "commanded_q": dex3_commanded["left"],
@@ -156,6 +191,7 @@ class PoseTelemetryJsonlSink:
         self._queue: Queue[Mapping[str, object]] = Queue(maxsize=queue_size)
         self._close_timeout_s = close_timeout_s
         self._closed = False
+        self._state_lock = threading.Lock()
         self._close_requested = threading.Event()
         self._drop_count = 0
         self._drop_lock = threading.Lock()
@@ -169,21 +205,23 @@ class PoseTelemetryJsonlSink:
 
     def emit(self, record: Mapping[str, object]) -> bool:
         """Queue a record without blocking or serializing on the caller thread."""
-        if self._closed:
-            return False
-        try:
-            self._queue.put_nowait(record)
-            return True
-        except Full:
-            with self._drop_lock:
-                self._drop_count += 1
-            return False
+        with self._state_lock:
+            if self._closed:
+                return False
+            try:
+                self._queue.put_nowait(record)
+                return True
+            except Full:
+                with self._drop_lock:
+                    self._drop_count += 1
+                return False
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._close_requested.set()
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._close_requested.set()
         self._thread.join(timeout=self._close_timeout_s)
         if self._thread.is_alive():
             self._warn("Pose telemetry writer did not stop before close timeout")
@@ -206,3 +244,25 @@ class PoseTelemetryJsonlSink:
             self._warn(f"Could not initialize pose telemetry log: {error}")
         except (TypeError, ValueError) as error:
             self._warn(f"Could not serialize pose telemetry record: {error}")
+
+
+class _DisabledPoseTelemetrySink:
+    drop_count = 0
+
+    def emit(self, record: Mapping[str, object]) -> bool:
+        return False
+
+    def close(self) -> None:
+        return None
+
+
+def create_pose_telemetry_sink(
+    directory: str | os.PathLike[str], warn: Callable[[str], None] | None = None
+):
+    """Create telemetry storage without making it a teleoperation prerequisite."""
+    warn = warn or (lambda message: None)
+    try:
+        return PoseTelemetryJsonlSink(directory, warn)
+    except Exception as error:
+        warn(f"Could not initialize pose telemetry sink: {error}")
+        return _DisabledPoseTelemetrySink()

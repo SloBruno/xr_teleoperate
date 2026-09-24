@@ -88,6 +88,25 @@ class AsyncStatusFileSink:
             self._warn(f"Could not initialize teleop status log: {error}")
 
 
+class _DisabledStatusSink:
+    def emit(self, payload: str | Mapping[str, Any]) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def create_status_sink(
+    path: str, warn: Callable[[str], None], queue_size: int = 64
+):
+    """Keep status telemetry optional when its writer cannot be created."""
+    try:
+        return AsyncStatusFileSink(path, warn, queue_size=queue_size)
+    except Exception as error:
+        warn(f"Could not initialize teleop status sink: {error}")
+        return _DisabledStatusSink()
+
+
 class TeleopStatusMonitor:
     """Emit JSON status heartbeats and controller freshness transitions."""
 

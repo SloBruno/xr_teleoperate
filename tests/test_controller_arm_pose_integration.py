@@ -55,6 +55,24 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         self.assertLess(ik_call, post_ik_check)
         self.assertLess(post_ik_check, arm_write)
 
+    def test_telemetry_uses_the_exact_command_sent_after_stale_ik_hold(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        hold = source.index("# The sample expired during IK")
+        telemetry = source.index("commanded_arm_q=sol_q if command_was_sent else commanded_arm_q", hold)
+        self.assertIn("commanded_arm_q = arm_ctrl.get_current_dual_arm_q().copy()", source[hold:telemetry])
+
+    def test_lifecycle_events_cover_requested_accepted_tracking_and_shutdown(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        for event in (
+            "preparation_ready",
+            "start_requested",
+            "start_accepted",
+            "tracking_started",
+            "stop_requested",
+            "shutdown_finalization",
+        ):
+            self.assertIn(event, source)
+
 
 if __name__ == "__main__":
     unittest.main()

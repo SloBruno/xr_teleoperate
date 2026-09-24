@@ -71,6 +71,80 @@ def test_build_record_uses_explicit_null_and_reason_when_dex3_is_unavailable():
     }
 
 
+def test_build_record_distinguishes_configured_dex3_without_a_sample():
+    from teleop.utils.full_pose_telemetry import build_pose_record
+
+    record = build_pose_record(
+        timestamp=2.0,
+        timestamp_monotonic=8.0,
+        lifecycle="ready",
+        controller_sample_timestamp=0.0,
+        left_wrist_pose=None,
+        right_wrist_pose=None,
+        measured_arm_q=np.zeros(14),
+        commanded_arm_q=np.zeros(14),
+        dex3_configured=True,
+        dex3_measured_q=None,
+        dex3_commanded_q=None,
+        drop_count=0,
+        now=8.0,
+    )
+
+    assert record["timestamp_utc"].endswith("Z")
+    assert record["timestamp_monotonic"] == 8.0
+    assert record["clock_domain"] == {
+        "timestamp": "wall_clock_utc",
+        "timestamp_monotonic": "monotonic",
+        "controller_sample_timestamp": "monotonic",
+    }
+    assert record["dex3"]["available"] is False
+    assert record["dex3"]["reason"] == "dex3_configured_no_sample"
+
+
+def test_lifecycle_event_record_is_structured_without_serialization():
+    from teleop.utils.full_pose_telemetry import build_lifecycle_event
+
+    event = build_lifecycle_event(
+        "tracking_started", timestamp=10.0, timestamp_monotonic=20.0
+    )
+
+    assert event["event"] == "tracking_started"
+    assert event["timestamp_utc"].endswith("Z")
+    assert event["timestamp_monotonic"] == 20.0
+
+
+def test_failed_telemetry_initialization_returns_nonblocking_sink(monkeypatch, tmp_path):
+    from teleop.utils import full_pose_telemetry
+
+    warnings = []
+    monkeypatch.setattr(
+        full_pose_telemetry,
+        "PoseTelemetryJsonlSink",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("thread unavailable")),
+    )
+
+    sink = full_pose_telemetry.create_pose_telemetry_sink(tmp_path, warnings.append)
+    assert sink.emit({"event": "ignored"}) is False
+    sink.close()
+    assert warnings == ["Could not initialize pose telemetry sink: thread unavailable"]
+
+
+def test_failed_status_initialization_returns_nonblocking_sink(monkeypatch):
+    from teleop.utils import teleop_status
+
+    warnings = []
+    monkeypatch.setattr(
+        teleop_status,
+        "AsyncStatusFileSink",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("thread unavailable")),
+    )
+
+    sink = teleop_status.create_status_sink("/unavailable/status.jsonl", warnings.append)
+    sink.emit({"event": "ignored"})
+    sink.close()
+    assert warnings == ["Could not initialize teleop status sink: thread unavailable"]
+
+
 def test_jsonl_sink_is_bounded_nonblocking_and_uses_unique_session_paths(tmp_path):
     from teleop.utils.full_pose_telemetry import PoseTelemetryJsonlSink
 
