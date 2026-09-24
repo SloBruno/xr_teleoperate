@@ -726,6 +726,7 @@ if __name__ == '__main__':
                 measured_arm_q=current_lr_arm_q,
                 commanded_arm_q=commanded_arm_q,
                 commanded_arm_q_reason=commanded_arm_q_reason,
+                arm_joint_split=arm_ctrl.arm_joint_split,
                 dex3_configured=args.ee == "dex3",
                 dex3_measured_q=dex3_measured_q,
                 dex3_commanded_q=dex3_commanded_q,
@@ -901,7 +902,6 @@ if __name__ == '__main__':
         shutdown_cause = "shutdown_exception"
         import traceback
         logger_mp.error(traceback.format_exc())
-        raise
     finally:
         _emit_lifecycle_events(pose_telemetry_sink)
         if pose_telemetry_sink is not None:

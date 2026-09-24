@@ -269,6 +269,7 @@ def test_terminal_keys_are_the_only_lifecycle_authority(monkeypatch):
 
 def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
     moves = []
+    finalization = []
     arm_request_callbacks = []
 
     class StopAfterMove(Exception):
@@ -290,12 +291,13 @@ def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
             pass
 
         def deactivate(self):
-            pass
+            finalization.append("arm_deactivated")
 
         def speed_gradual_max(self):
             pass
 
         def ctrl_dual_arm_go_home(self, release_motion_authority=False):
+            finalization.append(("arm_home", release_motion_authority))
             return True
 
     class FakeArmIK:
@@ -381,3 +383,4 @@ def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
     runpy.run_path(str(script), run_name="__main__")
 
     assert moves == ["initialized", (0.0, 0.0, 0.0)]
+    assert finalization[-2:] == [("arm_home", True), "arm_deactivated"]

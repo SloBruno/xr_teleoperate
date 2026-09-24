@@ -80,8 +80,8 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         self.assertIn('shutdown_cause = "shutdown_exception"', source)
         self.assertLess(source.index('shutdown_cause = "shutdown_interrupted"'), source.index('"shutdown_finalization"'))
         self.assertLess(source.index('shutdown_cause = "shutdown_exception"'), source.index('"shutdown_finalization"'))
-        self.assertIn("raise", source[source.index("except Exception:"):source.index("finally:")])
-
+        exception_handler = source[source.index("except Exception:"):source.index("finally:")]
+        self.assertNotIn("raise", exception_handler)
 
 if __name__ == "__main__":
     unittest.main()

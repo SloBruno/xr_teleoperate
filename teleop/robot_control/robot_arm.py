@@ -128,6 +128,8 @@ class _ArmPublicationMixin:
 
 
 class G1_29_ArmController(_ArmPublicationMixin):
+    arm_joint_split = (7, 7)
+
     def __init__(self, motion_mode = False, simulation_mode = False):
         logger_mp.info("Initialize G1_29_ArmController...")
         self.q_target = np.zeros(14)
@@ -437,6 +439,8 @@ class G1_29_JointIndex(IntEnum):
     kNotUsedJoint5 = 34
 
 class G1_23_ArmController(_ArmPublicationMixin):
+    arm_joint_split = (5, 5)
+
     def __init__(self, motion_mode = False, simulation_mode = False):
         self.simulation_mode = simulation_mode
         self.motion_mode = motion_mode
@@ -717,6 +721,8 @@ class G1_23_JointIndex(IntEnum):
     kNotUsedJoint5 = 34
 
 class H1_2_ArmController(_ArmPublicationMixin):
+    arm_joint_split = (7, 7)
+
     def __init__(self, motion_mode = False, simulation_mode = False):
         self.simulation_mode = simulation_mode
         self.motion_mode = motion_mode
@@ -1004,6 +1010,8 @@ class H1_2_JointIndex(IntEnum):
     kNotUsedJoint7 = 34
 
 class H1_ArmController(_ArmPublicationMixin):
+    arm_joint_split = (4, 4)
+
     def __init__(self, simulation_mode = False):
         self.simulation_mode = simulation_mode
         
@@ -1229,6 +1237,8 @@ class H1_JointIndex(IntEnum):
     kLeftElbow = 19
 
 class H2_ArmController(_ArmPublicationMixin):
+    arm_joint_split = (7, 7)
+
     def __init__(self, motion_mode=False, simulation_mode=False):
         logger_mp.info("Initialize H2_ArmController...")
         self.q_target = np.zeros(14)

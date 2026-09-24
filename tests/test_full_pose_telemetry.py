@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -275,6 +276,111 @@ def test_arm_telemetry_uses_the_exact_published_target_from_the_controller():
     assert record["arm"]["left"]["commanded_q"] == published[:7].tolist()
     assert record["arm"]["right"]["commanded_q"] == published[7:].tolist()
     assert record["arm"]["left"]["commanded_q"] != requested[:7].tolist()
+
+
+@pytest.mark.parametrize(
+    "profile, split",
+    [
+        ("G1_29", (7, 7)),
+        ("G1_23", (5, 5)),
+        ("H1_2", (7, 7)),
+        ("H1", (4, 4)),
+        ("H2", (7, 7)),
+    ],
+)
+def test_arm_telemetry_uses_selected_profile_split_and_left_right_order(profile, split):
+    from teleop.utils.full_pose_telemetry import build_pose_record
+
+    left_count, right_count = split
+    values = np.arange(left_count + right_count, dtype=float) + 100.0
+    record = build_pose_record(
+        timestamp=10.0,
+        timestamp_monotonic=10.0,
+        lifecycle="tracking",
+        controller_sample_timestamp=9.9,
+        left_wrist_pose=None,
+        right_wrist_pose=None,
+        measured_arm_q=values,
+        commanded_arm_q=values + 0.5,
+        arm_joint_split=split,
+    )
+
+    assert record["arm"]["left"]["measured_q"] == values[:left_count].tolist()
+    assert record["arm"]["right"]["measured_q"] == values[left_count:].tolist()
+    assert record["arm"]["left"]["commanded_q"] == (values[:left_count] + 0.5).tolist()
+    assert record["arm"]["right"]["commanded_q"] == (values[left_count:] + 0.5).tolist()
+
+
+@pytest.mark.parametrize("split", [(7, 7), (5, 5), (4, 4)])
+def test_arm_publication_preserves_exact_profile_sized_q(split):
+    from teleop.utils.full_pose_telemetry import publish_arm_command_for_telemetry
+
+    requested = np.arange(sum(split), dtype=float)
+    published = requested + 0.25
+
+    class ProfileController:
+        arm_joint_split = split
+
+        def ctrl_dual_arm(self, q_target, tauff_target):
+            return {"published_q": published, "reason": "published"}
+
+    published_q, reason = publish_arm_command_for_telemetry(
+        ProfileController(), requested, np.zeros(sum(split))
+    )
+
+    np.testing.assert_array_equal(published_q, published)
+    assert reason == "published"
+
+
+def test_arm_publication_rejects_returned_dimension_mismatch_explicitly():
+    from teleop.utils.full_pose_telemetry import publish_arm_command_for_telemetry
+
+    class ProfileController:
+        arm_joint_split = (5, 5)
+
+        def ctrl_dual_arm(self, q_target, tauff_target):
+            return {"published_q": np.zeros(14), "reason": "published"}
+
+    published_q, reason = publish_arm_command_for_telemetry(
+        ProfileController(), np.zeros(10), np.zeros(10)
+    )
+
+    assert published_q is None
+    assert reason == "arm_command_publication_dimension_mismatch:expected=10:actual=14"
+
+
+def test_arm_publication_rejects_invalid_returned_q_without_published_reason():
+    from teleop.utils.full_pose_telemetry import publish_arm_command_for_telemetry
+
+    class ProfileController:
+        arm_joint_split = (5, 5)
+
+        def ctrl_dual_arm(self, q_target, tauff_target):
+            return {"published_q": np.full(10, np.nan), "reason": "published"}
+
+    published_q, reason = publish_arm_command_for_telemetry(
+        ProfileController(), np.zeros(10), np.zeros(10)
+    )
+
+    assert published_q is None
+    assert reason == "arm_command_publication_invalid"
+
+
+def test_arm_publication_rejects_requested_dimension_mismatch_explicitly():
+    from teleop.utils.full_pose_telemetry import publish_arm_command_for_telemetry
+
+    class ProfileController:
+        arm_joint_split = (4, 4)
+
+        def ctrl_dual_arm(self, q_target, tauff_target):
+            raise AssertionError("controller must not receive an invalid target")
+
+    published_q, reason = publish_arm_command_for_telemetry(
+        ProfileController(), np.zeros(10), np.zeros(10)
+    )
+
+    assert published_q is None
+    assert reason == "arm_command_target_dimension_mismatch:expected=8:actual=10"
 
 
 def test_arm_telemetry_records_null_and_reason_when_publication_is_unavailable():

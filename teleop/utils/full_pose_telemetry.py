@@ -82,10 +82,33 @@ def _vector_or_none(values: object, expected_size: int | None = None) -> list[fl
     return vector.tolist()
 
 
-def _split_arm(values: list[float] | None) -> dict[str, list[float] | None]:
-    if values is None or len(values) != 14:
+def _vector_size(values: object) -> int | None:
+    if values is None:
+        return None
+    try:
+        return int(np.asarray(values, dtype=float).reshape(-1).size)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_arm_joint_split(arm_joint_split: object) -> tuple[int, int]:
+    try:
+        left_count, right_count = arm_joint_split
+        split = (int(left_count), int(right_count))
+    except (TypeError, ValueError):
+        raise ValueError("arm_joint_split must contain two positive joint counts")
+    if split[0] <= 0 or split[1] <= 0 or (left_count, right_count) != split:
+        raise ValueError("arm_joint_split must contain two positive joint counts")
+    return split
+
+
+def _split_arm(
+    values: list[float] | None, arm_joint_split: tuple[int, int]
+) -> dict[str, list[float] | None]:
+    left_count, right_count = arm_joint_split
+    if values is None or len(values) != left_count + right_count:
         return {"left": None, "right": None}
-    return {"left": values[:7], "right": values[7:]}
+    return {"left": values[:left_count], "right": values[left_count:]}
 
 
 def _split_dex3(values: list[float] | None) -> dict[str, list[float] | None]:
@@ -137,6 +160,7 @@ def build_pose_record(
     dex3_commanded_q: object = None,
     dex3_configured: bool = False,
     dex3_sample_metadata: Mapping[str, Mapping[str, object]] | None = None,
+    arm_joint_split: tuple[int, int] = (7, 7),
     drop_count: int = 0,
     now: float | None = None,
 ) -> dict:
@@ -177,8 +201,12 @@ def build_pose_record(
         dex3_reason = "dex3_partially_sampled"
     else:
         dex3_reason = "dex3_sampled"
-    arm_measured = _split_arm(_vector_or_none(measured_arm_q, expected_size=14))
-    arm_commanded = _split_arm(_vector_or_none(commanded_arm_q, expected_size=14))
+    arm_joint_split = _normalize_arm_joint_split(arm_joint_split)
+    arm_expected_size = sum(arm_joint_split)
+    measured_values = _vector_or_none(measured_arm_q, expected_size=arm_expected_size)
+    commanded_values = _vector_or_none(commanded_arm_q, expected_size=arm_expected_size)
+    arm_measured = _split_arm(measured_values, arm_joint_split)
+    arm_commanded = _split_arm(commanded_values, arm_joint_split)
     arm_record = {
         "left": {
             "measured_q": arm_measured["left"],
@@ -189,6 +217,11 @@ def build_pose_record(
             "commanded_q": arm_commanded["right"],
         },
     }
+    if commanded_arm_q is not None and commanded_values is None:
+        commanded_arm_q_reason = (
+            f"arm_command_dimension_mismatch:expected={arm_expected_size}:"
+            f"actual={_vector_size(commanded_arm_q)}"
+        )
     if commanded_arm_q_reason is not None:
         for side in arm_record.values():
             side["commanded_q_reason"] = str(commanded_arm_q_reason)
@@ -231,6 +264,19 @@ def build_pose_record(
 
 def publish_arm_command_for_telemetry(controller, q_target, tauff_target):
     """Return the controller's published q snapshot and an explicit outcome reason."""
+    arm_joint_split = _normalize_arm_joint_split(
+        getattr(controller, "arm_joint_split", (7, 7))
+    )
+    expected_size = sum(arm_joint_split)
+    target_size = _vector_size(q_target)
+    tauff_size = _vector_size(tauff_target)
+    if target_size != expected_size or tauff_size != expected_size:
+        actual_size = target_size if target_size != expected_size else tauff_size
+        return None, f"arm_command_target_dimension_mismatch:expected={expected_size}:actual={actual_size}"
+    if _vector_or_none(q_target, expected_size=expected_size) is None:
+        return None, "arm_command_target_invalid"
+    if _vector_or_none(tauff_target, expected_size=expected_size) is None:
+        return None, "arm_command_tauff_target_invalid"
     try:
         publication = controller.ctrl_dual_arm(q_target, tauff_target)
     except Exception as error:
@@ -243,9 +289,18 @@ def publish_arm_command_for_telemetry(controller, q_target, tauff_target):
     else:
         published_q = getattr(publication, "published_q", None)
         reason = getattr(publication, "reason", None)
-    published_q = _vector_or_none(published_q, expected_size=14)
+    published_size = _vector_size(published_q)
+    if published_size != expected_size:
+        return None, (
+            f"arm_command_publication_dimension_mismatch:expected={expected_size}:"
+            f"actual={published_size}"
+        )
+    published_q = _vector_or_none(published_q, expected_size=expected_size)
     if published_q is None:
-        return None, str(reason or "arm_command_publication_unavailable")
+        publication_reason = str(reason or "arm_command_publication_unavailable")
+        if publication_reason == "published":
+            publication_reason = "arm_command_publication_invalid"
+        return None, publication_reason
     return np.asarray(published_q, dtype=float), str(reason or "published")
 
 
