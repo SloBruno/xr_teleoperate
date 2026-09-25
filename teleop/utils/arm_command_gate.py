@@ -16,6 +16,39 @@ class ArmCommandDecision:
     publication: object = None
 
 
+_HOLD_ATTRIBUTE = "_xr_teleop_frozen_hold_q"
+
+
+def _clear_frozen_hold(arm_ctrl):
+    setattr(arm_ctrl, _HOLD_ATTRIBUTE, None)
+
+
+def _frozen_hold(arm_ctrl):
+    hold_q = getattr(arm_ctrl, _HOLD_ATTRIBUTE, None)
+    if hold_q is None:
+        measured_q = np.asarray(arm_ctrl.get_current_dual_arm_q(), dtype=float).copy()
+        if measured_q.ndim != 1 or measured_q.size == 0 or not np.all(np.isfinite(measured_q)):
+            raise ValueError("measured arm state is not a finite joint vector")
+        hold_q = measured_q
+        setattr(arm_ctrl, _HOLD_ATTRIBUTE, hold_q.copy())
+    return np.asarray(hold_q, dtype=float).copy()
+
+
+def _command_is_finite(q_target, tauff_target):
+    try:
+        q = np.asarray(q_target, dtype=float)
+        tau = np.asarray(tauff_target, dtype=float)
+    except (TypeError, ValueError):
+        return False
+    return (
+        q.ndim == 1
+        and q.size > 0
+        and tau.shape == q.shape
+        and np.all(np.isfinite(q))
+        and np.all(np.isfinite(tau))
+    )
+
+
 def publish_arm_command(
     arm_ctrl,
     q_target,
@@ -33,17 +66,19 @@ def publish_arm_command(
             measured_q = arm_ctrl.get_current_dual_arm_q().copy()
             selected_tauff = np.zeros_like(measured_q)
             publication = arm_ctrl.ctrl_dual_arm(measured_q, selected_tauff)
+            _clear_frozen_hold(arm_ctrl)
             if is_stopped():
                 arm_ctrl.deactivate()
             return ArmCommandDecision(False, True, measured_q, selected_tauff, publication)
-        if not target_accepted or not sample_fresh:
-            measured_q = arm_ctrl.get_current_dual_arm_q().copy()
-            selected_tauff = np.zeros_like(measured_q)
-            publication = arm_ctrl.ctrl_dual_arm(measured_q, selected_tauff)
-            return ArmCommandDecision(False, True, measured_q, selected_tauff, publication)
+        if not target_accepted or not sample_fresh or not _command_is_finite(q_target, tauff_target):
+            hold_q = _frozen_hold(arm_ctrl)
+            selected_tauff = np.zeros_like(hold_q)
+            publication = arm_ctrl.ctrl_dual_arm(hold_q, selected_tauff)
+            return ArmCommandDecision(False, True, hold_q, selected_tauff, publication)
         selected_q = np.asarray(q_target).copy()
         selected_tauff = np.asarray(tauff_target).copy()
         publication = arm_ctrl.ctrl_dual_arm(selected_q, selected_tauff)
+        _clear_frozen_hold(arm_ctrl)
         return ArmCommandDecision(True, False, selected_q, selected_tauff, publication)
 
 

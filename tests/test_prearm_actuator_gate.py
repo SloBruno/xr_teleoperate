@@ -92,7 +92,7 @@ class PrearmActuatorGateTest(unittest.TestCase):
         self.assertIn("np.all(np.abs(current_q) <= tolerance)", home)
 
         shutdown = source[source.index("    finally:"):]
-        self.assertIn("arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)", shutdown)
+        self.assertNotIn("arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)", shutdown)
 
     def test_startup_inputs_are_serialized_with_launcher_preparation(self):
         source = TELEOP.read_text(encoding="utf-8")
@@ -125,16 +125,13 @@ class PrearmActuatorGateTest(unittest.TestCase):
         self.assertLess(activate, prepare)
         self.assertLess(prepare, tracking)
 
-    def test_q_returns_arms_to_prepared_pose_before_deactivation(self):
+    def test_q_deactivates_without_autonomous_return_motion(self):
         source = TELEOP.read_text(encoding="utf-8")
         finally_block = source[source.index("    finally:"):]
-        g1_29_shutdown = finally_block[finally_block.index('if args.arm == "G1_29":'):]
-        # In the lifecycle-gated path, the arms return to the prepared pose before
-        # the arm DDS output is released.
-        self.assertLess(
-            g1_29_shutdown.index("arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)"),
-            g1_29_shutdown.index("arm_ctrl.deactivate()"),
-        )
+        g1_29_start = finally_block.index('if args.arm == "G1_29":')
+        g1_29_shutdown = finally_block[g1_29_start:finally_block.index("        else:", g1_29_start)]
+        self.assertIn("arm_ctrl.deactivate()", g1_29_shutdown)
+        self.assertNotIn("arm_ctrl.ctrl_dual_arm_go_home", g1_29_shutdown)
 
     def test_prearm_exit_never_requests_arm_home_motion(self):
         source = TELEOP.read_text(encoding="utf-8")
@@ -206,7 +203,7 @@ class PrearmActuatorGateTest(unittest.TestCase):
         legacy_home = finally_block.index("arm_ctrl.ctrl_dual_arm_go_home()")
         # The legacy shutdown path restores the arms home without touching the
         # G1_29-only activate()/deactivate() methods.
-        self.assertIn("arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)", finally_block)
+        self.assertNotIn("arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)", finally_block)
         self.assertGreater(legacy_home, finally_block.index('if args.arm == "G1_29":'))
         self.assertLess(finally_block.index("arm_ctrl.deactivate()"), legacy_home)
 

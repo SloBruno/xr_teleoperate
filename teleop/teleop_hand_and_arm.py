@@ -92,6 +92,10 @@ def _request_start_locked():
     if not PREPARATION_COMPLETE:
         logger_mp.warning("[lifecycle] Ignoring start until arm preparation completes.")
         return False
+    if START:
+        # Key repeat or a second controller edge must not erase a calibration
+        # that the active tracking loop cannot recreate.
+        return True
     ARM_REQUEST_TIMESTAMP = time.monotonic()
     if arm_calibration is not None:
         arm_calibration.reset_for_start_request(ARM_REQUEST_TIMESTAMP)
@@ -993,8 +997,7 @@ if __name__ == '__main__':
         import traceback
         logger_mp.error(traceback.format_exc())
     finally:
-        # Dex3 is an independent post-r output. Stop its child process before
-        # the potentially slower arm return-to-preparation motion.
+        # Stop every active output without adding autonomous shutdown motion.
         if hand_outputs_activated:
             try:
                 hand_ctrl.deactivate()
@@ -1003,9 +1006,6 @@ if __name__ == '__main__':
         if args.arm == "G1_29":
             if outputs_activated:
                 try:
-                    # Return to the original all-zero preparation pose before
-                    # releasing arm DDS output.
-                    arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)
                     arm_ctrl.deactivate()
                 except Exception as e:
                     _log_best_effort("error", f"Failed to deactivate arm output: {e}")

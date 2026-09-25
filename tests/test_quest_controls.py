@@ -1,3 +1,4 @@
+import ast
 import math
 import sys
 from pathlib import Path
@@ -202,6 +203,39 @@ def test_controller_lifecycle_poll_uses_fresh_rising_edges_and_shared_requests(m
     )
     module.poll_controller_lifecycle(stale, False, False)
     assert (module.START, module.STOP) == (False, False)
+
+
+def test_repeat_start_while_tracking_preserves_calibration(monkeypatch):
+    class Calibration:
+        def __init__(self):
+            self.calibrated = True
+            self.reset_count = 0
+
+        def reset_for_start_request(self, _timestamp):
+            self.calibrated = False
+            self.reset_count += 1
+
+    source_path = Path(__file__).resolve().parents[1] / "teleop" / "teleop_hand_and_arm.py"
+    tree = ast.parse(source_path.read_text())
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_request_start_locked"
+    )
+    calibration = Calibration()
+    namespace = {
+        "time": time,
+        "logger_mp": types.SimpleNamespace(warning=lambda *_args: None),
+        "PREPARATION_COMPLETE": True,
+        "START": True,
+        "ARM_REQUEST_TIMESTAMP": 1.0,
+        "arm_calibration": calibration,
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
+
+    assert namespace["_request_start_locked"]()
+    assert namespace["START"] is True
+    assert calibration.calibrated is True
+    assert calibration.reset_count == 0
 
 
 def test_locomotion_is_not_gated_to_controller_mode_and_uses_freshness():
