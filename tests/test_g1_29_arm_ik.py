@@ -4,6 +4,7 @@ import types
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
@@ -183,3 +184,20 @@ def test_g1_29_cold_construction_recreates_data_before_first_zero_fk(monkeypatch
     left_pose, right_pose = ik.forward_kinematics(np.zeros(14))
     assert left_pose.shape == (4, 4)
     assert right_pose.shape == (4, 4)
+
+
+def test_real_pinocchio_cold_start_fk_when_dependency_is_available(monkeypatch):
+    pytest.importorskip("pinocchio")
+    pytest.importorskip("casadi")
+    pytest.importorskip("meshcat.geometry")
+    module = importlib.import_module("teleop.robot_control.robot_arm_ik")
+    repo_root = Path(__file__).parents[1]
+    monkeypatch.chdir(repo_root / "teleop")
+    ik = module.G1_29_ArmIK(Unit_Test=False)
+
+    left_pose, right_pose = ik.forward_kinematics(np.zeros(14))
+
+    assert left_pose.shape == (4, 4)
+    assert right_pose.shape == (4, 4)
+    assert np.isfinite(left_pose).all()
+    assert np.isfinite(right_pose).all()

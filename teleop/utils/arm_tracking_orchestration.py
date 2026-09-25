@@ -8,6 +8,52 @@ from teleop.utils.arm_command_gate import publish_arm_command
 from teleop.utils.quest_safety import controller_sample_is_fresh
 
 
+def _is_rigid_se3(transform):
+    try:
+        matrix = np.asarray(transform, dtype=float)
+    except (TypeError, ValueError):
+        return False
+    if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
+        return False
+    rotation = matrix[:3, :3]
+    return (
+        np.allclose(matrix[3], [0.0, 0.0, 0.0, 1.0], atol=1e-5)
+        and np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5)
+        and np.isclose(np.linalg.det(rotation), 1.0, atol=1e-5)
+    )
+
+
+def _valid_target_pair(target):
+    try:
+        return len(target) == 2 and all(_is_rigid_se3(pose) for pose in target)
+    except (TypeError, ValueError):
+        return False
+
+
+def _rotation_distance(first, second):
+    relative = first[:3, :3].T @ second[:3, :3]
+    cosine = np.clip((np.trace(relative) - 1.0) / 2.0, -1.0, 1.0)
+    return float(np.arccos(cosine))
+
+
+def _fk_matches_target(arm_ik, q, target):
+    forward_kinematics = getattr(arm_ik, "forward_kinematics", None)
+    if forward_kinematics is None:
+        return True
+    try:
+        fk = forward_kinematics(q)
+    except Exception:
+        return False
+    if not _valid_target_pair(fk):
+        return False
+    for actual, expected in zip(fk, target):
+        if np.linalg.norm(actual[:3, 3] - expected[:3, 3]) > 0.10:
+            return False
+        if _rotation_distance(actual, expected) > 0.30:
+            return False
+    return True
+
+
 @dataclass(frozen=True)
 class ArmTrackingCycleResult:
     target_accepted: bool
@@ -59,6 +105,9 @@ def run_arm_tracking_cycle(
     ):
         target = calibrator.targets(controller_poses, sample_timestamp, now=now)
 
+    if target is not None and not _valid_target_pair(target):
+        target = None
+
     if target is None:
         sol_q = np.asarray(current_q).copy()
         sol_tauff = np.zeros_like(sol_q)
@@ -66,6 +115,8 @@ def run_arm_tracking_cycle(
         sol_q, sol_tauff = arm_ik.solve_ik(
             target[0], target[1], current_q, current_dq
         )
+        if not _fk_matches_target(arm_ik, sol_q, target):
+            target = None
 
     final_sample_fresh = sample_fresh and controller_sample_is_fresh(sample_timestamp, now)
     command = publish_arm_command(

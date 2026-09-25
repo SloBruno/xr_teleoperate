@@ -34,7 +34,7 @@ def _frozen_hold(arm_ctrl):
     return np.asarray(hold_q, dtype=float).copy()
 
 
-def _command_is_finite(q_target, tauff_target):
+def _command_is_finite(q_target, tauff_target, expected_shape=None):
     try:
         q = np.asarray(q_target, dtype=float)
         tau = np.asarray(tauff_target, dtype=float)
@@ -43,6 +43,7 @@ def _command_is_finite(q_target, tauff_target):
     return (
         q.ndim == 1
         and q.size > 0
+        and (expected_shape is None or q.shape == expected_shape)
         and tau.shape == q.shape
         and np.all(np.isfinite(q))
         and np.all(np.isfinite(tau))
@@ -62,18 +63,22 @@ def publish_arm_command(
 ):
     """Select and publish one command while retaining the exact hold decision."""
     with lifecycle_lock:
+        try:
+            measured_q = np.asarray(
+                arm_ctrl.get_current_dual_arm_q(), dtype=float
+            ).copy()
+        except (AttributeError, TypeError, ValueError):
+            measured_q = np.array([], dtype=float)
+        measured_is_valid = measured_q.ndim == 1 and measured_q.size > 0 and np.all(np.isfinite(measured_q))
         if is_stopped() or not is_started():
-            measured_q = np.asarray(arm_ctrl.get_current_dual_arm_q(), dtype=float).copy()
-            selected_tauff = np.zeros_like(measured_q)
-            _clear_frozen_hold(arm_ctrl)
-            if not (
-                measured_q.ndim == 1
-                and measured_q.size > 0
-                and np.all(np.isfinite(measured_q))
-            ):
+            if not measured_is_valid:
                 if is_stopped():
                     arm_ctrl.deactivate()
-                return ArmCommandDecision(False, True, measured_q, selected_tauff, None)
+                return ArmCommandDecision(
+                    False, True, measured_q, np.array([], dtype=float), None
+                )
+            selected_tauff = np.zeros_like(measured_q)
+            _clear_frozen_hold(arm_ctrl)
             if is_stopped():
                 # STOP is terminal for this output path: invalidate the writer
                 # before returning so no pending/new target is enqueued.
@@ -81,7 +86,16 @@ def publish_arm_command(
                 return ArmCommandDecision(False, True, measured_q, selected_tauff, None)
             publication = arm_ctrl.ctrl_dual_arm(measured_q, selected_tauff)
             return ArmCommandDecision(False, True, measured_q, selected_tauff, publication)
-        if not target_accepted or not sample_fresh or not _command_is_finite(q_target, tauff_target):
+        if not target_accepted or not sample_fresh or not measured_is_valid:
+            if not measured_is_valid:
+                return ArmCommandDecision(
+                    False, True, measured_q, np.array([], dtype=float), None
+                )
+            hold_q = _frozen_hold(arm_ctrl)
+            selected_tauff = np.zeros_like(hold_q)
+            publication = arm_ctrl.ctrl_dual_arm(hold_q, selected_tauff)
+            return ArmCommandDecision(False, True, hold_q, selected_tauff, publication)
+        if not _command_is_finite(q_target, tauff_target, measured_q.shape):
             hold_q = _frozen_hold(arm_ctrl)
             selected_tauff = np.zeros_like(hold_q)
             publication = arm_ctrl.ctrl_dual_arm(hold_q, selected_tauff)

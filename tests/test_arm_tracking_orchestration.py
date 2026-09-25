@@ -40,6 +40,17 @@ class FakeIK:
         return np.full(14, 9.0), np.full(14, 3.0)
 
 
+class ShapeInvalidIK(FakeIK):
+    def solve_ik(self, left, right, current_q, current_dq):
+        self.calls.append((left, right))
+        return np.full(13, 9.0), np.full(13, 3.0)
+
+
+class ResidualInvalidIK(FakeIK):
+    def forward_kinematics(self, current_q):
+        return np.eye(4), np.eye(4)
+
+
 class FakeCalibrator:
     calibrated = True
 
@@ -128,6 +139,46 @@ def test_stale_and_invalid_targets_hold_without_ik():
     assert stale.hold and invalid.hold
     np.testing.assert_allclose(stale.selected_q, stale_arm.measured_q)
     np.testing.assert_allclose(invalid.selected_q, invalid_arm.measured_q)
+
+
+def test_invalid_se3_target_holds_without_ik_or_publication():
+    invalid_target = (np.eye(4), np.eye(4))
+    invalid_target[0][0, 0] = 2.0
+    result, arm, ik = run(candidate_targets=invalid_target)
+
+    assert not result.target_accepted
+    assert not ik.calls
+    assert not result.published
+    np.testing.assert_allclose(result.selected_q, arm.measured_q)
+
+
+def test_invalid_ik_shape_holds_without_publishing():
+    arm = FakeArm()
+    ik = ShapeInvalidIK()
+    result, arm, _ = run(arm=arm, ik=ik, first_target=poses())
+
+    assert result.target_accepted
+    assert result.hold
+    assert not result.published
+    assert len(arm.commands) == 1
+    assert np.isfinite(arm.commands[0][0]).all()
+    assert np.isfinite(arm.commands[0][1]).all()
+    # Legacy profiles keep the finite frozen hold; the invalid IK vector is
+    # never sent to the actuator.
+    assert not np.array_equal(arm.commands[0][0], np.full(13, 9.0))
+
+
+def test_fk_target_residual_is_fail_closed_when_fk_is_available():
+    arm = FakeArm()
+    ik = ResidualInvalidIK()
+    result, arm, _ = run(arm=arm, ik=ik, first_target=poses())
+
+    assert not result.target_accepted
+    assert result.hold
+    assert not result.published
+    assert len(arm.commands) == 1
+    assert np.isfinite(arm.commands[0][0]).all()
+    assert np.isfinite(arm.commands[0][1]).all()
 
 
 def test_record_enabled_runtime_flow_uses_each_current_cycle_command_decision():
