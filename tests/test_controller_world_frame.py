@@ -21,10 +21,16 @@ def _load_tv_wrapper_module(monkeypatch):
         setattr(schemas, name, object)
     monkeypatch.setitem(sys.modules, "vuer", vuer)
     monkeypatch.setitem(sys.modules, "vuer.schemas", schemas)
-    sys.path.insert(0, str(TV_WRAPPER.parents[1]))
-    sys.modules.pop("televuer", None)
-    sys.modules.pop("televuer.tv_wrapper", None)
+    monkeypatch.syspath_prepend(str(TV_WRAPPER.parents[1]))
+    _purge_televuer_modules()
     return importlib.import_module("televuer.tv_wrapper")
+
+
+def _purge_televuer_modules():
+    """Do not leak the fake-vuer import into later integration tests."""
+    for name in tuple(sys.modules):
+        if name == "televuer" or name.startswith("televuer."):
+            sys.modules.pop(name, None)
 
 
 class _FakeControllerTeleVuer:
@@ -122,20 +128,23 @@ def test_both_controller_modes_return_same_target_when_headset_moves(monkeypatch
     head_b[:3, 3] = [0.2, -0.1, 0.3]
     head_b[:3, :3] = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
 
-    outputs = []
-    for use_hand_tracking in (False, True):
-        wrapper = module.TeleVuerWrapper.__new__(module.TeleVuerWrapper)
-        wrapper.use_hand_tracking = use_hand_tracking
-        wrapper.return_hand_rot_data = False
-        wrapper.arm_reference_mode = "head_yaw"
-        wrapper.arm_pose_source = "controller"
-        wrapper.tvuer = _FakeControllerTeleVuer(head_a, (left, right))
-        first = wrapper.get_tele_data()
-        wrapper.tvuer.head_pose = head_b
-        second = wrapper.get_tele_data()
-        np.testing.assert_allclose(second.left_wrist_pose, first.left_wrist_pose)
-        np.testing.assert_allclose(second.right_wrist_pose, first.right_wrist_pose)
-        outputs.append((first.left_wrist_pose, first.right_wrist_pose))
+    try:
+        outputs = []
+        for use_hand_tracking in (False, True):
+            wrapper = module.TeleVuerWrapper.__new__(module.TeleVuerWrapper)
+            wrapper.use_hand_tracking = use_hand_tracking
+            wrapper.return_hand_rot_data = False
+            wrapper.arm_reference_mode = "head_yaw"
+            wrapper.arm_pose_source = "controller"
+            wrapper.tvuer = _FakeControllerTeleVuer(head_a, (left, right))
+            first = wrapper.get_tele_data()
+            wrapper.tvuer.head_pose = head_b
+            second = wrapper.get_tele_data()
+            np.testing.assert_allclose(second.left_wrist_pose, first.left_wrist_pose)
+            np.testing.assert_allclose(second.right_wrist_pose, first.right_wrist_pose)
+            outputs.append((first.left_wrist_pose, first.right_wrist_pose))
 
-    np.testing.assert_allclose(outputs[0][0], outputs[1][0])
-    np.testing.assert_allclose(outputs[0][1], outputs[1][1])
+        np.testing.assert_allclose(outputs[0][0], outputs[1][0])
+        np.testing.assert_allclose(outputs[0][1], outputs[1][1])
+    finally:
+        _purge_televuer_modules()
