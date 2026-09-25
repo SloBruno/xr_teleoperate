@@ -100,10 +100,10 @@ def test_stop_race_holds_measured_pose_and_deactivates_without_publishing_ik():
     result, arm, ik = run(is_stopped=lambda: True)
     assert not result.published
     assert not ik.calls
-    np.testing.assert_allclose(arm.commands[0][0], arm.measured_q)
+    assert arm.commands == []
     assert arm.deactivated
     assert result.hold is True
-    assert result.publication == 1
+    assert result.publication is None
     assert result.selected_q.tolist() == arm.measured_q.tolist()
     assert result.selected_tauff.tolist() == [0.0] * 14
     assert arm_recording_actions(result)["left_arm"]["qpos"] == arm.measured_q[:7].tolist()

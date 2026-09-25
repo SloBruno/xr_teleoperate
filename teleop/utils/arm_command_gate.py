@@ -63,12 +63,23 @@ def publish_arm_command(
     """Select and publish one command while retaining the exact hold decision."""
     with lifecycle_lock:
         if is_stopped() or not is_started():
-            measured_q = arm_ctrl.get_current_dual_arm_q().copy()
+            measured_q = np.asarray(arm_ctrl.get_current_dual_arm_q(), dtype=float).copy()
             selected_tauff = np.zeros_like(measured_q)
-            publication = arm_ctrl.ctrl_dual_arm(measured_q, selected_tauff)
             _clear_frozen_hold(arm_ctrl)
+            if not (
+                measured_q.ndim == 1
+                and measured_q.size > 0
+                and np.all(np.isfinite(measured_q))
+            ):
+                if is_stopped():
+                    arm_ctrl.deactivate()
+                return ArmCommandDecision(False, True, measured_q, selected_tauff, None)
             if is_stopped():
+                # STOP is terminal for this output path: invalidate the writer
+                # before returning so no pending/new target is enqueued.
                 arm_ctrl.deactivate()
+                return ArmCommandDecision(False, True, measured_q, selected_tauff, None)
+            publication = arm_ctrl.ctrl_dual_arm(measured_q, selected_tauff)
             return ArmCommandDecision(False, True, measured_q, selected_tauff, publication)
         if not target_accepted or not sample_fresh or not _command_is_finite(q_target, tauff_target):
             hold_q = _frozen_hold(arm_ctrl)

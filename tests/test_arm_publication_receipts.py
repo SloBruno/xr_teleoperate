@@ -76,6 +76,26 @@ def test_failed_receipt_has_null_q_and_reason(monkeypatch):
     assert receipt.reason == "arm_command_publication_failed:RuntimeError"
 
 
+@pytest.mark.parametrize(
+    ("q_target", "tauff_target"),
+    [
+        (np.array([np.nan, 0.0]), np.zeros(2)),
+        (np.zeros(2), np.array([0.0, np.inf])),
+        (np.zeros(2), np.zeros(3)),
+    ],
+)
+def test_arm_writer_finite_gate_rejects_nonfinite_or_mismatched_commands(
+    monkeypatch, q_target, tauff_target
+):
+    module = _load_robot_arm(monkeypatch)
+
+    class Controller(module._ArmPublicationMixin):
+        arm_joint_split = (1, 1)
+
+    assert not Controller._arm_command_is_finite(q_target, tauff_target)
+    assert Controller._arm_command_is_finite(np.zeros(2), np.zeros(2))
+
+
 def test_submission_does_not_drain_delayed_or_unrelated_receipts(monkeypatch):
     from teleop.utils.full_pose_telemetry import publish_arm_command_for_telemetry
 

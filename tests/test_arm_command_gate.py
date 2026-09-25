@@ -44,9 +44,37 @@ def test_stop_wins_final_check_and_deactivates_without_ik_q():
         arm, ik_q, np.ones(14), target_accepted=True, sample_fresh=True,
         lifecycle_lock=threading.Lock(), is_started=lambda: False, is_stopped=lambda: True,
     )
-    assert np.array_equal(arm.commands[0][0], arm.measured_q)
-    assert np.array_equal(arm.commands[0][1], np.zeros(14))
+    assert arm.commands == []
     assert arm.deactivated
+
+
+def test_stop_with_nonfinite_measurement_never_calls_arm_controller():
+    arm = FakeArm()
+    arm.measured_q = np.full(14, np.nan)
+
+    decision = publish_arm_command(
+        arm, np.ones(14), np.ones(14), target_accepted=True, sample_fresh=True,
+        lifecycle_lock=threading.Lock(), is_started=lambda: False, is_stopped=lambda: True,
+    )
+
+    assert decision.hold
+    assert decision.publication is None
+    assert arm.commands == []
+    assert arm.deactivated
+
+
+def test_nonstarted_nonfinite_measurement_never_calls_arm_controller():
+    arm = FakeArm()
+    arm.measured_q = np.full(14, np.inf)
+
+    decision = publish_arm_command(
+        arm, np.ones(14), np.ones(14), target_accepted=False, sample_fresh=False,
+        lifecycle_lock=threading.Lock(), is_started=lambda: False, is_stopped=lambda: False,
+    )
+
+    assert decision.hold
+    assert decision.publication is None
+    assert arm.commands == []
 
 
 def test_authorized_target_is_the_only_new_q_published():
@@ -114,3 +142,33 @@ def test_nonfinite_ik_output_never_reaches_arm_controller():
     assert not decision.published
     assert np.isfinite(arm.commands[-1][0]).all()
     assert np.isfinite(arm.commands[-1][1]).all()
+
+
+def test_new_start_discards_hold_from_previous_tracking_epoch():
+    arm = FakeArm()
+    lock = threading.Lock()
+    started = True
+
+    publish_arm_command(
+        arm, np.zeros(14), np.zeros(14), target_accepted=False,
+        sample_fresh=True, lifecycle_lock=lock,
+        is_started=lambda: started, is_stopped=lambda: False,
+    )
+    first_hold = arm.commands[-1][0].copy()
+    arm.measured_q = arm.measured_q + 1.0
+    started = False
+    publish_arm_command(
+        arm, np.zeros(14), np.zeros(14), target_accepted=False,
+        sample_fresh=True, lifecycle_lock=lock,
+        is_started=lambda: started, is_stopped=lambda: False,
+    )
+    started = True
+
+    decision = publish_arm_command(
+        arm, np.zeros(14), np.zeros(14), target_accepted=False,
+        sample_fresh=True, lifecycle_lock=lock,
+        is_started=lambda: started, is_stopped=lambda: False,
+    )
+
+    assert not np.array_equal(decision.selected_q, first_hold)
+    np.testing.assert_array_equal(decision.selected_q, arm.measured_q)

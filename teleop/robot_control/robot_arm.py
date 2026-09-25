@@ -138,6 +138,21 @@ class _ArmPublicationMixin:
             request_id, None, f"arm_command_publication_failed:{type(error).__name__}"
         )
 
+    @staticmethod
+    def _arm_command_is_finite(q_target, tauff_target):
+        try:
+            q = np.asarray(q_target, dtype=float)
+            tau = np.asarray(tauff_target, dtype=float)
+        except (TypeError, ValueError):
+            return False
+        return (
+            q.ndim == 1
+            and q.size > 0
+            and tau.shape == q.shape
+            and np.all(np.isfinite(q))
+            and np.all(np.isfinite(tau))
+        )
+
 
 class G1_29_ArmController(_ArmPublicationMixin):
     arm_joint_split = (7, 7)
@@ -275,6 +290,11 @@ class G1_29_ArmController(_ArmPublicationMixin):
                 cliped_arm_q_target = arm_q_target
             else:
                 cliped_arm_q_target = self.clip_arm_q_target(arm_q_target, velocity_limit = self.arm_velocity_limit)
+
+            if not self._arm_command_is_finite(cliped_arm_q_target, arm_tauff_target):
+                self._record_failed_arm_publication(request_id, ValueError("non-finite arm command"))
+                time.sleep(self.control_dt)
+                continue
 
             for idx, id in enumerate(G1_29_JointArmIndex):
                 self.msg.motor_cmd[id].q = cliped_arm_q_target[idx]
@@ -566,6 +586,11 @@ class G1_23_ArmController(_ArmPublicationMixin):
             else:
                 cliped_arm_q_target = self.clip_arm_q_target(arm_q_target, velocity_limit = self.arm_velocity_limit)
 
+            if not self._arm_command_is_finite(cliped_arm_q_target, arm_tauff_target):
+                self._record_failed_arm_publication(request_id, ValueError("non-finite arm command"))
+                time.sleep(self.control_dt)
+                continue
+
             for idx, id in enumerate(G1_23_JointArmIndex):
                 self.msg.motor_cmd[id].q = cliped_arm_q_target[idx]
                 self.msg.motor_cmd[id].dq = 0
@@ -846,6 +871,11 @@ class H1_2_ArmController(_ArmPublicationMixin):
             else:
                 cliped_arm_q_target = self.clip_arm_q_target(arm_q_target, velocity_limit = self.arm_velocity_limit)
 
+            if not self._arm_command_is_finite(cliped_arm_q_target, arm_tauff_target):
+                self._record_failed_arm_publication(request_id, ValueError("non-finite arm command"))
+                time.sleep(self.control_dt)
+                continue
+
             for idx, id in enumerate(H1_2_JointArmIndex):
                 self.msg.motor_cmd[id].q = cliped_arm_q_target[idx]
                 self.msg.motor_cmd[id].dq = 0
@@ -1117,6 +1147,11 @@ class H1_ArmController(_ArmPublicationMixin):
             else:
                 cliped_arm_q_target = self.clip_arm_q_target(arm_q_target, velocity_limit = self.arm_velocity_limit)
 
+            if not self._arm_command_is_finite(cliped_arm_q_target, arm_tauff_target):
+                self._record_failed_arm_publication(request_id, ValueError("non-finite arm command"))
+                time.sleep(self.control_dt)
+                continue
+
             for idx, id in enumerate(H1_JointArmIndex):
                 self.msg.motor_cmd[id].q = cliped_arm_q_target[idx]
                 self.msg.motor_cmd[id].dq = 0
@@ -1357,6 +1392,11 @@ class H2_ArmController(_ArmPublicationMixin):
                 cliped_arm_q_target = arm_q_target
             else:
                 cliped_arm_q_target = self.clip_arm_q_target(arm_q_target, velocity_limit=self.arm_velocity_limit)
+
+            if not self._arm_command_is_finite(cliped_arm_q_target, arm_tauff_target):
+                self._record_failed_arm_publication(request_id, ValueError("non-finite arm command"))
+                time.sleep(self.control_dt)
+                continue
 
             for idx, id in enumerate(H2_JointArmIndex):
                 self.msg.motor_cmd[id].q = cliped_arm_q_target[idx]
