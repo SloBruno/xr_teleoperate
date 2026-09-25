@@ -25,6 +25,7 @@ class FakeArm:
 
     def ctrl_dual_arm(self, q, tau):
         self.commands.append((np.asarray(q).copy(), np.asarray(tau).copy()))
+        return len(self.commands)
 
     def deactivate(self):
         self.deactivated = True
@@ -91,6 +92,7 @@ def test_calibrated_first_target_solves_then_publishes():
     assert result.selected_q.tolist() == [9.0] * 14
     assert result.selected_tauff.tolist() == [3.0] * 14
     assert result.hold is False
+    assert result.publication == 1
     assert arm_recording_actions(result)["right_arm"]["qpos"] == [9.0] * 7
 
 
@@ -101,6 +103,7 @@ def test_stop_race_holds_measured_pose_and_deactivates_without_publishing_ik():
     np.testing.assert_allclose(arm.commands[0][0], arm.measured_q)
     assert arm.deactivated
     assert result.hold is True
+    assert result.publication == 1
     assert result.selected_q.tolist() == arm.measured_q.tolist()
     assert result.selected_tauff.tolist() == [0.0] * 14
     assert arm_recording_actions(result)["left_arm"]["qpos"] == arm.measured_q[:7].tolist()

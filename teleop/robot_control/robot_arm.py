@@ -1,6 +1,8 @@
 import numpy as np
 import threading
 import time
+from collections import deque
+from dataclasses import dataclass
 from enum import IntEnum
 
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize # dds
@@ -71,7 +73,75 @@ class DataBuffer:
             self.data = data
             self.timestamp = time.monotonic()
 
-class G1_29_ArmController:
+
+@dataclass(frozen=True)
+class ArmPublicationReceipt:
+    request_id: int
+    published_q: tuple[float, ...] | None
+    reason: str
+    timestamp_monotonic: float
+    arm_joint_split: tuple[int, int]
+
+
+class _ArmPublicationMixin:
+    def _init_arm_publication_state(self):
+        self._command_request_id = 0
+        self._publication_receipts = deque(maxlen=64)
+        self._publication_receipt_drop_count = 0
+        self._publication_receipt_lock = threading.Lock()
+
+    def _capture_arm_command(self):
+        with self.ctrl_lock:
+            return (
+                np.asarray(self.q_target, dtype=float).copy(),
+                np.asarray(self.tauff_target, dtype=float).copy(),
+                self._command_request_id,
+            )
+
+    def _set_arm_command(self, q_target, tauff_target):
+        with self.ctrl_lock:
+            self.q_target = np.asarray(q_target, dtype=float).copy()
+            self.tauff_target = np.asarray(tauff_target, dtype=float).copy()
+            self._command_request_id += 1
+            return self._command_request_id
+
+    def _record_arm_publication(self, request_id, published_q, reason):
+        if published_q is None:
+            frozen_q = None
+        else:
+            frozen_q = tuple(float(value) for value in np.asarray(published_q, dtype=float).reshape(-1))
+        receipt = ArmPublicationReceipt(
+            request_id=int(request_id),
+            published_q=frozen_q,
+            reason=str(reason),
+            timestamp_monotonic=time.monotonic(),
+            arm_joint_split=tuple(self.arm_joint_split),
+        )
+        with self._publication_receipt_lock:
+            if len(self._publication_receipts) == self._publication_receipts.maxlen:
+                self._publication_receipt_drop_count += 1
+            self._publication_receipts.append(receipt)
+
+    def drain_arm_publication_receipts(self):
+        with self._publication_receipt_lock:
+            receipts = tuple(self._publication_receipts)
+            self._publication_receipts.clear()
+            return receipts
+
+    @property
+    def publication_receipt_drop_count(self):
+        with self._publication_receipt_lock:
+            return self._publication_receipt_drop_count
+
+    def _record_failed_arm_publication(self, request_id, error):
+        self._record_arm_publication(
+            request_id, None, f"arm_command_publication_failed:{type(error).__name__}"
+        )
+
+
+class G1_29_ArmController(_ArmPublicationMixin):
+    arm_joint_split = (7, 7)
+
     def __init__(self, motion_mode = False, simulation_mode = False):
         logger_mp.info("Initialize G1_29_ArmController...")
         self.q_target = np.zeros(14)
@@ -118,6 +188,7 @@ class G1_29_ArmController:
         # terminal pre-arm gate has accepted a post-r controller sample.
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
         self.ctrl_lock = threading.Lock()
+        self._init_arm_publication_state()
         self.publish_thread.daemon = True
         self.output_enabled = threading.Event()
         self.outputs_activated = False
@@ -199,9 +270,7 @@ class G1_29_ArmController:
         while self.output_enabled.is_set():
             start_time = time.time()
 
-            with self.ctrl_lock:
-                arm_q_target     = self.q_target
-                arm_tauff_target = self.tauff_target
+            arm_q_target, arm_tauff_target, request_id = self._capture_arm_command()
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
             else:
@@ -213,7 +282,12 @@ class G1_29_ArmController:
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]   
 
             self.msg.crc = self.crc.Crc(self.msg)
-            self.lowcmd_publisher.Write(self.msg)
+            try:
+                self.lowcmd_publisher.Write(self.msg)
+            except Exception as error:
+                self._record_failed_arm_publication(request_id, error)
+            else:
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -228,9 +302,8 @@ class G1_29_ArmController:
 
     def ctrl_dual_arm(self, q_target, tauff_target):
         '''Set control target values q & tau of the left and right arm motors.'''
-        with self.ctrl_lock:
-            self.q_target = q_target
-            self.tauff_target = tauff_target
+        request_id = self._set_arm_command(q_target, tauff_target)
+        return request_id
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
@@ -375,7 +448,9 @@ class G1_29_JointIndex(IntEnum):
     kNotUsedJoint4 = 33
     kNotUsedJoint5 = 34
 
-class G1_23_ArmController:
+class G1_23_ArmController(_ArmPublicationMixin):
+    arm_joint_split = (5, 5)
+
     def __init__(self, motion_mode = False, simulation_mode = False):
         self.simulation_mode = simulation_mode
         self.motion_mode = motion_mode
@@ -453,6 +528,7 @@ class G1_23_ArmController:
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
         self.ctrl_lock = threading.Lock()
+        self._init_arm_publication_state()
         self.publish_thread.daemon = True
         self.publish_thread.start()
 
@@ -483,9 +559,7 @@ class G1_23_ArmController:
         while True:
             start_time = time.time()
 
-            with self.ctrl_lock:
-                arm_q_target     = self.q_target
-                arm_tauff_target = self.tauff_target
+            arm_q_target, arm_tauff_target, request_id = self._capture_arm_command()
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -498,7 +572,12 @@ class G1_23_ArmController:
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]      
 
             self.msg.crc = self.crc.Crc(self.msg)
-            self.lowcmd_publisher.Write(self.msg)
+            try:
+                self.lowcmd_publisher.Write(self.msg)
+            except Exception as error:
+                self._record_failed_arm_publication(request_id, error)
+            else:
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -513,9 +592,8 @@ class G1_23_ArmController:
 
     def ctrl_dual_arm(self, q_target, tauff_target):
         '''Set control target values q & tau of the left and right arm motors.'''
-        with self.ctrl_lock:
-            self.q_target = q_target
-            self.tauff_target = tauff_target
+        request_id = self._set_arm_command(q_target, tauff_target)
+        return request_id
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
@@ -650,7 +728,9 @@ class G1_23_JointIndex(IntEnum):
     kNotUsedJoint4 = 33
     kNotUsedJoint5 = 34
 
-class H1_2_ArmController:
+class H1_2_ArmController(_ArmPublicationMixin):
+    arm_joint_split = (7, 7)
+
     def __init__(self, motion_mode = False, simulation_mode = False):
         self.simulation_mode = simulation_mode
         self.motion_mode = motion_mode
@@ -728,6 +808,7 @@ class H1_2_ArmController:
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
         self.ctrl_lock = threading.Lock()
+        self._init_arm_publication_state()
         self.publish_thread.daemon = True
         self.publish_thread.start()
 
@@ -758,9 +839,7 @@ class H1_2_ArmController:
         while True:
             start_time = time.time()
 
-            with self.ctrl_lock:
-                arm_q_target     = self.q_target
-                arm_tauff_target = self.tauff_target
+            arm_q_target, arm_tauff_target, request_id = self._capture_arm_command()
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -773,7 +852,12 @@ class H1_2_ArmController:
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]      
 
             self.msg.crc = self.crc.Crc(self.msg)
-            self.lowcmd_publisher.Write(self.msg)
+            try:
+                self.lowcmd_publisher.Write(self.msg)
+            except Exception as error:
+                self._record_failed_arm_publication(request_id, error)
+            else:
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -788,9 +872,8 @@ class H1_2_ArmController:
 
     def ctrl_dual_arm(self, q_target, tauff_target):
         '''Set control target values q & tau of the left and right arm motors.'''
-        with self.ctrl_lock:
-            self.q_target = q_target
-            self.tauff_target = tauff_target
+        request_id = self._set_arm_command(q_target, tauff_target)
+        return request_id
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
@@ -932,7 +1015,9 @@ class H1_2_JointIndex(IntEnum):
     kNotUsedJoint6 = 33
     kNotUsedJoint7 = 34
 
-class H1_ArmController:
+class H1_ArmController(_ArmPublicationMixin):
+    arm_joint_split = (4, 4)
+
     def __init__(self, simulation_mode = False):
         self.simulation_mode = simulation_mode
         
@@ -997,6 +1082,7 @@ class H1_ArmController:
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
         self.ctrl_lock = threading.Lock()
+        self._init_arm_publication_state()
         self.publish_thread.daemon = True
         self.publish_thread.start()
 
@@ -1024,9 +1110,7 @@ class H1_ArmController:
         while True:
             start_time = time.time()
 
-            with self.ctrl_lock:
-                arm_q_target     = self.q_target
-                arm_tauff_target = self.tauff_target
+            arm_q_target, arm_tauff_target, request_id = self._capture_arm_command()
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -1039,7 +1123,12 @@ class H1_ArmController:
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]      
 
             self.msg.crc = self.crc.Crc(self.msg)
-            self.lowcmd_publisher.Write(self.msg)
+            try:
+                self.lowcmd_publisher.Write(self.msg)
+            except Exception as error:
+                self._record_failed_arm_publication(request_id, error)
+            else:
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -1054,9 +1143,8 @@ class H1_ArmController:
 
     def ctrl_dual_arm(self, q_target, tauff_target):
         '''Set control target values q & tau of the left and right arm motors.'''
-        with self.ctrl_lock:
-            self.q_target = q_target
-            self.tauff_target = tauff_target
+        request_id = self._set_arm_command(q_target, tauff_target)
+        return request_id
     
     def get_current_motor_q(self):
         '''Return current state q of all body motors.'''
@@ -1152,7 +1240,9 @@ class H1_JointIndex(IntEnum):
     kLeftShoulderYaw = 18
     kLeftElbow = 19
 
-class H2_ArmController:
+class H2_ArmController(_ArmPublicationMixin):
+    arm_joint_split = (7, 7)
+
     def __init__(self, motion_mode=False, simulation_mode=False):
         logger_mp.info("Initialize H2_ArmController...")
         self.q_target = np.zeros(14)
@@ -1230,6 +1320,7 @@ class H2_ArmController:
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
         self.ctrl_lock = threading.Lock()
+        self._init_arm_publication_state()
         self.publish_thread.daemon = True
         self.publish_thread.start()
 
@@ -1260,9 +1351,7 @@ class H2_ArmController:
         while True:
             start_time = time.time()
 
-            with self.ctrl_lock:
-                arm_q_target = self.q_target
-                arm_tauff_target = self.tauff_target
+            arm_q_target, arm_tauff_target, request_id = self._capture_arm_command()
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -1275,7 +1364,12 @@ class H2_ArmController:
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]
 
             self.msg.crc = self.crc.Crc(self.msg)
-            self.lowcmd_publisher.Write(self.msg)
+            try:
+                self.lowcmd_publisher.Write(self.msg)
+            except Exception as error:
+                self._record_failed_arm_publication(request_id, error)
+            else:
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -1288,9 +1382,8 @@ class H2_ArmController:
 
     def ctrl_dual_arm(self, q_target, tauff_target):
         """Set control target values q & tau of the left and right arm motors."""
-        with self.ctrl_lock:
-            self.q_target = q_target
-            self.tauff_target = tauff_target
+        request_id = self._set_arm_command(q_target, tauff_target)
+        return request_id
 
     def get_mode_machine(self):
         """Return current dds mode machine."""

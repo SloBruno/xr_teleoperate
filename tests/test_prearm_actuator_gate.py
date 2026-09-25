@@ -56,6 +56,17 @@ class PrearmActuatorGateTest(unittest.TestCase):
         control = source[control_start:control_end]
         self.assertNotIn("self.running = True", control)
 
+    def test_dex3_pose_telemetry_uses_explicit_per_side_sample_metadata(self):
+        source = HAND.read_text(encoding="utf-8")
+        self.assertIn("def get_pose_samples(self):", source)
+        self.assertIn("self._left_state_valid = False", source)
+        self.assertIn("self._left_action_valid = False", source)
+        self.assertIn("state_timestamp", source)
+        self.assertIn("action_timestamp", source)
+        launcher = TELEOP.read_text(encoding="utf-8")
+        self.assertIn("dex3_sample_metadata=ready_dex3_metadata", launcher)
+        self.assertIn("dex3_sample_metadata=dex3_metadata", launcher)
+
     def test_launcher_prepares_arms_before_the_prearm_loop(self):
         source = TELEOP.read_text(encoding="utf-8")
         prearm = source.index("        READY = True")
@@ -135,6 +146,11 @@ class PrearmActuatorGateTest(unittest.TestCase):
         hold = activate.index("lowstate.motor_state[id].q for id in G1_29_JointArmIndex")
         start = activate.index("self.publish_thread.start()")
         self.assertLess(hold, start)
+
+    def test_all_ctrl_dual_arm_paths_return_without_publication_wait(self):
+        source = ARM.read_text(encoding="utf-8")
+        self.assertNotIn("_await_arm_publication", source)
+        self.assertEqual(source.count("return request_id"), 5)
     def test_constructors_create_no_dds_command_publishers(self):
         arm_init = ast.get_source_segment(
             ARM.read_text(encoding="utf-8"),

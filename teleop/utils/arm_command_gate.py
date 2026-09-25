@@ -13,6 +13,7 @@ class ArmCommandDecision:
     hold: bool
     selected_q: np.ndarray
     selected_tauff: np.ndarray
+    publication: object = None
 
 
 def publish_arm_command(
@@ -31,19 +32,19 @@ def publish_arm_command(
         if is_stopped() or not is_started():
             measured_q = arm_ctrl.get_current_dual_arm_q().copy()
             selected_tauff = np.zeros_like(measured_q)
-            arm_ctrl.ctrl_dual_arm(measured_q, selected_tauff)
+            publication = arm_ctrl.ctrl_dual_arm(measured_q, selected_tauff)
             if is_stopped():
                 arm_ctrl.deactivate()
-            return ArmCommandDecision(False, True, measured_q, selected_tauff)
+            return ArmCommandDecision(False, True, measured_q, selected_tauff, publication)
         if not target_accepted or not sample_fresh:
             measured_q = arm_ctrl.get_current_dual_arm_q().copy()
             selected_tauff = np.zeros_like(measured_q)
-            arm_ctrl.ctrl_dual_arm(measured_q, selected_tauff)
-            return ArmCommandDecision(False, True, measured_q, selected_tauff)
+            publication = arm_ctrl.ctrl_dual_arm(measured_q, selected_tauff)
+            return ArmCommandDecision(False, True, measured_q, selected_tauff, publication)
         selected_q = np.asarray(q_target).copy()
         selected_tauff = np.asarray(tauff_target).copy()
-        arm_ctrl.ctrl_dual_arm(selected_q, selected_tauff)
-        return ArmCommandDecision(True, False, selected_q, selected_tauff)
+        publication = arm_ctrl.ctrl_dual_arm(selected_q, selected_tauff)
+        return ArmCommandDecision(True, False, selected_q, selected_tauff, publication)
 
 
 def publish_if_authorized(

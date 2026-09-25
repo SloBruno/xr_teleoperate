@@ -18,6 +18,7 @@ class ArmTrackingCycleResult:
     selected_q: object
     selected_tauff: object
     target: object = None
+    publication: object = None
 
 
 def run_arm_tracking_cycle(
@@ -83,6 +84,7 @@ def run_arm_tracking_cycle(
         selected_q=command.selected_q,
         selected_tauff=command.selected_tauff,
         target=target,
+        publication=command.publication,
     )
 
 

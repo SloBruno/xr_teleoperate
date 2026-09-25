@@ -10,9 +10,36 @@ import math
 import os
 from queue import Full, Queue
 import threading
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from teleop.utils.quest_safety import controller_sample_is_fresh
+
+
+class _FrozenMappingSnapshot(tuple):
+    """Immutable mapping snapshot that can be thawed by the writer thread."""
+
+
+def _freeze_payload(value: object) -> object:
+    if isinstance(value, Mapping):
+        return _FrozenMappingSnapshot(
+            (key, _freeze_payload(item)) for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_payload(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return tuple(_freeze_payload(item) for item in value)
+    return value
+
+
+def _thaw_payload(value: object) -> object:
+    if isinstance(value, _FrozenMappingSnapshot):
+        return {key: _thaw_payload(item) for key, item in value}
+    if isinstance(value, tuple):
+        return [_thaw_payload(item) for item in value]
+    return value
+
+
+_STATUS_SENTINEL = object()
 
 
 def camera_frame_is_usable(image: object) -> bool:
@@ -38,34 +65,47 @@ class AsyncStatusFileSink:
         self._warn = warn
         self._queue = Queue(maxsize=queue_size)
         self._closed = False
+        self._state_lock = threading.Lock()
+        self._close_requested = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def emit(self, payload: str) -> None:
-        """Queue telemetry without performing filesystem I/O on the control path."""
-        if self._closed:
-            return
+    def _warn_best_effort(self, message: str) -> None:
         try:
-            self._queue.put_nowait(payload)
-        except Full:
-            return
+            self._warn(message)
+        except Exception:
+            pass
+
+    def emit(self, payload: str | Mapping[str, Any]) -> bool:
+        """Queue telemetry without I/O or JSON encoding on the control path."""
+        with self._state_lock:
+            if self._closed:
+                return False
+            try:
+                self._queue.put_nowait(
+                    payload if isinstance(payload, str) else _freeze_payload(payload)
+                )
+                return True
+            except Full:
+                return False
+            except Exception as error:
+                self._warn_best_effort(f"Could not queue teleop status record: {type(error).__name__}")
+                return False
 
     def close(self) -> None:
         """Flush queued records briefly during normal program shutdown."""
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self._queue.put_nowait(None)
-        except Full:
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._close_requested.set()
             try:
-                self._queue.get_nowait()
-            except Exception:
-                pass
-            try:
-                self._queue.put_nowait(None)
+                self._queue.put_nowait(_STATUS_SENTINEL)
             except Full:
+                # The writer exits after draining the existing bounded queue.
                 pass
+            except Exception as error:
+                self._warn_best_effort(f"Could not close teleop status queue: {type(error).__name__}")
         self._thread.join(timeout=1.0)
 
     def _run(self) -> None:
@@ -75,13 +115,51 @@ class AsyncStatusFileSink:
                 os.makedirs(directory, exist_ok=True)
             with open(self._path, "a", encoding="utf-8") as status_log:
                 while True:
-                    payload = self._queue.get()
-                    if payload is None:
+                    try:
+                        payload = self._queue.get(timeout=0.05)
+                    except Exception:
+                        if self._close_requested.is_set() and self._queue.empty():
+                            return
+                        continue
+                    if payload is _STATUS_SENTINEL:
                         return
-                    status_log.write(payload + "\n")
+                    if isinstance(payload, str):
+                        serialized = payload
+                    else:
+                        serialized = json.dumps(
+                            _thaw_payload(payload), sort_keys=True, separators=(",", ":")
+                        )
+                    status_log.write(serialized + "\n")
                     status_log.flush()
+                    self._queue.task_done()
+                    if self._close_requested.is_set() and self._queue.empty():
+                        return
         except OSError as error:
-            self._warn(f"Could not initialize teleop status log: {error}")
+            self._warn_best_effort(f"Could not initialize teleop status log: {error}")
+        except (TypeError, ValueError) as error:
+            self._warn_best_effort(f"Could not serialize teleop status record: {error}")
+
+
+class _DisabledStatusSink:
+    def emit(self, payload: str | Mapping[str, Any]) -> bool:
+        return False
+
+    def close(self) -> None:
+        return None
+
+
+def create_status_sink(
+    path: str, warn: Callable[[str], None], queue_size: int = 64
+):
+    """Keep status telemetry optional when its writer cannot be created."""
+    try:
+        return AsyncStatusFileSink(path, warn, queue_size=queue_size)
+    except Exception as error:
+        try:
+            warn(f"Could not initialize teleop status sink: {error}")
+        except BaseException:
+            pass
+        return _DisabledStatusSink()
 
 
 class TeleopStatusMonitor:
@@ -95,7 +173,20 @@ class TeleopStatusMonitor:
         self._last_status_at: float | None = None
         self._last_controller_fresh: bool | None = None
 
-    def observe(
+    def _emit_best_effort(self, payload: Mapping[str, object]) -> None:
+        try:
+            self._emit(payload)
+        except Exception:
+            pass
+
+    def observe(self, **kwargs) -> dict | None:
+        """Observe one cycle without letting malformed telemetry affect control."""
+        try:
+            return self._observe(**kwargs)
+        except Exception:
+            return None
+
+    def _observe(
         self,
         *,
         now: float,
@@ -113,11 +204,11 @@ class TeleopStatusMonitor:
             self._last_controller_fresh = controller_fresh
         elif controller_fresh != self._last_controller_fresh:
             self._last_controller_fresh = controller_fresh
-            self._emit(json.dumps({
+            self._emit_best_effort({
                 "event": "controller_freshness_changed",
                 "fresh": controller_fresh,
                 "age_ms": controller_age_ms,
-            }, sort_keys=True))
+            })
 
         if self._last_status_at is not None and now - self._last_status_at < self._interval_s:
             return None
@@ -137,5 +228,5 @@ class TeleopStatusMonitor:
                 "right_age_ms": _age_ms(right_pressure_timestamp, now),
             },
         }
-        self._emit(json.dumps(status, sort_keys=True))
+        self._emit_best_effort(status)
         return status

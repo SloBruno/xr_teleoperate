@@ -101,6 +101,68 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         self.assertIn("cycle.target_accepted", source)
         self.assertIn("run_arm_tracking_cycle", source)
 
+    def test_telemetry_correlates_selected_command_with_async_exact_publication(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        telemetry = source.index("emit_pose_record_best_effort(", source.index("run_arm_tracking_cycle("))
+        self.assertIn("arm_command_request_id=arm_request_id", source[telemetry:])
+        self.assertIn("requested_arm_q=cycle.requested_q", source[telemetry:])
+        self.assertIn("selected_arm_q=cycle.selected_q", source[telemetry:])
+        self.assertIn("commanded_arm_q=None", source[telemetry:])
+        self.assertIn("arm_publication_telemetry.emit_cycle(record, arm_ctrl)", source[telemetry:])
+
+    def test_lifecycle_events_cover_requested_accepted_tracking_and_shutdown(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        for event in (
+            "preparation_ready",
+            "start_requested",
+            "start_accepted",
+            "tracking_started",
+            "stop_requested",
+            "shutdown_finalization",
+        ):
+            self.assertIn(event, source)
+
+    def test_shutdown_records_interruption_or_exception_cause_before_finalization(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('shutdown_cause = "shutdown_interrupted"', source)
+        self.assertIn('shutdown_cause = "shutdown_exception"', source)
+        self.assertLess(source.index('shutdown_cause = "shutdown_interrupted"'), source.index('"shutdown_finalization"'))
+        self.assertLess(source.index('shutdown_cause = "shutdown_exception"'), source.index('"shutdown_finalization"'))
+        exception_handler = source[source.index("except Exception:"):source.index("finally:")]
+        self.assertNotIn("raise", exception_handler)
+
+    def test_keyboard_interrupt_continues_to_finally_cleanup(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        interrupt_handler = source[source.index("except KeyboardInterrupt:"):source.index("except Exception:")]
+        self.assertNotIn("raise", interrupt_handler)
+
+    def test_lifecycle_shutdown_emits_are_guarded_individually(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        finally_block = source[source.index("finally:"):]
+        self.assertIn("emit_lifecycle_event_best_effort", source)
+        self.assertIn("hand_ctrl.deactivate()", finally_block)
+        self.assertIn("arm_ctrl.deactivate()", finally_block)
+
+    def test_control_loop_pose_publication_uses_best_effort_builder_boundary(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertGreaterEqual(source.count("emit_pose_record_best_effort("), 2)
+        self.assertNotIn("pose_telemetry_sink.emit(build_pose_record(", source)
+        self.assertNotIn("arm_publication_telemetry.emit_cycle(build_pose_record(", source)
+
+    def test_pose_telemetry_close_cannot_skip_actuator_cleanup(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        helper_start = source.index("def _close_telemetry_best_effort")
+        helper_end = source.index("\ndef on_press", helper_start)
+        self.assertIn("except BaseException", source[helper_start:helper_end])
+        self.assertLess(source.index("arm_ctrl.ctrl_dual_arm_go_home"), source.index("_close_telemetry_best_effort(pose_telemetry_sink"))
+
+    def test_cleanup_logging_cannot_interrupt_later_cleanup(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        finally_block = source[source.index("finally:"):]
+        self.assertIn("def _log_best_effort", source)
+        self.assertNotIn("logger_mp.error", finally_block)
+        self.assertNotIn("logger_mp.warning", finally_block)
+        self.assertNotIn("\n        logger_mp.info", finally_block)
 
 if __name__ == "__main__":
     unittest.main()
