@@ -51,6 +51,61 @@ def test_build_record_preserves_controller_wrist_matrices_and_joint_snapshots():
     assert record["controller"]["fresh"] is True
 
 
+def test_build_record_correlates_head_calibrated_target_ik_and_full_arm_command_snapshot():
+    from teleop.utils.full_pose_telemetry import build_pose_record
+
+    head = np.eye(4) * 2
+    left_target = np.eye(4)
+    right_target = np.eye(4) * 3
+    requested_q = np.arange(14, dtype=float)
+    selected_q = requested_q + 1
+    requested_tau = requested_q + 2
+    selected_tau = requested_q + 3
+    record = build_pose_record(
+        timestamp=20.0,
+        timestamp_monotonic=30.0,
+        lifecycle="tracking",
+        controller_sample_timestamp=29.5,
+        head_pose=head,
+        left_wrist_pose=np.eye(4),
+        right_wrist_pose=np.eye(4),
+        calibrated_cartesian_target=(left_target, right_target),
+        measured_arm_q=np.zeros(14),
+        commanded_arm_q=None,
+        arm_command_request_id=17,
+        requested_arm_q=requested_q,
+        selected_arm_q=selected_q,
+        requested_arm_tauff=requested_tau,
+        selected_arm_tauff=selected_tau,
+        ik_target_accepted=True,
+        ik_sample_fresh=True,
+        ik_published=False,
+        ik_hold=True,
+        ik_reason="lifecycle_gate_hold",
+        arm_joint_split=(7, 7),
+        now=30.0,
+    )
+
+    assert record["controller"]["head_pose"] == head.tolist()
+    assert record["arm"]["request_id"] == 17
+    assert record["arm"]["calibrated_cartesian_target"] == {
+        "left": left_target.tolist(), "right": right_target.tolist()
+    }
+    assert record["arm"]["requested_tauff"] == {
+        "left": requested_tau[:7].tolist(), "right": requested_tau[7:].tolist()
+    }
+    assert record["arm"]["selected_tauff"] == {
+        "left": selected_tau[:7].tolist(), "right": selected_tau[7:].tolist()
+    }
+    assert record["arm"]["ik"] == {
+        "target_accepted": True,
+        "sample_fresh": True,
+        "published": False,
+        "hold": True,
+        "reason": "lifecycle_gate_hold",
+    }
+
+
 def test_build_record_uses_explicit_null_and_reason_when_dex3_is_unavailable():
     from teleop.utils.full_pose_telemetry import build_pose_record
 

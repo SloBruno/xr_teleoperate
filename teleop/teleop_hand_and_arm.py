@@ -581,6 +581,7 @@ if __name__ == '__main__':
                 timestamp_monotonic=time.monotonic(),
                 lifecycle="ready",
                 controller_sample_timestamp=ready_tele_data.controller_sample_timestamp,
+                head_pose=getattr(ready_tele_data, "head_pose", None),
                 left_wrist_pose=getattr(ready_tele_data, "left_wrist_pose", None),
                 right_wrist_pose=getattr(ready_tele_data, "right_wrist_pose", None),
                 measured_arm_q=ready_arm_q,
@@ -811,6 +812,7 @@ if __name__ == '__main__':
                 timestamp_monotonic=time.monotonic(),
                 lifecycle="tracking",
                 controller_sample_timestamp=tele_data.controller_sample_timestamp,
+                head_pose=getattr(tele_data, "head_pose", None),
                 left_wrist_pose=getattr(tele_data, "left_wrist_pose", None),
                 right_wrist_pose=getattr(tele_data, "right_wrist_pose", None),
                 measured_arm_q=current_lr_arm_q,
@@ -819,6 +821,14 @@ if __name__ == '__main__':
                 arm_command_request_id=arm_request_id,
                 requested_arm_q=cycle.requested_q,
                 selected_arm_q=cycle.selected_q,
+                requested_arm_tauff=cycle.requested_tauff,
+                selected_arm_tauff=cycle.selected_tauff,
+                calibrated_cartesian_target=cycle.target,
+                ik_target_accepted=cycle.target_accepted,
+                ik_sample_fresh=cycle.sample_fresh,
+                ik_published=cycle.published,
+                ik_hold=cycle.hold,
+                ik_reason=cycle.decision_reason,
                 arm_publication_drop_count=getattr(arm_ctrl, "publication_receipt_drop_count", 0),
                 arm_joint_split=arm_ctrl.arm_joint_split,
                 dex3_configured=args.ee == "dex3",
@@ -888,8 +898,9 @@ if __name__ == '__main__':
                     current_body_action = []
 
                 # arm state and action
-                left_arm_state  = current_lr_arm_q[:7]
-                right_arm_state = current_lr_arm_q[-7:]
+                left_joint_count, right_joint_count = arm_ctrl.arm_joint_split
+                left_arm_state  = current_lr_arm_q[:left_joint_count]
+                right_arm_state = current_lr_arm_q[left_joint_count:left_joint_count + right_joint_count]
                 recorded_arm_actions = build_arm_recording_actions(cycle)
                 left_arm_action = recorded_arm_actions["left_arm"]["qpos"]
                 right_arm_action = recorded_arm_actions["right_arm"]["qpos"]

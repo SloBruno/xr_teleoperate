@@ -19,6 +19,9 @@ class ArmTrackingCycleResult:
     selected_tauff: object
     target: object = None
     publication: object = None
+    sample_fresh: bool = False
+    decision_reason: str = ""
+    arm_joint_split: tuple[int, int] = (7, 7)
 
 
 def run_arm_tracking_cycle(
@@ -75,6 +78,17 @@ def run_arm_tracking_cycle(
         is_started=is_started,
         is_stopped=is_stopped,
     )
+    if command.hold:
+        if is_stopped():
+            decision_reason = "lifecycle_stop_hold"
+        elif not is_started():
+            decision_reason = "lifecycle_not_started_hold"
+        elif target is None:
+            decision_reason = "no_accepted_target_hold"
+        else:
+            decision_reason = "invalid_or_stale_ik_hold"
+    else:
+        decision_reason = "ik_command_selected"
     return ArmTrackingCycleResult(
         target_accepted=target is not None,
         published=command.published,
@@ -85,6 +99,9 @@ def run_arm_tracking_cycle(
         selected_tauff=command.selected_tauff,
         target=target,
         publication=command.publication,
+        sample_fresh=final_sample_fresh,
+        decision_reason=decision_reason,
+        arm_joint_split=tuple(getattr(arm_ctrl, "arm_joint_split", (7, 7))),
     )
 
 
@@ -98,8 +115,12 @@ def build_arm_recording_actions(cycle: ArmTrackingCycleResult):
     Serialization contract: every qpos field returned here is a plain Python
     list, so production record builders must not call ``.tolist()`` on it.
     """
-    left_q = cycle.selected_q[:7].tolist()
-    right_q = cycle.selected_q[-7:].tolist()
+    left_count, right_count = cycle.arm_joint_split
+    selected_q = np.asarray(cycle.selected_q)
+    if selected_q.ndim != 1 or selected_q.size != left_count + right_count:
+        raise ValueError("selected_q does not match arm_joint_split")
+    left_q = selected_q[:left_count].tolist()
+    right_q = selected_q[left_count:].tolist()
     return {
         "left_arm": {"qpos": left_q, "qvel": [], "torque": []},
         "right_arm": {"qpos": right_q, "qvel": [], "torque": []},

@@ -78,6 +78,7 @@ class DataBuffer:
 class ArmPublicationReceipt:
     request_id: int
     published_q: tuple[float, ...] | None
+    published_tauff: tuple[float, ...] | None
     reason: str
     timestamp_monotonic: float
     arm_joint_split: tuple[int, int]
@@ -105,14 +106,19 @@ class _ArmPublicationMixin:
             self._command_request_id += 1
             return self._command_request_id
 
-    def _record_arm_publication(self, request_id, published_q, reason):
+    def _record_arm_publication(self, request_id, published_q, reason, published_tauff=None):
         if published_q is None:
             frozen_q = None
         else:
             frozen_q = tuple(float(value) for value in np.asarray(published_q, dtype=float).reshape(-1))
+        if published_tauff is None:
+            frozen_tauff = None
+        else:
+            frozen_tauff = tuple(float(value) for value in np.asarray(published_tauff, dtype=float).reshape(-1))
         receipt = ArmPublicationReceipt(
             request_id=int(request_id),
             published_q=frozen_q,
+            published_tauff=frozen_tauff,
             reason=str(reason),
             timestamp_monotonic=time.monotonic(),
             arm_joint_split=tuple(self.arm_joint_split),
@@ -307,7 +313,7 @@ class G1_29_ArmController(_ArmPublicationMixin):
             except Exception as error:
                 self._record_failed_arm_publication(request_id, error)
             else:
-                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published", arm_tauff_target)
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -602,7 +608,7 @@ class G1_23_ArmController(_ArmPublicationMixin):
             except Exception as error:
                 self._record_failed_arm_publication(request_id, error)
             else:
-                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published", arm_tauff_target)
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -887,7 +893,7 @@ class H1_2_ArmController(_ArmPublicationMixin):
             except Exception as error:
                 self._record_failed_arm_publication(request_id, error)
             else:
-                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published", arm_tauff_target)
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -1163,7 +1169,7 @@ class H1_ArmController(_ArmPublicationMixin):
             except Exception as error:
                 self._record_failed_arm_publication(request_id, error)
             else:
-                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published", arm_tauff_target)
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -1409,7 +1415,7 @@ class H2_ArmController(_ArmPublicationMixin):
             except Exception as error:
                 self._record_failed_arm_publication(request_id, error)
             else:
-                self._record_arm_publication(request_id, cliped_arm_q_target, "published")
+                self._record_arm_publication(request_id, cliped_arm_q_target, "published", arm_tauff_target)
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time

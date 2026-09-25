@@ -96,6 +96,20 @@ def test_arm_writer_finite_gate_rejects_nonfinite_or_mismatched_commands(
     assert Controller._arm_command_is_finite(np.zeros(2), np.zeros(2))
 
 
+def test_publication_receipt_keeps_exact_post_limiter_q_and_tauff(monkeypatch):
+    module = _load_robot_arm(monkeypatch)
+
+    class Controller(module._ArmPublicationMixin):
+        arm_joint_split = (1, 1)
+
+    controller = Controller()
+    controller._init_arm_publication_state()
+    controller._record_arm_publication(3, np.array([0.25, 0.5]), "published", np.array([1.25, 1.5]))
+    receipt = controller.drain_arm_publication_receipts()[0]
+    assert receipt.published_q == (0.25, 0.5)
+    assert receipt.published_tauff == (1.25, 1.5)
+
+
 def test_submission_does_not_drain_delayed_or_unrelated_receipts(monkeypatch):
     from teleop.utils.full_pose_telemetry import publish_arm_command_for_telemetry
 
@@ -158,6 +172,23 @@ def test_publication_bridge_emits_delayed_out_of_order_and_multiple_receipts_onc
     assert publications[2]["published_q"] is None
     assert publications[0]["profile"] == "G1_29"
     assert len(publications) == len({record["request_id"] for record in publications})
+
+
+def test_publication_event_keeps_exact_post_limiter_tauff_and_timestamp():
+    from teleop.utils.full_pose_telemetry import build_arm_publication_event
+
+    event = build_arm_publication_event({
+        "request_id": 9,
+        "published_q": (2.0, 2.5),
+        "published_tauff": (0.1, 0.2),
+        "reason": "published",
+        "timestamp_monotonic": 12.5,
+        "arm_joint_split": (1, 1),
+    }, profile="G1_29")
+    assert event["request_id"] == 9
+    assert event["published_q"] == [2.0, 2.5]
+    assert event["published_tauff"] == [0.1, 0.2]
+    assert event["timestamp_monotonic"] == 12.5
 
 
 def test_publication_bridge_deduplicates_receipts_and_reports_duplicate_event():

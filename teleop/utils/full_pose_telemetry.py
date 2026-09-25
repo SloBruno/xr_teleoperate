@@ -79,6 +79,17 @@ def _matrix_or_none(pose: object) -> list[list[float]] | None:
     return matrix.tolist()
 
 
+def _matrix_pair_or_none(poses: object) -> dict[str, list[list[float]] | None]:
+    if isinstance(poses, Mapping):
+        left, right = poses.get("left"), poses.get("right")
+    else:
+        try:
+            left, right = poses
+        except (TypeError, ValueError):
+            left = right = None
+    return {"left": _matrix_or_none(left), "right": _matrix_or_none(right)}
+
+
 def _vector_or_none(values: object, expected_size: int | None = None) -> list[float] | None:
     if values is None:
         return None
@@ -207,10 +218,19 @@ def build_pose_record(
     right_wrist_pose: object,
     measured_arm_q: object,
     commanded_arm_q: object,
+    head_pose: object = None,
+    calibrated_cartesian_target: object = None,
     commanded_arm_q_reason: str | None = None,
     arm_command_request_id: int | None = None,
     requested_arm_q: object = None,
     selected_arm_q: object = None,
+    requested_arm_tauff: object = None,
+    selected_arm_tauff: object = None,
+    ik_target_accepted: bool | None = None,
+    ik_sample_fresh: bool | None = None,
+    ik_published: bool | None = None,
+    ik_hold: bool | None = None,
+    ik_reason: str | None = None,
     arm_publication_drop_count: int = 0,
     dex3_measured_q: object = None,
     dex3_commanded_q: object = None,
@@ -273,6 +293,30 @@ def build_pose_record(
             "commanded_q": arm_commanded["right"],
         },
     }
+    if any(value is not None for value in (
+        calibrated_cartesian_target, requested_arm_tauff, selected_arm_tauff,
+        ik_target_accepted, ik_sample_fresh, ik_published, ik_hold, ik_reason,
+    )):
+        arm_record["calibrated_cartesian_target"] = _matrix_pair_or_none(
+            calibrated_cartesian_target
+        )
+        arm_record["requested_tauff"] = {
+            side: _split_arm(
+                _vector_or_none(requested_arm_tauff, expected_size=arm_expected_size), arm_joint_split
+            )[side] for side in ("left", "right")
+        }
+        arm_record["selected_tauff"] = {
+            side: _split_arm(
+                _vector_or_none(selected_arm_tauff, expected_size=arm_expected_size), arm_joint_split
+            )[side] for side in ("left", "right")
+        }
+        arm_record["ik"] = {
+            "target_accepted": None if ik_target_accepted is None else bool(ik_target_accepted),
+            "sample_fresh": None if ik_sample_fresh is None else bool(ik_sample_fresh),
+            "published": None if ik_published is None else bool(ik_published),
+            "hold": None if ik_hold is None else bool(ik_hold),
+            "reason": None if ik_reason is None else str(ik_reason),
+        }
     if any(value is not None for value in (arm_command_request_id, requested_arm_q, selected_arm_q)):
         arm_record["request_id"] = None if arm_command_request_id is None else int(arm_command_request_id)
         for side in ("left", "right"):
@@ -315,6 +359,7 @@ def build_pose_record(
                 "left": _matrix_or_none(left_wrist_pose),
                 "right": _matrix_or_none(right_wrist_pose),
             },
+            "head_pose": _matrix_or_none(head_pose),
         },
         "arm": arm_record,
         "dex3": {
@@ -400,9 +445,13 @@ def build_arm_publication_event(receipt: object, *, profile: str) -> dict:
     split = _normalize_arm_joint_split(value("arm_joint_split", (7, 7)))
     raw_published_q = value("published_q")
     published_q = _vector_or_none(raw_published_q, expected_size=sum(split))
+    raw_published_tauff = value("published_tauff")
+    published_tauff = _vector_or_none(raw_published_tauff, expected_size=sum(split))
     reason = str(value("reason", "arm_command_publication_unavailable"))
     if raw_published_q is not None and published_q is None:
         raise ValueError("arm publication receipt published_q has invalid dimensions or values")
+    if raw_published_tauff is not None and published_tauff is None:
+        raise ValueError("arm publication receipt published_tauff has invalid dimensions or values")
     timestamp_monotonic = _finite_timestamp(value("timestamp_monotonic"))
     if timestamp_monotonic is None:
         raise ValueError("arm publication receipt timestamp must be finite and positive")
@@ -411,6 +460,7 @@ def build_arm_publication_event(receipt: object, *, profile: str) -> dict:
         "event": "arm_publication",
         "request_id": int(value("request_id")),
         "published_q": published_q,
+        "published_tauff": published_tauff,
         "reason": reason,
         "timestamp_monotonic": timestamp_monotonic,
         "clock_domain": {"timestamp_monotonic": "monotonic"},
@@ -505,6 +555,13 @@ class ArmPublicationTelemetryBridge:
             if len(self._pending) >= self._pending_capacity:
                 self._pending_buffer_drop_count += 1
                 _warn_best_effort(self._warn, "Dropped arm telemetry from full pending buffer")
+                self._try_emit({
+                    "schema_version": 1,
+                    "event": "arm_publication_pending_overflow",
+                    "request_id": int(record["request_id"]),
+                    "reason": "bounded_pending_buffer_full",
+                    "profile": self._profile,
+                })
                 return
             self._pending.append(record)
             self._pending_request_ids.add(int(record["request_id"]))
@@ -669,8 +726,8 @@ class PoseTelemetryJsonlSink:
                         self._queue.task_done()
         except OSError as error:
             self._warn_best_effort(f"Could not initialize pose telemetry log: {error}")
-        except (TypeError, ValueError) as error:
-            self._warn_best_effort(f"Could not serialize pose telemetry record: {error}")
+        except Exception as error:
+            self._warn_best_effort(f"Could not write pose telemetry record: {type(error).__name__}")
 
 
 class _DisabledPoseTelemetrySink:

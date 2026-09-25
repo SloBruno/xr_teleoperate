@@ -165,3 +165,21 @@ def test_production_arm_record_payload_uses_fresh_ik_and_measured_hold_with_exac
         hold_payload["left_arm"]["qpos"],
         hold_payload["right_arm"]["qpos"],
     ))
+
+
+def test_recording_actions_use_the_controller_profile_joint_split():
+    from teleop.utils.arm_tracking_orchestration import ArmTrackingCycleResult
+
+    cycle = ArmTrackingCycleResult(
+        target_accepted=True,
+        published=True,
+        hold=False,
+        requested_q=np.arange(10, dtype=float),
+        requested_tauff=np.zeros(10),
+        selected_q=np.arange(10, dtype=float),
+        selected_tauff=np.zeros(10),
+        arm_joint_split=(5, 5),
+    )
+    actions = build_arm_recording_actions(cycle)
+    assert actions["left_arm"]["qpos"] == list(range(5))
+    assert actions["right_arm"]["qpos"] == list(range(5, 10))
