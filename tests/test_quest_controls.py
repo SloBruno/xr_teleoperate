@@ -229,6 +229,7 @@ def test_repeat_start_while_tracking_preserves_calibration(monkeypatch):
         "START": True,
         "ARM_REQUEST_TIMESTAMP": 1.0,
         "arm_calibration": calibration,
+        "LIFECYCLE_EVENTS": [],
     }
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
 
