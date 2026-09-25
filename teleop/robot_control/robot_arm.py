@@ -85,6 +85,8 @@ class ArmPublicationReceipt:
 
 
 class _ArmPublicationMixin:
+    arm_joint_split: tuple[int, int]
+
     def _init_arm_publication_state(self):
         self._command_request_id = 0
         self._publication_receipts = deque(maxlen=64)
@@ -121,7 +123,7 @@ class _ArmPublicationMixin:
             published_tauff=frozen_tauff,
             reason=str(reason),
             timestamp_monotonic=time.monotonic(),
-            arm_joint_split=tuple(self.arm_joint_split),
+            arm_joint_split=self.arm_joint_split,
         )
         with self._publication_receipt_lock:
             if len(self._publication_receipts) == self._publication_receipts.maxlen:
@@ -144,16 +146,17 @@ class _ArmPublicationMixin:
             request_id, None, f"arm_command_publication_failed:{type(error).__name__}"
         )
 
-    @staticmethod
-    def _arm_command_is_finite(q_target, tauff_target):
+    def _arm_command_is_finite(self, q_target, tauff_target):
         try:
             q = np.asarray(q_target, dtype=float)
             tau = np.asarray(tauff_target, dtype=float)
-        except (TypeError, ValueError):
+            expected_size = sum(int(count) for count in self.arm_joint_split)
+        except (AttributeError, TypeError, ValueError):
             return False
         return (
             q.ndim == 1
-            and q.size > 0
+            and expected_size > 0
+            and q.size == expected_size
             and tau.shape == q.shape
             and np.all(np.isfinite(q))
             and np.all(np.isfinite(tau))

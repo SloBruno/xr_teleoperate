@@ -82,6 +82,8 @@ def test_failed_receipt_has_null_q_and_reason(monkeypatch):
         (np.array([np.nan, 0.0]), np.zeros(2)),
         (np.zeros(2), np.array([0.0, np.inf])),
         (np.zeros(2), np.zeros(3)),
+        (np.zeros(1), np.zeros(1)),
+        (np.zeros(3), np.zeros(3)),
     ],
 )
 def test_arm_writer_finite_gate_rejects_nonfinite_or_mismatched_commands(
@@ -92,8 +94,9 @@ def test_arm_writer_finite_gate_rejects_nonfinite_or_mismatched_commands(
     class Controller(module._ArmPublicationMixin):
         arm_joint_split = (1, 1)
 
-    assert not Controller._arm_command_is_finite(q_target, tauff_target)
-    assert Controller._arm_command_is_finite(np.zeros(2), np.zeros(2))
+    controller = Controller()
+    assert not controller._arm_command_is_finite(q_target, tauff_target)
+    assert controller._arm_command_is_finite(np.zeros(2), np.zeros(2))
 
 
 def test_publication_receipt_keeps_exact_post_limiter_q_and_tauff(monkeypatch):
