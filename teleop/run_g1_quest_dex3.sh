@@ -19,10 +19,16 @@ teleimager_log="$teleimager_state_dir/teleimager.log"
 teleimager_lock="$teleimager_state_dir/teleimager.lock"
 teleimager_host=${TELEIMAGER_HOST:-127.0.0.1}
 TELEIMAGER_TIMEOUT_S=${TELEIMAGER_TIMEOUT_S:-30}
-teleimager_python=/home/unitree/miniconda3/envs/tv/bin/python
+TELEIMAGER_LOCK_TIMEOUT_S=${TELEIMAGER_LOCK_TIMEOUT_S:-10}
+teleimager_python=${TELEIMAGER_PYTHON:-/home/unitree/miniconda3/envs/tv/bin/python}
 
 teleimager_is_healthy() {
-    timeout 8 "$teleimager_python" -s - "$teleimager_host" <<'PY'
+    # The probe runs in its own session and never inherits the launcher lock
+    # (FD 9). Every process it forks (e.g. logging helpers) is killed with its
+    # process group, so an orphan can never hold the lock and freeze the next
+    # launcher.
+    local probe_pid rc=2 deadline=$((SECONDS + 9))
+    setsid "$teleimager_python" -s - "$teleimager_host" 9>&- <<'PY' &
 import os
 import socket
 import sys
@@ -54,12 +60,28 @@ while time.monotonic() < deadline:
     time.sleep(0.05)
 os._exit(2)
 PY
+    probe_pid=$!
+    while kill -0 "$probe_pid" 2>/dev/null && (( SECONDS < deadline )); do
+        sleep 0.1
+    done
+    if kill -0 "$probe_pid" 2>/dev/null; then
+        rc=124
+    else
+        wait "$probe_pid" && rc=0 || rc=$?
+    fi
+    kill -KILL -- "-$probe_pid" 2>/dev/null || true
+    wait "$probe_pid" 2>/dev/null || true
+    return "$rc"
 }
 
 ensure_teleimager() {
     mkdir -p "$teleimager_state_dir"
     exec 9>"$teleimager_lock"
-    flock 9
+    if ! flock -w "$TELEIMAGER_LOCK_TIMEOUT_S" 9; then
+        echo "could not acquire Teleimager lock within ${TELEIMAGER_LOCK_TIMEOUT_S}s: $teleimager_lock" >&2
+        echo "held by: $(fuser "$teleimager_lock" 2>/dev/null || echo unknown)" >&2
+        return 1
+    fi
 
     if teleimager_is_healthy; then
         echo "Reusing healthy Teleimager on ports 60000, 55555, 55556."
@@ -99,8 +121,14 @@ ensure_teleimager() {
     return 1
 }
 
-ensure_teleimager
+if ! ensure_teleimager; then
+    exec 9>&-
+    exit 1
+fi
 exec 9>&-
+if [[ "${G1_LAUNCHER_SKIP_TELEOP:-0}" == 1 ]]; then
+    exit 0
+fi
 cd "$repo/teleop"
 exec "$teleimager_python" -s teleop_hand_and_arm.py \
   --arm G1_29 \
