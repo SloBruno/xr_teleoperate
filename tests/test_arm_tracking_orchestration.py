@@ -254,3 +254,48 @@ def test_recording_actions_use_the_controller_profile_joint_split():
     actions = build_arm_recording_actions(cycle)
     assert actions["left_arm"]["qpos"] == list(range(5))
     assert actions["right_arm"]["qpos"] == list(range(5, 10))
+
+
+def test_real_calibrator_jump_holds_one_cycle_then_resumes_ik_without_latch():
+    from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
+
+    def controller(x):
+        matrix = np.eye(4)
+        matrix[0, 3] = x
+        return matrix
+
+    measured = []
+    for y in (0.15, -0.15):
+        wrist = np.eye(4)
+        wrist[:3, 3] = [0.25, y, 0.095]
+        measured.append(wrist)
+    calibrator = ControllerWristCalibrator(translation_scale=1.0)
+    assert calibrator.calibrate((controller(1.0), controller(-1.0)), tuple(measured), 10.1, 10.0, 10.1)
+    arm = FakeArm()
+    ik = FakeIK()
+    outcomes = []
+    for index, x in enumerate((1.01, 1.40, 1.41, 1.42)):
+        t = 10.12 + 0.02 * index
+        result = run_arm_tracking_cycle(
+            arm_ctrl=arm,
+            arm_ik=ik,
+            calibrator=calibrator,
+            controller_poses=(controller(x), controller(-1.0)),
+            sample_timestamp=t,
+            now=t,
+            current_q=arm.measured_q,
+            current_dq=np.zeros(14),
+            lifecycle_lock=threading.Lock(),
+            is_started=lambda: True,
+            is_stopped=lambda: False,
+        )
+        outcomes.append(result.decision_reason)
+    assert outcomes == [
+        "ik_command_selected",
+        "no_accepted_target_hold",
+        "ik_command_selected",
+        "ik_command_selected",
+    ]
+    # Re-anchored: the resumed target continues 1 cm from the last one.
+    left_targets = [call[0][0, 3] for call in ik.calls]
+    np.testing.assert_allclose(np.diff(left_targets), [0.01, 0.01], atol=1e-9)
