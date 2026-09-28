@@ -1,3 +1,4 @@
+import ast
 import importlib
 import sys
 import types
@@ -170,6 +171,28 @@ def _import_ik_module(monkeypatch):
 
     sys.modules.pop("teleop.robot_control.robot_arm_ik", None)
     return importlib.import_module("teleop.robot_control.robot_arm_ik")
+
+
+def test_g1_29_objective_weights_rotation_by_fifteen():
+    source_path = Path(__file__).parents[1] / "teleop" / "robot_control" / "robot_arm_ik.py"
+    tree = ast.parse(source_path.read_text())
+    g1_29 = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "G1_29_ArmIK"
+    )
+    objective = next(
+        call.args[0]
+        for call in ast.walk(g1_29)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "minimize"
+    )
+
+    assert ast.unparse(objective) == (
+        "50 * self.translational_cost + 15 * self.rotation_cost + "
+        "0.02 * self.regularization_cost + 0.1 * self.smooth_cost"
+    )
 
 
 def test_g1_29_cold_construction_recreates_data_before_first_zero_fk(monkeypatch):

@@ -181,6 +181,26 @@ def test_fk_target_residual_is_fail_closed_when_fk_is_available():
     assert np.isfinite(arm.commands[0][1]).all()
 
 
+def test_rotation_residual_over_point_three_radians_is_fail_closed():
+    target = (np.eye(4), np.eye(4))
+    angle = 0.31
+    target[0][:3, :3] = np.array([
+        [np.cos(angle), -np.sin(angle), 0.0],
+        [np.sin(angle), np.cos(angle), 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    arm = FakeArm()
+    ik = ResidualInvalidIK()
+
+    result, arm, _ = run(arm=arm, ik=ik, first_target=target)
+
+    assert not result.target_accepted
+    assert result.hold
+    assert not result.published
+    assert len(arm.commands) == 1
+    np.testing.assert_allclose(arm.commands[0][0], arm.measured_q)
+
+
 def test_record_enabled_runtime_flow_uses_each_current_cycle_command_decision():
     first, first_arm, _ = run(first_target=poses())
     fresh, fresh_arm, _ = run(candidate_targets=poses())
