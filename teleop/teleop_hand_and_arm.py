@@ -33,6 +33,7 @@ from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.quest_controls import joystick_to_locomotion
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
 from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
+from teleop.utils.human_arm_calibration import HumanArmSweep, HumanCalibratedWristCalibrator
 from teleop.utils.arm_command_gate import publish_if_authorized
 from teleop.utils.arm_tracking_orchestration import build_arm_recording_actions, run_arm_tracking_cycle
 from teleop.utils.teleop_status import (
@@ -73,6 +74,11 @@ RECORD_TOGGLE  = False  # Toggle recording state
 LIFECYCLE_LOCK = threading.Lock()
 arm_calibration = None  # G1_29-only controller-to-wrist calibration state.
 LIFECYCLE_EVENTS = []
+# Phase-2 human-arm sweep (G1_29 only).  Requested by terminal 'c' or a fresh
+# left-controller X rising edge; only honoured while prepared and not
+# tracking.  The sweep only reads controller poses and never commands arms.
+HUMAN_SWEEP_REQUESTED = False
+HUMAN_SWEEP_ACTIVE = False
 #  -------        ---------                -----------                -----------            ---------
 #   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
 #  -------        ---------      |         -----------      |         -----------      |     ---------
@@ -96,6 +102,10 @@ def _request_start_locked():
         # Key repeat or a second controller edge must not erase a calibration
         # that the active tracking loop cannot recreate.
         return True
+    if HUMAN_SWEEP_ACTIVE or HUMAN_SWEEP_REQUESTED:
+        logger_mp.warning("[human-calib] Ignoring start while the arm sweep is running; wait for its result.")
+        LIFECYCLE_EVENTS.append("start_refused_human_sweep_active")
+        return False
     ARM_REQUEST_TIMESTAMP = time.monotonic()
     if arm_calibration is not None:
         arm_calibration.reset_for_start_request(ARM_REQUEST_TIMESTAMP)
@@ -106,10 +116,28 @@ def _request_start_locked():
 
 def _request_stop_locked():
     """Make the unconditional stop request."""
-    global STOP, START
+    global STOP, START, HUMAN_SWEEP_REQUESTED
     START = False
     STOP = True
+    HUMAN_SWEEP_REQUESTED = False
     LIFECYCLE_EVENTS.append("stop_requested")
+
+
+def _request_human_sweep_locked():
+    """Request a human-arm sweep; only before r, never while tracking."""
+    global HUMAN_SWEEP_REQUESTED
+    if not isinstance(arm_calibration, HumanCalibratedWristCalibrator):
+        logger_mp.warning("[human-calib] Arm sweep calibration is only available for G1_29.")
+        return False
+    if STOP or START or not PREPARATION_COMPLETE or not READY:
+        logger_mp.warning("[human-calib] Arm sweep refused: only allowed in the prepared state before [r].")
+        LIFECYCLE_EVENTS.append("human_sweep_refused")
+        return False
+    if HUMAN_SWEEP_ACTIVE or HUMAN_SWEEP_REQUESTED:
+        return False
+    HUMAN_SWEEP_REQUESTED = True
+    LIFECYCLE_EVENTS.append("human_sweep_requested")
+    return True
 
 
 def _emit_lifecycle_events(sink):
@@ -155,6 +183,8 @@ def on_press(key):
             _request_start_locked()
         elif key == 'q':
             _request_stop_locked()
+        elif key == 'c':
+            _request_human_sweep_locked()
         elif key == 's' and START == True:
             RECORD_TOGGLE = True
         else:
@@ -202,6 +232,105 @@ def get_state() -> dict:
         "READY": READY,
         "RECORD_RUNNING": RECORD_RUNNING,
     }
+
+def poll_human_sweep_button(controller_sample, left_x_was_pressed):
+    """Fresh left-controller X (``left_ctrl_aButton``) rising edge requests a sweep."""
+    if not controller_sample_is_fresh(controller_sample.controller_sample_timestamp):
+        return left_x_was_pressed
+    left_x_pressed = bool(getattr(controller_sample, "left_ctrl_aButton", False))
+    if left_x_pressed and not left_x_was_pressed:
+        with LIFECYCLE_LOCK:
+            _request_human_sweep_locked()
+    return left_x_pressed
+
+
+def _emit_human_calibration_record(sink, event, payload_key, payload):
+    """Nonblocking telemetry handoff (bounded queue, put_nowait in the sink)."""
+    if sink is None:
+        return False
+    try:
+        record = build_lifecycle_event(event, timestamp=time.time(), timestamp_monotonic=time.monotonic())
+        record[payload_key] = payload
+        return bool(sink.emit(record))
+    except Exception as error:
+        _log_best_effort("warning", f"Failed to emit {event} telemetry: {type(error).__name__}")
+        return False
+
+
+def service_human_arm_sweep(sweep, calibrator, tele_data, now, sink):
+    """Advance the pre-arm sweep by one sample.  Reads poses only.
+
+    Returns the finished :class:`HumanArmCalibration` or None.  No arm
+    controller or IK object is reachable from here, so it cannot command.
+    """
+    global HUMAN_SWEEP_REQUESTED, HUMAN_SWEEP_ACTIVE
+    with LIFECYCLE_LOCK:
+        tracking = START or STOP
+        if HUMAN_SWEEP_REQUESTED:
+            HUMAN_SWEEP_REQUESTED = False
+            if not tracking and not calibrator.calibrated and sweep.request(
+                now, preparation_ready=PREPARATION_COMPLETE, tracking_active=tracking
+            ):
+                HUMAN_SWEEP_ACTIVE = True
+                logger_mp.info(
+                    "[human-calib] Sweep started: keep both arms STRAIGHT and raise them slowly "
+                    f"from hanging down to pointing forward over {sweep.duration_s:.0f} s."
+                )
+        if not HUMAN_SWEEP_ACTIVE:
+            return None
+    result = sweep.observe(tele_data, now, tracking_active=tracking)
+    if result is None:
+        return None
+    with LIFECYCLE_LOCK:
+        HUMAN_SWEEP_ACTIVE = False
+        can_install = not (START or STOP) and not calibrator.calibrated
+    if result.accepted and can_install:
+        calibrator.set_human_calibration(result)
+        sides = ", ".join(
+            f"{side}: L={fit.length_m:.3f} m k={fit.scale:.2f} rms={fit.rms_m * 100:.1f} cm"
+            for side, fit in result.fits.items()
+        )
+        logger_mp.info(f"[human-calib] ACCEPTED ({sides}). Assume the robot L pose, then press [r].")
+    else:
+        if can_install:
+            # A failed retry must not leave an older calibration active.
+            calibrator.set_human_calibration(None)
+        base_scale = getattr(getattr(calibrator, "base", None), "translation_scale", 0.7)
+        logger_mp.warning(
+            f"[human-calib] REJECTED ({result.reason}); keeping fixed translation scale k={base_scale}. "
+            "Press [c]/X to retry or [r] to start without human calibration."
+        )
+    _emit_human_calibration_record(sink, "human_arm_calibration", "human_arm_calibration", result.telemetry())
+    return result
+
+
+def enforce_l_pose_start_gate(calibrator, tele_data, arm_ctrl, arm_ik, sink):
+    """After r: refuse the start unless the operator is in the robot L pose.
+
+    Only reads measured joints and FK.  On refusal START is cleared under the
+    lifecycle lock (STOP is never touched, so q still wins), the robot stays
+    in its preparation hold, and the operator must press r again.
+    """
+    global START
+    if calibrator is None or getattr(calibrator, "human_calibration", None) is None:
+        return True
+    measured_wrist_poses = arm_ik.forward_kinematics(arm_ctrl.get_current_dual_arm_q())
+    decision = calibrator.check_l_pose(
+        (tele_data.left_wrist_pose, tele_data.right_wrist_pose), measured_wrist_poses
+    )
+    _emit_human_calibration_record(sink, "l_pose_start_gate", "l_pose_start_gate", decision.telemetry())
+    if decision.accepted:
+        logger_mp.info(f"[human-calib] L-pose gate passed: {decision.message()}")
+        return True
+    with LIFECYCLE_LOCK:
+        START = False
+        LIFECYCLE_EVENTS.append("start_refused_l_pose")
+    logger_mp.warning(
+        f"[human-calib] START REFUSED, robot stays still: {decision.message()}. "
+        "Hold upper arms down and forearms forward (robot L pose), then press [r] again."
+    )
+    return False
+
 
 def stack_camera_frames_vertical(top_frame, bottom_frame, scale=0.5,
                                  top_crop_bottom=0.89, bottom_crop_top=0.11,
@@ -356,7 +485,9 @@ if __name__ == '__main__':
         if args.arm == "G1_29":
             arm_ik = G1_29_ArmIK()
             arm_ctrl = G1_29_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
-            arm_calibration = ControllerWristCalibrator()
+            # Phase-2 wrapper: transparent until an accepted human-arm sweep
+            # is installed (then directional mapping + L-pose start gate).
+            arm_calibration = HumanCalibratedWristCalibrator(ControllerWristCalibrator())
         elif args.arm == "G1_23":
             arm_ik = G1_23_ArmIK()
             arm_ctrl = G1_23_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
@@ -526,10 +657,14 @@ if __name__ == '__main__':
         else:
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
+        if args.arm == "G1_29":
+            logger_mp.info("🟣  Optional: press [c] (or left-controller X) BEFORE [r] for the 3 s straight-arm sweep calibration.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True                  # now ready to (1) enter START state
         right_a_was_pressed = False
         right_b_was_pressed = False
+        left_x_was_pressed = False
+        human_arm_sweep = HumanArmSweep() if args.arm == "G1_29" else None
         first_controller_targets = None
         # Pressing r is only an arm request. Keep the robot pre-armed until a
         # current controller-pose sample exists; zero-initialized pose buffers
@@ -551,6 +686,10 @@ if __name__ == '__main__':
             ready_tele_data = tv_wrapper.get_tele_data()
             right_a_was_pressed, right_b_was_pressed = poll_controller_lifecycle(
                 ready_tele_data, right_a_was_pressed, right_b_was_pressed)
+            if human_arm_sweep is not None:
+                left_x_was_pressed = poll_human_sweep_button(ready_tele_data, left_x_was_pressed)
+                service_human_arm_sweep(
+                    human_arm_sweep, arm_calibration, ready_tele_data, time.monotonic(), pose_telemetry_sink)
             ready_pressure_timestamps = (0.0, 0.0)
             ready_dex3_measured_q = None
             ready_dex3_commanded_q = None
@@ -594,6 +733,20 @@ if __name__ == '__main__':
                 drop_count=pose_telemetry_sink.drop_count,
                 now=time.monotonic(),
             )
+            # Phase-2 L-pose gate: with an accepted human calibration, the
+            # first fresh post-r sample must map within 5 cm of measured W0 or
+            # the r is refused (START cleared; robot keeps its hold).
+            if (
+                args.arm == "G1_29"
+                and START
+                and not arm_calibration.calibrated
+                and ready_tele_data.controller_sample_timestamp > ARM_REQUEST_TIMESTAMP
+                and controller_sample_is_fresh(ready_tele_data.controller_sample_timestamp)
+                and not enforce_l_pose_start_gate(
+                    arm_calibration, ready_tele_data, arm_ctrl, arm_ik, pose_telemetry_sink)
+            ):
+                continue
+
             # Dex3 has controller/trigger authority only. Start its command
             # process after a post-r controller sample, independently of hand
             # skeleton availability needed by arm IK.
