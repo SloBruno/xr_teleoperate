@@ -70,20 +70,24 @@ def publish_arm_command(
         except (AttributeError, TypeError, ValueError):
             measured_q = np.array([], dtype=float)
         measured_is_valid = measured_q.ndim == 1 and measured_q.size > 0 and np.all(np.isfinite(measured_q))
-        if is_stopped() or not is_started():
+        if is_stopped():
+            # STOP is terminal for tracking: enqueue nothing (no IK target, no
+            # re-sampled hold). The writer keeps its last command until the
+            # graceful shutdown sequence takes ownership, returns the arms
+            # home, releases arm_sdk authority, and deactivates the writer.
+            _clear_frozen_hold(arm_ctrl)
             if not measured_is_valid:
-                if is_stopped():
-                    arm_ctrl.deactivate()
+                return ArmCommandDecision(
+                    False, True, measured_q, np.array([], dtype=float), None
+                )
+            return ArmCommandDecision(False, True, measured_q, np.zeros_like(measured_q), None)
+        if not is_started():
+            if not measured_is_valid:
                 return ArmCommandDecision(
                     False, True, measured_q, np.array([], dtype=float), None
                 )
             selected_tauff = np.zeros_like(measured_q)
             _clear_frozen_hold(arm_ctrl)
-            if is_stopped():
-                # STOP is terminal for this output path: invalidate the writer
-                # before returning so no pending/new target is enqueued.
-                arm_ctrl.deactivate()
-                return ArmCommandDecision(False, True, measured_q, selected_tauff, None)
             publication = arm_ctrl.ctrl_dual_arm(measured_q, selected_tauff)
             return ArmCommandDecision(False, True, measured_q, selected_tauff, publication)
         if not target_accepted or not sample_fresh or not measured_is_valid:

@@ -35,6 +35,7 @@ from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controll
 from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
 from teleop.utils.arm_command_gate import publish_if_authorized
 from teleop.utils.arm_tracking_orchestration import build_arm_recording_actions, run_arm_tracking_cycle
+from teleop.utils.arm_graceful_shutdown import run_graceful_arm_shutdown
 from teleop.utils.teleop_status import (
     AsyncStatusFileSink,
     TeleopStatusMonitor,
@@ -89,6 +90,9 @@ def _request_start_locked():
     """Authorize tracking after preparation, without activating any output."""
     global START, ARM_REQUEST_TIMESTAMP
     LIFECYCLE_EVENTS.append("start_requested")
+    if STOP:
+        # Stop is terminal: a late r/A during graceful shutdown is ignored.
+        return False
     if not PREPARATION_COMPLETE:
         logger_mp.warning("[lifecycle] Ignoring start until arm preparation completes.")
         return False
@@ -110,6 +114,64 @@ def _request_stop_locked():
     START = False
     STOP = True
     LIFECYCLE_EVENTS.append("stop_requested")
+
+
+def graceful_g1_29_shutdown(arm_ctrl, *, arm_ik=None, hand_ctrl=None, sink=None,
+                            attempt_return=True, clock=time.monotonic, sleep=time.sleep):
+    """Terminal q/B, Ctrl+C or exception: return home, open Dex3, release arms.
+
+    Tracking must already have stopped. Bounded (worst case ~17 s) and never
+    raises; the arm writer always ends deactivated.
+    """
+    global START, STOP
+    try:
+        with LIFECYCLE_LOCK:
+            START = False
+            STOP = True
+    except BaseException:
+        pass
+
+    def emit(event, detail):
+        _cleanup_telemetry_event_best_effort(sink, event, cause=_format_shutdown_detail(detail))
+        _log_best_effort("info", f"[shutdown] {event} {detail}")
+
+    gravity = getattr(arm_ik, "gravity_tauff", None) if arm_ik is not None else None
+    open_hands = None
+    if hand_ctrl is not None:
+        open_hand_method = getattr(hand_ctrl, "open_and_deactivate", None)
+        open_hands = open_hand_method if open_hand_method is not None else hand_ctrl.deactivate
+    try:
+        result = run_graceful_arm_shutdown(
+            arm_ctrl,
+            clock=clock,
+            sleep=sleep,
+            emit=emit,
+            open_hands=open_hands,
+            gravity_tauff=gravity,
+            attempt_return=attempt_return,
+        )
+    except BaseException as error:
+        _log_best_effort("error", f"Graceful arm shutdown failed: {type(error).__name__}")
+        result = None
+    if result is None or not result.deactivated:
+        # Last resort: never leave a writer running.
+        if hand_ctrl is not None and (result is None or not result.hands_opened):
+            try:
+                hand_ctrl.deactivate()
+            except BaseException as error:
+                _log_best_effort("error", f"Failed to deactivate Dex3 output: {error}")
+        try:
+            arm_ctrl.deactivate()
+        except BaseException as error:
+            _log_best_effort("error", f"Failed to deactivate arm output: {error}")
+    return result
+
+
+def _format_shutdown_detail(detail):
+    try:
+        return ",".join(f"{key}={detail[key]}" for key in sorted(detail)) or None
+    except BaseException:
+        return None
 
 
 def _emit_lifecycle_events(sink):
@@ -179,8 +241,8 @@ def poll_controller_lifecycle(controller_sample, right_a_was_pressed, right_b_wa
 def _publish_arm_target_if_authorized(arm_ctrl, q_target, tauff_target, target_accepted, sample_fresh):
     """Serialize final lifecycle authority and arm target publication.
 
-    IK runs before this lock. STOP wins the final check and causes a measured-q
-    zero-feedforward hold followed by deactivation, never a final IK command.
+    IK runs before this lock. STOP wins the final check: nothing is enqueued
+    (never a final IK command); graceful shutdown then owns the writer.
     """
     return publish_if_authorized(
         arm_ctrl,
@@ -275,6 +337,8 @@ if __name__ == '__main__':
     logger_mp.debug(f"args: {args}")
     outputs_activated = False
     hand_outputs_activated = False
+    shutdown_return_home = True
+    arm_ik = None
     pose_telemetry_sink = None
     status_sink = None
     img_client = None
@@ -508,8 +572,9 @@ if __name__ == '__main__':
                 outputs_activated = True
                 preparation_confirmed = arm_ctrl.ctrl_dual_arm_go_home()
                 if not preparation_confirmed:
-                    arm_ctrl.deactivate()
-                    outputs_activated = False
+                    # Do not retry the failed motion at shutdown; the finally
+                    # block only releases arm_sdk authority and deactivates.
+                    shutdown_return_home = False
                     raise RuntimeError("Arm preparation pose was not reached; refusing tracking.")
             PREPARATION_COMPLETE = True
         _safe_emit_lifecycle_event(pose_telemetry_sink, "preparation_ready")
@@ -1008,20 +1073,33 @@ if __name__ == '__main__':
         import traceback
         logger_mp.error(traceback.format_exc())
     finally:
-        # Stop every active output without adding autonomous shutdown motion.
-        if hand_outputs_activated:
-            try:
-                hand_ctrl.deactivate()
-            except Exception as e:
-                _log_best_effort("error", f"Failed to deactivate Dex3 output: {e}")
+        # G1_29 graceful shutdown (q/B, Ctrl+C, exception): tracking has
+        # already stopped; return to the all-zero preparation pose with a
+        # velocity-limited trajectory, open Dex3, ramp the arm_sdk authority
+        # weight 1 -> 0 so the Unitree controller takes the arms back, then
+        # deactivate the writer. Invalid/stale state or a dead writer skips
+        # the motion (release/deactivate only). Every phase is time-bounded.
         if args.arm == "G1_29":
             if outputs_activated:
+                graceful_g1_29_shutdown(
+                    arm_ctrl,
+                    arm_ik=arm_ik,
+                    hand_ctrl=hand_ctrl if hand_outputs_activated else None,
+                    sink=pose_telemetry_sink,
+                    attempt_return=shutdown_return_home,
+                )
+                _log_best_effort("info", "Arm output released; exiting.")
+            elif hand_outputs_activated:
                 try:
-                    arm_ctrl.deactivate()
+                    hand_ctrl.deactivate()
                 except Exception as e:
-                    _log_best_effort("error", f"Failed to deactivate arm output: {e}")
-                _log_best_effort("info", "Arm preparation output ended; exiting.")
+                    _log_best_effort("error", f"Failed to deactivate Dex3 output: {e}")
         else:
+            if hand_outputs_activated:
+                try:
+                    hand_ctrl.deactivate()
+                except Exception as e:
+                    _log_best_effort("error", f"Failed to deactivate Dex3 output: {e}")
             # Legacy arm profiles publish continuously from construction;
             # preserve the previous shutdown behavior of returning home.
             try:

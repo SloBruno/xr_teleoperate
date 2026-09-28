@@ -227,6 +227,7 @@ def test_repeat_start_while_tracking_preserves_calibration(monkeypatch):
         "logger_mp": types.SimpleNamespace(warning=lambda *_args: None),
         "PREPARATION_COMPLETE": True,
         "START": True,
+        "STOP": False,
         "ARM_REQUEST_TIMESTAMP": 1.0,
         "arm_calibration": calibration,
         "LIFECYCLE_EVENTS": [],

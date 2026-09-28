@@ -107,12 +107,12 @@ def test_calibrated_first_target_solves_then_publishes():
     assert arm_recording_actions(result)["right_arm"]["qpos"] == [9.0] * 7
 
 
-def test_stop_race_holds_measured_pose_and_deactivates_without_publishing_ik():
+def test_stop_race_enqueues_nothing_and_leaves_writer_to_graceful_shutdown():
     result, arm, ik = run(is_stopped=lambda: True)
     assert not result.published
     assert not ik.calls
     assert arm.commands == []
-    assert arm.deactivated
+    assert not arm.deactivated
     assert result.hold is True
     assert result.publication is None
     assert result.selected_q.tolist() == arm.measured_q.tolist()

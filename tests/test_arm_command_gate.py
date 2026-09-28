@@ -37,7 +37,9 @@ def test_rejected_target_publishes_measured_zero_hold_not_new_ik_q():
     assert not np.array_equal(arm.commands[0][0], ik_q)
 
 
-def test_stop_wins_final_check_and_deactivates_without_ik_q():
+def test_stop_wins_final_check_enqueues_nothing_and_leaves_writer_to_shutdown():
+    # Graceful-shutdown contract: STOP enqueues no IK/hold command; the writer
+    # stays alive so the shutdown sequence can return home and release weight.
     arm = FakeArm()
     ik_q = np.full(14, 99.0)
     assert not publish_if_authorized(
@@ -45,7 +47,7 @@ def test_stop_wins_final_check_and_deactivates_without_ik_q():
         lifecycle_lock=threading.Lock(), is_started=lambda: False, is_stopped=lambda: True,
     )
     assert arm.commands == []
-    assert arm.deactivated
+    assert not arm.deactivated
 
 
 def test_stop_with_nonfinite_measurement_never_calls_arm_controller():
@@ -60,7 +62,7 @@ def test_stop_with_nonfinite_measurement_never_calls_arm_controller():
     assert decision.hold
     assert decision.publication is None
     assert arm.commands == []
-    assert arm.deactivated
+    assert not arm.deactivated
 
 
 def test_nonstarted_nonfinite_measurement_never_calls_arm_controller():
