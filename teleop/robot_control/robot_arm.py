@@ -216,6 +216,11 @@ class G1_29_ArmController(_ArmPublicationMixin):
         self.publish_thread.daemon = True
         self.output_enabled = threading.Event()
         self.outputs_activated = False
+        # rt/arm_sdk authority weight (kNotUsedJoint0.q): 1.0 = teleop owns
+        # the arms, 0.0 = the Unitree motion controller owns them again.
+        self._motion_authority_weight = 1.0
+        self._last_publish_monotonic = None
+        self._last_published_weight = None
 
         logger_mp.info("Initialize G1_29_ArmController OK (passive pre-arm).")
 
@@ -289,12 +294,14 @@ class G1_29_ArmController(_ArmPublicationMixin):
         return cliped_arm_q_target
 
     def _ctrl_motor_state(self):
-        if self.motion_mode:
-            self.msg.motor_cmd[G1_29_JointIndex.kNotUsedJoint0].q = 1.0
         while self.output_enabled.is_set():
             start_time = time.time()
 
             arm_q_target, arm_tauff_target, request_id = self._capture_arm_command()
+            with self.ctrl_lock:
+                motion_weight = self._motion_authority_weight
+            if self.motion_mode:
+                self.msg.motor_cmd[G1_29_JointIndex.kNotUsedJoint0].q = motion_weight
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
             else:
@@ -317,6 +324,9 @@ class G1_29_ArmController(_ArmPublicationMixin):
                 self._record_failed_arm_publication(request_id, error)
             else:
                 self._record_arm_publication(request_id, cliped_arm_q_target, "published", arm_tauff_target)
+                with self.ctrl_lock:
+                    self._last_publish_monotonic = time.monotonic()
+                    self._last_published_weight = motion_weight if self.motion_mode else None
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -333,6 +343,37 @@ class G1_29_ArmController(_ArmPublicationMixin):
         '''Set control target values q & tau of the left and right arm motors.'''
         request_id = self._set_arm_command(q_target, tauff_target)
         return request_id
+
+    def set_motion_authority_weight(self, weight):
+        '''Set the rt/arm_sdk authority weight written by the arm writer (0..1).'''
+        weight = float(weight)
+        if not np.isfinite(weight):
+            raise ValueError("motion authority weight must be finite")
+        with self.ctrl_lock:
+            self._motion_authority_weight = min(1.0, max(0.0, weight))
+
+    def get_arm_command(self):
+        '''Return copies of the current (pre-limit) arm q/tau command.'''
+        q, tau, _ = self._capture_arm_command()
+        return q, tau
+
+    def get_dual_arm_q_snapshot(self):
+        '''Return (measured arm q, sample age in seconds) from one atomic read.'''
+        lowstate, timestamp = self.lowstate_buffer.GetSnapshot()
+        if lowstate is None:
+            return None, float("inf")
+        q = np.array([lowstate.motor_state[id].q for id in G1_29_JointArmIndex], dtype=float)
+        return q, time.monotonic() - timestamp
+
+    def get_publication_status(self):
+        '''Nonblocking writer liveness snapshot used by graceful shutdown.'''
+        with self.ctrl_lock:
+            return {
+                "active": self.output_enabled.is_set() and self.publish_thread.is_alive(),
+                "last_publish_monotonic": self._last_publish_monotonic,
+                "last_published_weight": self._last_published_weight,
+                "commanded_weight": self._motion_authority_weight,
+            }
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
@@ -363,8 +404,9 @@ class G1_29_ArmController(_ArmPublicationMixin):
             current_q = self.get_current_dual_arm_q()
             if np.all(np.abs(current_q) <= tolerance):
                 if self.motion_mode and release_motion_authority:
+                    # The writer publishes this weight every frame.
                     for weight in np.linspace(1, 0, num=101):
-                        self.msg.motor_cmd[G1_29_JointIndex.kNotUsedJoint0].q = weight;
+                        self.set_motion_authority_weight(weight)
                         time.sleep(0.02)
                 logger_mp.info("[G1_29_ArmController] both arms have reached the home position.")
                 return True

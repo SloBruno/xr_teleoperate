@@ -125,12 +125,17 @@ class PrearmActuatorGateTest(unittest.TestCase):
         self.assertLess(activate, prepare)
         self.assertLess(prepare, tracking)
 
-    def test_q_deactivates_without_autonomous_return_motion(self):
+    def test_q_runs_graceful_return_and_release_not_legacy_go_home(self):
+        # Revised operator contract: q/B returns home with a velocity-limited
+        # trajectory and releases arm_sdk authority (see
+        # tests/test_graceful_shutdown.py). The unbounded legacy go-home jump
+        # must not be used for G1_29 shutdown.
         source = TELEOP.read_text(encoding="utf-8")
         finally_block = source[source.index("    finally:"):]
         g1_29_start = finally_block.index('if args.arm == "G1_29":')
         g1_29_shutdown = finally_block[g1_29_start:finally_block.index("        else:", g1_29_start)]
-        self.assertIn("arm_ctrl.deactivate()", g1_29_shutdown)
+        self.assertIn("graceful_g1_29_shutdown(", g1_29_shutdown)
+        self.assertIn("attempt_return=shutdown_return_home", g1_29_shutdown)
         self.assertNotIn("arm_ctrl.ctrl_dual_arm_go_home", g1_29_shutdown)
 
     def test_prearm_exit_never_requests_arm_home_motion(self):
@@ -205,7 +210,7 @@ class PrearmActuatorGateTest(unittest.TestCase):
         # G1_29-only activate()/deactivate() methods.
         self.assertNotIn("arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)", finally_block)
         self.assertGreater(legacy_home, finally_block.index('if args.arm == "G1_29":'))
-        self.assertLess(finally_block.index("arm_ctrl.deactivate()"), legacy_home)
+        self.assertLess(finally_block.index("graceful_g1_29_shutdown("), legacy_home)
 
     def test_launcher_keeps_every_arm_profile_selectable(self):
         source = TELEOP.read_text(encoding="utf-8")
@@ -229,9 +234,10 @@ class PrearmActuatorGateTest(unittest.TestCase):
         self.assertIn("LowState is stale; refusing activation", arm)
         self.assertIn("self.output_enabled.clear()", arm)
         self.assertIn("def deactivate(self):", hand)
+        finally_block = teleop[teleop.index("    finally:"):]
         self.assertLess(
-            teleop.index("arm_ctrl.deactivate()"),
-            teleop.index("stop_listening()"),
+            finally_block.index("graceful_g1_29_shutdown("),
+            finally_block.index("stop_listening()"),
         )
 
 

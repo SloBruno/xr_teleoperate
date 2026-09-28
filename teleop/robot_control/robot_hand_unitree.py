@@ -153,6 +153,16 @@ class Dex3_1_Controller:
         self.outputs_activated = True
         logger_mp.info("[Dex3_1_Controller] Dex3 DDS output activated.")
 
+    def open_and_deactivate(self, open_hold_s=0.5, poll_s=0.01):
+        """Shutdown: command the open rest pose for a bounded time, then stop."""
+        self._force_open = True
+        thread = getattr(self, "hand_control_process", None)
+        if getattr(self, "outputs_activated", False) and thread is not None and thread.is_alive():
+            deadline = time.monotonic() + max(0.0, float(open_hold_s))
+            while time.monotonic() < deadline and thread.is_alive():
+                time.sleep(poll_s)
+        self.deactivate()
+
     def deactivate(self):
         """Stop the Dex3 command thread when terminal q is processed."""
         self.running = False
@@ -282,6 +292,12 @@ class Dex3_1_Controller:
             left_trigger = 0.0
         if not controller_sample_is_fresh(right_sample_timestamp):
             right_trigger = 0.0
+        if getattr(self, "_force_open", False):
+            # Graceful shutdown: triggers lose authority; command open pose.
+            left_q_target = Dex3_Open_Pose.copy()
+            right_q_target = Dex3_Open_Pose.copy()
+            self.ctrl_dual_hand(left_q_target, right_q_target, time.monotonic(), time.monotonic())
+            return left_q_target, right_q_target
 
         # Dex3 finger targets are controller-only: released is the explicit
         # open pose and trigger travel interpolates to the explicit close pose.

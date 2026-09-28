@@ -276,6 +276,14 @@ class G1_29_ArmIK:
         """Seed the next solve from measured joints (e.g. after re-arming)."""
         self._warm_start_q = None
 
+    def gravity_tauff(self, current_lr_arm_motor_q):
+        """Static gravity feed-forward (rnea with zero velocity/acceleration)."""
+        q = np.asarray(current_lr_arm_motor_q, dtype=float)
+        if q.shape != (14,) or not np.all(np.isfinite(q)):
+            raise ValueError("G1_29 gravity feed-forward requires 14 finite arm joints")
+        zeros = np.zeros(self.reduced_robot.model.nv)
+        return np.asarray(pin.rnea(self.reduced_robot.model, self.reduced_robot.data, q, zeros, zeros)).copy()
+
     def solve_ik(self, left_wrist, right_wrist, current_lr_arm_motor_q = None, current_lr_arm_motor_dq = None):
         """Return the RAW IK solution (no moving-average filter).
 

@@ -141,7 +141,11 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         finally_block = source[source.index("finally:"):]
         self.assertIn("emit_lifecycle_event_best_effort", source)
         self.assertIn("hand_ctrl.deactivate()", finally_block)
-        self.assertIn("arm_ctrl.deactivate()", finally_block)
+        # G1_29 arm deactivation is owned by the graceful shutdown helper,
+        # which always ends with arm_ctrl.deactivate() (see executable tests).
+        self.assertIn("graceful_g1_29_shutdown(", finally_block)
+        helper = source[source.index("def graceful_g1_29_shutdown"):source.index("def _format_shutdown_detail")]
+        self.assertIn("arm_ctrl.deactivate()", helper)
 
     def test_control_loop_pose_publication_uses_best_effort_builder_boundary(self):
         source = SCRIPT.read_text(encoding="utf-8")

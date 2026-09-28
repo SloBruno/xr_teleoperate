@@ -107,12 +107,12 @@ def test_calibrated_first_target_solves_then_publishes():
     assert arm_recording_actions(result)["right_arm"]["qpos"] == [9.0] * 7
 
 
-def test_stop_race_holds_measured_pose_and_deactivates_without_publishing_ik():
+def test_stop_race_enqueues_nothing_and_leaves_writer_to_graceful_shutdown():
     result, arm, ik = run(is_stopped=lambda: True)
     assert not result.published
     assert not ik.calls
     assert arm.commands == []
-    assert arm.deactivated
+    assert not arm.deactivated
     assert result.hold is True
     assert result.publication is None
     assert result.selected_q.tolist() == arm.measured_q.tolist()
@@ -461,7 +461,9 @@ def test_stop_interrupts_ramp_and_it_never_resumes():
     assert ramp.interrupted
     assert stopped.hold and not stopped.published
     assert stopped.decision_reason == "lifecycle_stop_hold"
-    assert arm.deactivated
+    # Graceful-shutdown contract: STOP publishes nothing and leaves writer
+    # teardown (return-to-zero + authority release) to the shutdown sequence.
+    assert not arm.commands[1:]
     # Even if lifecycle flags were to read "started" again, the ramp stays dead.
     later, arm2, _ = run_limited(limiter, poses(), 10.4, ramp=ramp)
     assert later.hold and not later.published
