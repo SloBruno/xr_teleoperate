@@ -262,7 +262,7 @@ def test_workspace_rejection_is_distinct_from_sample_jump_rejection():
     assert calibrator.calibrate(controllers, measured, 10.1, 10.0, 10.1)
     # The target stays in the absolute envelope, but the controller sample
     # itself jumps too far and must be rejected independently.
-    assert calibrator.targets((pose(1.0, 0.0, 0.0, math.radians(50.0)), pose(-1.0)), 10.2, 10.2) is None
+    assert calibrator.targets((pose(1.0, 0.0, 0.0, math.radians(100.0)), pose(-1.0)), 10.2, 10.2) is None
 
 
 def _calibrated(api, controllers=None, measured=None, scale=1.0):
@@ -353,8 +353,9 @@ def test_translation_projection_stops_at_boundary_then_follows_back():
     offset = last[0][:3, 3] - measured[0][:3, 3]
     assert np.linalg.norm(offset) <= api.MAX_TARGET_TRANSLATION_FROM_CALIBRATION_M + 1e-6
     assert calibrator.last_projected[0]
-    # Coming back inside the envelope immediately tracks the raw mapping.
-    for _ in range(50):
+    # Coming back inside the envelope immediately tracks the raw mapping
+    # (z = -0.10 m is inside the reviewed 0.42 m shoulder reach).
+    for _ in range(60):
         z += 0.01
         t = clock.tick()
         last = calibrator.targets((pose(1.0, 0.0, z), pose(-1.0)), t, t)
@@ -627,15 +628,57 @@ def test_scaled_reanchor_after_jump_is_continuous_and_keeps_k():
     calibrator, measured = _calibrated(api, scale=0.7)
     clock = _Clock()
     t = clock.tick()
-    before = calibrator.targets((pose(1.10), pose(-1.0)), t, t)
-    np.testing.assert_allclose(before[0][:3, 3], measured[0][:3, 3] + [0.07, 0.0, 0.0], atol=1e-12)
+    # Move backward (toward the torso) so every target stays inside the
+    # reviewed 0.42 m shoulder reach and no projection interferes.
+    before = calibrator.targets((pose(0.90), pose(-1.0)), t, t)
+    np.testing.assert_allclose(before[0][:3, 3], measured[0][:3, 3] + [-0.07, 0.0, 0.0], atol=1e-12)
     t = clock.tick()
-    assert calibrator.targets((pose(1.50, 0.2, 0.0), pose(-1.0)), t, t) is None
+    assert calibrator.targets((pose(0.50, 0.2, 0.0), pose(-1.0)), t, t) is None
     t = clock.tick()
-    resumed = calibrator.targets((pose(1.50, 0.2, 0.0), pose(-1.0)), t, t)
+    resumed = calibrator.targets((pose(0.50, 0.2, 0.0), pose(-1.0)), t, t)
     # No teleport: exactly the last emitted target.
     np.testing.assert_allclose(resumed[0], before[0], atol=1e-12)
     t = clock.tick()
-    after = calibrator.targets((pose(1.60, 0.2, 0.0), pose(-1.0)), t, t)
-    # Same k after re-anchoring: +0.10 controller -> +0.07 wrist.
-    np.testing.assert_allclose(after[0][:3, 3], before[0][:3, 3] + [0.07, 0.0, 0.0], atol=1e-12)
+    after = calibrator.targets((pose(0.40, 0.2, 0.0), pose(-1.0)), t, t)
+    # Same k after re-anchoring: -0.10 controller -> -0.07 wrist.
+    np.testing.assert_allclose(after[0][:3, 3], before[0][:3, 3] + [-0.07, 0.0, 0.0], atol=1e-12)
+
+
+def test_reviewed_reach_and_rotation_jump_constants():
+    """Replay of the 2026-09-28 sessions: 0.42 m matches the real G1_29 arm
+    reach (0.424 m); 90 deg cuts spurious re-anchors from 13 to 1."""
+    api = calibration_api()
+    assert api.G1_29_MAX_SHOULDER_REACH_M == pytest.approx(0.42)
+    assert api.MAX_SAMPLE_ROTATION_JUMP_RAD == pytest.approx(math.radians(90.0))
+    assert api.MAX_SAMPLE_TRANSLATION_JUMP_M == pytest.approx(0.15)
+    # The preparation (all-zero FK) pose must stay calibratable.
+    shoulder = api.G1_29_SHOULDER_ORIGINS_M["left"]
+    reach = np.linalg.norm(measured_zero_fk()[0][:3, 3] - shoulder)
+    assert reach < api.G1_29_MAX_SHOULDER_REACH_M
+
+
+def test_sixty_degree_consecutive_rotation_is_not_a_jump_but_hundred_is():
+    api = calibration_api()
+    calibrator, _ = _calibrated(api)
+    clock = _Clock()
+    t = clock.tick()
+    assert calibrator.targets((pose(1.0, 0.0, 0.0, math.radians(60.0)), pose(-1.0)), t, t) is not None
+    assert calibrator.reanchor_count == 0
+    t = clock.tick()
+    assert calibrator.targets((pose(1.0, 0.0, 0.0, math.radians(160.0)), pose(-1.0)), t, t) is None
+    assert calibrator.last_rejection_reason == "controller_sample_jump"
+
+
+def test_extended_target_is_projected_inside_042_reach():
+    api = calibration_api()
+    calibrator, measured = _calibrated(api)
+    shoulder = api.G1_29_SHOULDER_ORIGINS_M["left"]
+    clock = _Clock()
+    last = None
+    for index in range(1, 30):
+        t = clock.tick()
+        result = calibrator.targets((pose(1.0 + 0.01 * index), pose(-1.0)), t, t)
+        assert result is not None
+        last = result[0][:3, 3]
+        assert np.linalg.norm(last - shoulder) <= 0.42 + 1e-6
+    assert np.linalg.norm(last - shoulder) > 0.40

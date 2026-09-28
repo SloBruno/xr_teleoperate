@@ -35,6 +35,8 @@ from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controll
 from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
 from teleop.utils.arm_command_gate import publish_if_authorized
 from teleop.utils.arm_tracking_orchestration import build_arm_recording_actions, run_arm_tracking_cycle
+from teleop.utils.ee_rate_limiter import DualEePoseRateLimiter, G1_29_EE_RATE_LIMITER_CONFIG
+from teleop.utils.arm_enable_ramp import ArmEnableRamp, DEFAULT_ENABLE_RAMP_S
 from teleop.utils.teleop_status import (
     AsyncStatusFileSink,
     TeleopStatusMonitor,
@@ -647,6 +649,19 @@ if __name__ == '__main__':
         left_wrist_img = None
         right_wrist_img = None
 
+        # G1_29 only: one Cartesian three-band limiter and one enable ramp per
+        # tracking session.  Both start fresh here (after the post-r
+        # calibration); a repeated r/A never recreates them.  Merge point with
+        # feat/graceful-shutdown-release: the ramp blends only the joint
+        # target -- the arm_sdk authority weight and disarm return-to-pose
+        # stay owned by that branch.
+        arm_rate_limiter = None
+        arm_enable_ramp = None
+        if args.arm == "G1_29":
+            arm_ik.reset_warm_start()
+            arm_rate_limiter = DualEePoseRateLimiter(G1_29_EE_RATE_LIMITER_CONFIG)
+            arm_enable_ramp = ArmEnableRamp(duration_s=DEFAULT_ENABLE_RAMP_S)
+
         # main loop. robot start to follow VR user's motion
         while not STOP:
             start_time = time.time()
@@ -783,6 +798,8 @@ if __name__ == '__main__':
                 lifecycle_lock=LIFECYCLE_LOCK,
                 is_started=lambda: START,
                 is_stopped=lambda: STOP,
+                rate_limiter=arm_rate_limiter,
+                enable_ramp=arm_enable_ramp,
             )
             if first_target is not None:
                 first_controller_targets = None

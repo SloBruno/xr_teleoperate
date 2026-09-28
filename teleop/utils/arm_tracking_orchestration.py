@@ -1,6 +1,7 @@
 """Pure, dependency-injected arm tracking cycle orchestration."""
 
 from dataclasses import dataclass
+import time
 
 import numpy as np
 
@@ -37,6 +38,18 @@ def _rotation_distance(first, second):
 
 
 def _fk_matches_target(arm_ik, q, target):
+    """Residual gate on the RAW IK solution (0.10 m / 0.30 rad per side).
+
+    ``q`` must be the unfiltered solver output: G1_29 no longer smooths
+    inside ``solve_ik``, so the gate judges exactly what IK produced and a
+    lagging filtered vector can no longer trip it (review 2026-09-28).
+    """
+    try:
+        q_array = np.asarray(q, dtype=float)
+    except (TypeError, ValueError):
+        return False
+    if q_array.ndim != 1 or q_array.size == 0 or not np.all(np.isfinite(q_array)):
+        return False
     forward_kinematics = getattr(arm_ik, "forward_kinematics", None)
     if forward_kinematics is None:
         return True
@@ -68,6 +81,9 @@ class ArmTrackingCycleResult:
     sample_fresh: bool = False
     decision_reason: str = ""
     arm_joint_split: tuple[int, int] = (7, 7)
+    requested_target: object = None
+    limiter_bands: tuple | None = None
+    ramp_alpha: float | None = None
 
 
 def run_arm_tracking_cycle(
@@ -85,12 +101,25 @@ def run_arm_tracking_cycle(
     lifecycle_lock,
     is_started,
     is_stopped,
+    rate_limiter=None,
+    enable_ramp=None,
 ):
     """Resolve one target, solve only accepted fresh targets, then gate output.
 
-    The final lifecycle/freshness gate remains in ``publish_arm_command``;
-    this helper only makes the pre-gate flow deterministic and injectable.
+    Order per cycle (G1_29 passes ``rate_limiter`` and ``enable_ramp``):
+
+    1. requested target (first calibrated target / calibrator / candidate);
+    2. three-band Cartesian ``rate_limiter.limit`` against the last
+       PUBLISHED target (``None`` fails closed without IK);
+    3. IK, then the residual gate on the raw IK ``q``;
+    4. ``enable_ramp`` blends the arming hold pose into the IK command;
+    5. ``publish_arm_command`` (final lifecycle/freshness authority);
+    6. ``rate_limiter.commit`` only if the command was actually published.
+
+    STOP interrupts the ramp permanently.  The joint-space velocity clip in
+    ``robot_arm`` remains the last barrier downstream.
     """
+    clock = now if now is not None else time.monotonic()
     sample_fresh = controller_sample_is_fresh(sample_timestamp, now)
     target = None
     if not is_stopped() and first_target is not None and sample_fresh:
@@ -107,6 +136,42 @@ def run_arm_tracking_cycle(
 
     if target is not None and not _valid_target_pair(target):
         target = None
+    requested_target = target
+
+    if enable_ramp is not None and is_stopped():
+        enable_ramp.interrupt()
+    if enable_ramp is not None and enable_ramp.interrupted:
+        target = None
+
+    # Cartesian hold: a FRESH sample that the calibrator rejected (e.g. a
+    # re-anchoring jump) re-solves the last PUBLISHED target instead of
+    # freezing measured q.  Replay showed the measured-q hold steps the arm
+    # backwards by its tracking lag (up to 82 deg in one cycle).  Never used
+    # for stale samples, STOP, an interrupted ramp, or before a first publish;
+    # the residual gate below still applies.
+    cartesian_hold = False
+    if (
+        target is None
+        and rate_limiter is not None
+        and sample_fresh
+        and not is_stopped()
+        and calibrator is not None
+        and getattr(calibrator, "calibrated", False)
+        and not (enable_ramp is not None and enable_ramp.interrupted)
+    ):
+        held = getattr(rate_limiter, "last_committed_targets", None)
+        if held is not None and _valid_target_pair(held):
+            target = held
+            cartesian_hold = True
+
+    limiter_bands = None
+    if target is not None and rate_limiter is not None and not cartesian_hold:
+        limited = rate_limiter.limit(target, clock)
+        if limited is None or not _valid_target_pair(limited.targets):
+            target = None
+        else:
+            target = limited.targets
+            limiter_bands = tuple(limited.bands)
 
     if target is None:
         sol_q = np.asarray(current_q).copy()
@@ -118,17 +183,32 @@ def run_arm_tracking_cycle(
         if not _fk_matches_target(arm_ik, sol_q, target):
             target = None
 
+    command_q, command_tauff = sol_q, sol_tauff
+    ramp_alpha = None
+    if enable_ramp is not None and target is not None:
+        if not enable_ramp.started and is_started() and not is_stopped():
+            enable_ramp.begin(clock, current_q)
+        blended = enable_ramp.apply(sol_q, sol_tauff, clock)
+        if blended is None:
+            target = None
+        else:
+            command_q, command_tauff, ramp_alpha = blended
+
     final_sample_fresh = sample_fresh and controller_sample_is_fresh(sample_timestamp, now)
     command = publish_arm_command(
         arm_ctrl,
-        sol_q,
-        sol_tauff,
+        command_q,
+        command_tauff,
         target_accepted=target is not None,
         sample_fresh=final_sample_fresh,
         lifecycle_lock=lifecycle_lock,
         is_started=is_started,
         is_stopped=is_stopped,
     )
+    if command.published and rate_limiter is not None and limiter_bands is not None:
+        rate_limiter.commit()
+    if enable_ramp is not None and is_stopped():
+        enable_ramp.interrupt()
     if command.hold:
         if is_stopped():
             decision_reason = "lifecycle_stop_hold"
@@ -138,6 +218,8 @@ def run_arm_tracking_cycle(
             decision_reason = "no_accepted_target_hold"
         else:
             decision_reason = "invalid_or_stale_ik_hold"
+    elif cartesian_hold:
+        decision_reason = "cartesian_hold_last_target"
     else:
         decision_reason = "ik_command_selected"
     return ArmTrackingCycleResult(
@@ -153,6 +235,9 @@ def run_arm_tracking_cycle(
         sample_fresh=final_sample_fresh,
         decision_reason=decision_reason,
         arm_joint_split=tuple(getattr(arm_ctrl, "arm_joint_split", (7, 7))),
+        requested_target=requested_target,
+        limiter_bands=limiter_bands,
+        ramp_alpha=ramp_alpha,
     )
 
 

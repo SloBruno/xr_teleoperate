@@ -224,3 +224,103 @@ def test_real_pinocchio_cold_start_fk_when_dependency_is_available(monkeypatch):
     assert right_pose.shape == (4, 4)
     assert np.isfinite(left_pose).all()
     assert np.isfinite(right_pose).all()
+
+
+class _RecordingOpti:
+    def __init__(self, solutions, fail_on=()):
+        self.solutions = list(solutions)
+        self.fail_on = set(fail_on)
+        self.initials = []
+        self.values = {}
+        self.calls = 0
+        self.debug = types.SimpleNamespace(value=lambda _var: np.full(14, 0.5))
+
+    def set_initial(self, _var, value):
+        self.initials.append(np.asarray(value, dtype=float).copy())
+
+    def set_value(self, var, value):
+        self.values.setdefault(id(var), []).append(np.asarray(value, dtype=float).copy())
+
+    def solve(self):
+        index = self.calls
+        self.calls += 1
+        if index in self.fail_on:
+            raise RuntimeError("did not converge")
+        self._current = self.solutions[index]
+        return self
+
+    def value(self, _var):
+        return np.asarray(self._current, dtype=float).copy()
+
+
+def _unit_ik(monkeypatch, opti):
+    module = _import_ik_module(monkeypatch)
+    monkeypatch.setattr(module.os.path, "exists", lambda _path: False)
+    monkeypatch.setattr(module.G1_29_ArmIK, "save_cache", lambda _self: None)
+    monkeypatch.setattr(module.pin, "rnea", lambda *_args: np.full(14, 2.0), raising=False)
+    monkeypatch.setattr(module, "logger_mp", types.SimpleNamespace(
+        error=lambda *_a, **_k: None, info=lambda *_a, **_k: None), raising=False)
+    ik = module.G1_29_ArmIK(Unit_Test=True)
+    ik.opti = opti
+    return module, ik
+
+
+def test_g1_29_returns_raw_ik_solution_without_moving_average(monkeypatch):
+    raw = [np.full(14, 0.1), np.full(14, 0.9), np.full(14, -0.4)]
+    _, ik = _unit_ik(monkeypatch, _RecordingOpti(raw))
+    assert not hasattr(ik, "smooth_filter")
+    measured = np.zeros(14)
+    for expected in raw:
+        q, tau = ik.solve_ik(np.eye(4), np.eye(4), measured, np.zeros(14))
+        np.testing.assert_allclose(q, expected)
+        np.testing.assert_allclose(tau, 2.0)
+
+
+def test_g1_29_warm_starts_from_previous_solution_not_measured_state(monkeypatch):
+    raw = [np.full(14, 0.1), np.full(14, 0.2), np.full(14, 0.3)]
+    opti = _RecordingOpti(raw)
+    _, ik = _unit_ik(monkeypatch, opti)
+    measured = np.full(14, -0.7)
+    for _ in raw:
+        ik.solve_ik(np.eye(4), np.eye(4), measured, np.zeros(14))
+    # First solve seeds from measured q; later ones from the last raw solution.
+    np.testing.assert_allclose(opti.initials[0], measured)
+    np.testing.assert_allclose(opti.initials[1], raw[0])
+    np.testing.assert_allclose(opti.initials[2], raw[1])
+    np.testing.assert_allclose(ik.init_data, raw[2])
+
+
+def test_g1_29_failed_solve_returns_measured_hold_and_resets_warm_start(monkeypatch):
+    raw = [np.full(14, 0.1), None, np.full(14, 0.3)]
+    opti = _RecordingOpti(raw, fail_on={1})
+    _, ik = _unit_ik(monkeypatch, opti)
+    measured = np.full(14, -0.7)
+    ik.solve_ik(np.eye(4), np.eye(4), measured, np.zeros(14))
+    q, tau = ik.solve_ik(np.eye(4), np.eye(4), measured, np.zeros(14))
+    np.testing.assert_allclose(q, measured)
+    np.testing.assert_allclose(tau, 0.0)
+    ik.solve_ik(np.eye(4), np.eye(4), measured, np.zeros(14))
+    # After a failure the next solve re-seeds from measured q, not debug q.
+    np.testing.assert_allclose(opti.initials[2], measured)
+
+
+def test_g1_29_reset_warm_start_reseeds_from_measured(monkeypatch):
+    raw = [np.full(14, 0.1), np.full(14, 0.2)]
+    opti = _RecordingOpti(raw)
+    _, ik = _unit_ik(monkeypatch, opti)
+    measured = np.full(14, -0.7)
+    ik.solve_ik(np.eye(4), np.eye(4), measured, np.zeros(14))
+    ik.reset_warm_start()
+    ik.solve_ik(np.eye(4), np.eye(4), measured, np.zeros(14))
+    np.testing.assert_allclose(opti.initials[1], measured)
+
+
+def test_g1_29_non_finite_solution_is_not_used_as_warm_start(monkeypatch):
+    raw = [np.full(14, np.nan), np.full(14, 0.2)]
+    opti = _RecordingOpti(raw)
+    _, ik = _unit_ik(monkeypatch, opti)
+    measured = np.full(14, -0.7)
+    q, _ = ik.solve_ik(np.eye(4), np.eye(4), measured, np.zeros(14))
+    assert not np.all(np.isfinite(q))  # residual gate downstream rejects it
+    ik.solve_ik(np.eye(4), np.eye(4), measured, np.zeros(14))
+    np.testing.assert_allclose(opti.initials[1], measured)

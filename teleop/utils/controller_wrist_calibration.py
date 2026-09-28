@@ -33,7 +33,11 @@ from teleop.utils.quest_safety import controller_sample_is_fresh
 # the mapping is re-anchored so the next target continues from the last
 # emitted target instead of jumping (a clutch, never a latch).
 MAX_SAMPLE_TRANSLATION_JUMP_M = 0.15
-MAX_SAMPLE_ROTATION_JUMP_RAD = math.radians(45.0)
+# 90 deg (was 45): inert replay of the 2026-09-28 session showed 45 deg
+# re-anchored on ordinary fast wrist turns (13 re-anchors, 46 deg residual
+# orientation drift on the right side); 90 deg leaves 1 re-anchor.  The
+# downstream Cartesian rate limiter bounds the resulting target step.
+MAX_SAMPLE_ROTATION_JUMP_RAD = math.radians(90.0)
 
 # Fixed translation scale k applied only to the controller POSITION delta:
 # p_target = p_anchor_W + k * (p_C - p_anchor_C).  Orientation stays 1:1.
@@ -67,7 +71,9 @@ G1_29_SHOULDER_ORIGINS_M = {
     "right": np.array([-0.0000072, -0.10021, 0.29178]),
 }
 G1_29_MIN_SHOULDER_REACH_M = 0.18
-G1_29_MAX_SHOULDER_REACH_M = 0.50
+# 0.42 m (was 0.50): the real G1_29 shoulder-to-wrist reach is ~0.424 m;
+# 0.50 let targets leave the reachable set (IK residual 42-44 mm p50).
+G1_29_MAX_SHOULDER_REACH_M = 0.42
 
 def _is_rigid_se3(transform):
     try:

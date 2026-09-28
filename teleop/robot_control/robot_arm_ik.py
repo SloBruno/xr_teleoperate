@@ -184,7 +184,12 @@ class G1_29_ArmIK:
         self.opti.solver("ipopt", opts)
 
         self.init_data = np.zeros(self.reduced_robot.model.nq)
-        self.smooth_filter = WeightedMovingFilter(np.array([0.4, 0.3, 0.2, 0.1]), 14)
+        # No WeightedMovingFilter on G1_29: the 4-tap average added ~75 ms of
+        # lag and made the FK residual gate judge a vector IK never produced.
+        # Motion is bounded upstream by the Cartesian three-band limiter and
+        # downstream by the joint velocity clip in robot_arm.  The solver is
+        # warm-started from the previous raw solution instead.
+        self._warm_start_q = None
         self.vis = None
 
         if self.Visualization:
@@ -267,12 +272,23 @@ class G1_29_ArmIK:
             self.reduced_robot.data.oMf[self.R_hand_id].homogeneous.copy(),
         )
 
+    def reset_warm_start(self):
+        """Seed the next solve from measured joints (e.g. after re-arming)."""
+        self._warm_start_q = None
+
     def solve_ik(self, left_wrist, right_wrist, current_lr_arm_motor_q = None, current_lr_arm_motor_dq = None):
-        if current_lr_arm_motor_q is not None:
-            self.init_data = current_lr_arm_motor_q
+        """Return the RAW IK solution (no moving-average filter).
+
+        Initial guess and smoothness reference: the previous finite raw
+        solution when available, otherwise the measured joints.  A failed
+        solve returns ``(measured q, zero torque)`` and clears the warm start.
+        """
+        if self._warm_start_q is not None:
+            self.init_data = self._warm_start_q.copy()
+        elif current_lr_arm_motor_q is not None:
+            self.init_data = np.asarray(current_lr_arm_motor_q, dtype=float).copy()
         self.opti.set_initial(self.var_q, self.init_data)
 
-        # left_wrist, right_wrist = self.scale_arms(left_wrist, right_wrist)
         if self.Visualization:
             self.vis.viewer['L_ee_target'].set_transform(left_wrist)   # for visualization
             self.vis.viewer['R_ee_target'].set_transform(right_wrist)  # for visualization
@@ -282,50 +298,28 @@ class G1_29_ArmIK:
         self.opti.set_value(self.var_q_last, self.init_data) # for smooth
 
         try:
-            sol = self.opti.solve()
-            # sol = self.opti.solve_limited()
-
-            sol_q = self.opti.value(self.var_q)
-            self.smooth_filter.add_data(sol_q)
-            sol_q = self.smooth_filter.filtered_data
-
-            if current_lr_arm_motor_dq is not None:
-                v = current_lr_arm_motor_dq * 0.0
+            self.opti.solve()
+            sol_q = np.asarray(self.opti.value(self.var_q), dtype=float).copy()
+            if sol_q.shape == self.init_data.shape and np.all(np.isfinite(sol_q)):
+                self._warm_start_q = sol_q.copy()
+                self.init_data = sol_q.copy()
             else:
-                v = (sol_q - self.init_data) * 0.0
+                self._warm_start_q = None
 
-            self.init_data = sol_q
-
+            v = np.zeros(self.reduced_robot.model.nv)
             sol_tauff = pin.rnea(self.reduced_robot.model, self.reduced_robot.data, sol_q, v, np.zeros(self.reduced_robot.model.nv))
 
             if self.Visualization:
                 self.vis.display(sol_q)  # for visualization
 
             return sol_q, sol_tauff
-        
+
         except Exception as e:
             logger_mp.error(f"ERROR in convergence, plotting debug info.{e}")
-
-            sol_q = self.opti.debug.value(self.var_q)
-            self.smooth_filter.add_data(sol_q)
-            sol_q = self.smooth_filter.filtered_data
-
-            if current_lr_arm_motor_dq is not None:
-                v = current_lr_arm_motor_dq * 0.0
-            else:
-                v = (sol_q - self.init_data) * 0.0
-
-            self.init_data = sol_q
-
-            sol_tauff = pin.rnea(self.reduced_robot.model, self.reduced_robot.data, sol_q, v, np.zeros(self.reduced_robot.model.nv))
-
-            logger_mp.error(f"sol_q:{sol_q} \nmotorstate: \n{current_lr_arm_motor_q} \nleft_pose: \n{left_wrist} \nright_pose: \n{right_wrist}")
-            if self.Visualization:
-                self.vis.display(sol_q)  # for visualization
-
-            # return sol_q, sol_tauff
+            self._warm_start_q = None
+            logger_mp.error(f"motorstate: \n{current_lr_arm_motor_q} \nleft_pose: \n{left_wrist} \nright_pose: \n{right_wrist}")
             return current_lr_arm_motor_q, np.zeros(self.reduced_robot.model.nv)
-        
+
 class G1_23_ArmIK:
     def __init__(self, Unit_Test = False, Visualization = False):
         np.set_printoptions(precision=5, suppress=True, linewidth=200)

@@ -299,3 +299,244 @@ def test_real_calibrator_jump_holds_one_cycle_then_resumes_ik_without_latch():
     # Re-anchored: the resumed target continues 1 cm from the last one.
     left_targets = [call[0][0, 3] for call in ik.calls]
     np.testing.assert_allclose(np.diff(left_targets), [0.01, 0.01], atol=1e-9)
+
+
+# --- three-band limiter + enable ramp + raw-q residual gate ---------------
+
+from teleop.utils.arm_enable_ramp import ArmEnableRamp  # noqa: E402
+from teleop.utils.ee_rate_limiter import (  # noqa: E402
+    BAND_CLAMP,
+    BAND_FIRST,
+    DualEePoseRateLimiter,
+    EeRateLimiterConfig,
+)
+
+LIMIT_CFG = EeRateLimiterConfig(
+    max_linear_velocity=0.5,
+    max_angular_velocity=3.0,
+    nominal_dt=0.05,
+    min_dt=0.001,
+    max_dt=0.15,
+    reject_linear_velocity=5.0,
+    reject_angular_velocity=30.0,
+    max_consecutive_rejections=3,
+)
+
+
+def shifted_poses(dx):
+    left, right = poses()
+    left = left.copy()
+    left[0, 3] += dx
+    return left, right
+
+
+class EchoFKIK(FakeIK):
+    """IK whose FK reproduces the last target exactly (zero residual)."""
+
+    def __init__(self, q=9.0):
+        super().__init__()
+        self.q = q
+
+    def solve_ik(self, left, right, current_q, current_dq):
+        self.calls.append((left.copy(), right.copy()))
+        self.last_target = (left.copy(), right.copy())
+        return np.full(14, self.q), np.full(14, 3.0)
+
+    def forward_kinematics(self, q):
+        return self.last_target
+
+
+class NanIK(EchoFKIK):
+    def solve_ik(self, left, right, current_q, current_dq):
+        super().solve_ik(left, right, current_q, current_dq)
+        return np.full(14, np.nan), np.zeros(14)
+
+
+def run_limited(limiter, target, now, *, ik=None, arm=None, ramp=None, **kw):
+    arm = arm or FakeArm()
+    ik = ik or EchoFKIK()
+    result = run_arm_tracking_cycle(
+        arm_ctrl=arm,
+        arm_ik=ik,
+        calibrator=kw.pop("calibrator", FakeCalibrator(target)),
+        controller_poses=poses(),
+        sample_timestamp=now,
+        now=now,
+        current_q=arm.measured_q,
+        current_dq=np.zeros(14),
+        lifecycle_lock=threading.Lock(),
+        is_started=kw.pop("is_started", lambda: True),
+        is_stopped=kw.pop("is_stopped", lambda: False),
+        rate_limiter=limiter,
+        enable_ramp=ramp,
+        **kw,
+    )
+    return result, arm, ik
+
+
+def test_limiter_clamps_the_ik_target_and_commits_only_after_publication():
+    limiter = DualEePoseRateLimiter(LIMIT_CFG)
+    first, _, _ = run_limited(limiter, poses(), 10.0)
+    assert first.published and first.limiter_bands == (BAND_FIRST, BAND_FIRST)
+    # 20 cm in 50 ms: clamped to 0.5 m/s * 0.05 s = 2.5 cm.
+    result, _, ik = run_limited(limiter, shifted_poses(0.20), 10.05)
+    assert result.published
+    assert result.limiter_bands[0] == BAND_CLAMP
+    np.testing.assert_allclose(ik.calls[0][0][0, 3], 1.025, atol=1e-9)
+    np.testing.assert_allclose(result.target[0][0, 3], 1.025, atol=1e-9)
+    np.testing.assert_allclose(result.requested_target[0][0, 3], 1.20, atol=1e-9)
+
+
+def test_limiter_reference_does_not_advance_when_residual_gate_rejects():
+    limiter = DualEePoseRateLimiter(LIMIT_CFG)
+    run_limited(limiter, poses(), 10.0)
+    rejected, arm, _ = run_limited(limiter, shifted_poses(0.20), 10.05, ik=ResidualInvalidIK())
+    assert not rejected.published and rejected.hold
+    assert rejected.decision_reason == "no_accepted_target_hold"
+    result, _, ik = run_limited(limiter, shifted_poses(0.20), 10.10)
+    # Stepped from the last COMMITTED target with dt since that commit.
+    np.testing.assert_allclose(ik.calls[0][0][0, 3], 1.05, atol=1e-9)
+    assert result.published
+
+
+def test_limiter_invalid_output_fails_closed_without_ik():
+    class BrokenLimiter:
+        def limit(self, targets, now):
+            return None
+
+        def commit(self):
+            raise AssertionError("must not commit")
+
+    result, arm, ik = run_limited(BrokenLimiter(), poses(), 10.0)
+    assert not ik.calls
+    assert result.hold and not result.published
+    assert result.decision_reason == "no_accepted_target_hold"
+
+
+def test_residual_gate_is_applied_to_the_raw_ik_solution_and_nan_fails_closed():
+    limiter = DualEePoseRateLimiter(LIMIT_CFG)
+    result, arm, _ = run_limited(limiter, poses(), 10.0, ik=NanIK())
+    assert not result.target_accepted
+    assert result.hold and not result.published
+    assert np.isfinite(arm.commands[0][0]).all()
+    # Nothing committed: the next frame still latches as the first frame.
+    again, _, _ = run_limited(limiter, shifted_poses(0.3), 10.05)
+    assert again.limiter_bands == (BAND_FIRST, BAND_FIRST)
+
+
+def test_enable_ramp_blends_from_measured_hold_to_ik_and_scales_feedforward():
+    limiter = DualEePoseRateLimiter(LIMIT_CFG)
+    ramp = ArmEnableRamp(duration_s=1.0)
+    arm = FakeArm()
+    first, arm, _ = run_limited(limiter, poses(), 10.0, arm=arm, ramp=ramp)
+    np.testing.assert_allclose(first.selected_q, arm.measured_q)
+    np.testing.assert_allclose(first.selected_tauff, 0.0)
+    assert first.ramp_alpha == 0.0
+    mid, _, _ = run_limited(limiter, poses(), 10.5, arm=arm, ramp=ramp)
+    np.testing.assert_allclose(mid.selected_q, 0.5 * arm.measured_q + 0.5 * 9.0)
+    np.testing.assert_allclose(mid.selected_tauff, 1.5)
+    # IK raw request is unchanged telemetry; only the command is blended.
+    np.testing.assert_allclose(mid.requested_q, 9.0)
+    done, _, _ = run_limited(limiter, poses(), 11.2, arm=arm, ramp=ramp)
+    np.testing.assert_allclose(done.selected_q, 9.0)
+    assert done.ramp_alpha == 1.0
+
+
+def test_enable_ramp_hold_uses_arming_pose_not_later_measurements():
+    limiter = DualEePoseRateLimiter(LIMIT_CFG)
+    ramp = ArmEnableRamp(duration_s=1.0)
+    arm = FakeArm()
+    run_limited(limiter, poses(), 10.0, arm=arm, ramp=ramp)
+    arm.measured_q = arm.measured_q + 100.0  # sagging/lagging measurement
+    mid, _, _ = run_limited(limiter, poses(), 10.5, arm=arm, ramp=ramp)
+    np.testing.assert_allclose(mid.selected_q, 0.5 * np.arange(14) + 0.5 * 9.0)
+
+
+def test_stop_interrupts_ramp_and_it_never_resumes():
+    limiter = DualEePoseRateLimiter(LIMIT_CFG)
+    ramp = ArmEnableRamp(duration_s=1.0)
+    arm = FakeArm()
+    run_limited(limiter, poses(), 10.0, arm=arm, ramp=ramp)
+    stopped, arm, ik = run_limited(limiter, poses(), 10.3, arm=arm, ramp=ramp, is_stopped=lambda: True)
+    assert ramp.interrupted
+    assert stopped.hold and not stopped.published
+    assert stopped.decision_reason == "lifecycle_stop_hold"
+    assert arm.deactivated
+    # Even if lifecycle flags were to read "started" again, the ramp stays dead.
+    later, arm2, _ = run_limited(limiter, poses(), 10.4, ramp=ramp)
+    assert later.hold and not later.published
+    assert not ramp.started or ramp.interrupted
+
+
+def test_repeated_start_does_not_restart_the_ramp():
+    limiter = DualEePoseRateLimiter(LIMIT_CFG)
+    ramp = ArmEnableRamp(duration_s=1.0)
+    arm = FakeArm()
+    run_limited(limiter, poses(), 10.0, arm=arm, ramp=ramp)
+    run_limited(limiter, poses(), 10.6, arm=arm, ramp=ramp)
+    alpha = ramp.alpha
+    # A second 'start' on a later cycle must not rewind alpha.
+    again, _, _ = run_limited(limiter, poses(), 10.61, arm=arm, ramp=ramp)
+    assert again.ramp_alpha >= alpha > 0.5
+
+
+def test_ramp_not_started_before_lifecycle_start():
+    ramp = ArmEnableRamp(duration_s=1.0)
+    limiter = DualEePoseRateLimiter(LIMIT_CFG)
+    result, arm, _ = run_limited(limiter, poses(), 10.0, ramp=ramp, is_started=lambda: False)
+    assert not ramp.started
+    assert result.hold and not result.published
+
+
+def test_legacy_call_without_limiter_or_ramp_is_unchanged():
+    result, arm, ik = run(first_target=poses())
+    assert result.published
+    assert result.limiter_bands is None
+    assert result.ramp_alpha is None
+    np.testing.assert_allclose(arm.commands[0][0], 9.0)
+
+
+def test_calibrator_rejection_holds_last_published_cartesian_target_not_measured_q():
+    """A measured-q hold while the arm lags its command steps the arm BACK
+    (replay: 82 deg in one cycle).  With the limiter, a fresh-but-rejected
+    calibrator sample re-solves the last published target instead."""
+    limiter = DualEePoseRateLimiter(LIMIT_CFG)
+    run_limited(limiter, poses(), 10.0)
+    moved, _, _ = run_limited(limiter, shifted_poses(0.02), 10.05)
+    assert moved.published
+    held, arm, ik = run_limited(limiter, None, 10.10, calibrator=FakeCalibrator(None))
+    assert held.published and not held.hold
+    assert held.decision_reason == "cartesian_hold_last_target"
+    assert held.requested_target is None
+    np.testing.assert_allclose(ik.calls[0][0][0, 3], 1.02, atol=1e-12)
+    np.testing.assert_allclose(arm.commands[0][0], 9.0)
+    # The held cycle does not advance the limiter reference/time.
+    resumed, _, ik2 = run_limited(limiter, shifted_poses(0.20), 10.15)
+    np.testing.assert_allclose(ik2.calls[0][0][0, 3], 1.02 + 0.5 * 0.10, atol=1e-9)
+
+
+def test_cartesian_hold_never_applies_to_stale_samples_stop_or_before_first_publish():
+    limiter = DualEePoseRateLimiter(LIMIT_CFG)
+    # Nothing published yet: no reference, so the normal frozen hold applies.
+    before, arm, ik = run_limited(limiter, None, 10.0, calibrator=FakeCalibrator(None))
+    assert before.hold and not ik.calls
+    run_limited(limiter, poses(), 10.05)
+    arm = FakeArm()
+    stale = run_arm_tracking_cycle(
+        arm_ctrl=arm, arm_ik=EchoFKIK(), calibrator=FakeCalibrator(None),
+        controller_poses=poses(), sample_timestamp=1.0, now=10.1,
+        current_q=arm.measured_q, current_dq=np.zeros(14),
+        lifecycle_lock=threading.Lock(), is_started=lambda: True,
+        is_stopped=lambda: False, rate_limiter=limiter)
+    assert stale.hold and stale.decision_reason == "no_accepted_target_hold"
+    stopped, _, ik = run_limited(limiter, None, 10.1, calibrator=FakeCalibrator(None), is_stopped=lambda: True)
+    assert stopped.hold and not ik.calls
+    assert stopped.decision_reason == "lifecycle_stop_hold"
+
+
+def test_cartesian_hold_still_passes_through_the_residual_gate():
+    limiter = DualEePoseRateLimiter(LIMIT_CFG)
+    run_limited(limiter, poses(), 10.0)
+    held, arm, _ = run_limited(limiter, None, 10.05, calibrator=FakeCalibrator(None), ik=ResidualInvalidIK())
+    assert held.hold and not held.published
+    np.testing.assert_allclose(arm.commands[0][0], arm.measured_q)

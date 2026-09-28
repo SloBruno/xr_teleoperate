@@ -166,3 +166,24 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LimiterRampIntegrationTest(unittest.TestCase):
+    def test_g1_29_tracking_loop_passes_limiter_and_ramp_to_the_cycle(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        loop = source.index("# main loop. robot start to follow VR user's motion")
+        setup = source.index("arm_rate_limiter = DualEePoseRateLimiter(G1_29_EE_RATE_LIMITER_CONFIG)")
+        ramp = source.index("arm_enable_ramp = ArmEnableRamp(duration_s=DEFAULT_ENABLE_RAMP_S)")
+        self.assertLess(setup, loop)
+        self.assertLess(ramp, loop)
+        cycle = source.index("run_arm_tracking_cycle(", loop)
+        self.assertIn("rate_limiter=arm_rate_limiter", source[cycle:cycle + 1500])
+        self.assertIn("enable_ramp=arm_enable_ramp", source[cycle:cycle + 1500])
+        self.assertIn("arm_ik.reset_warm_start()", source[setup - 400:setup])
+
+    def test_g1_29_ik_class_has_no_weighted_moving_filter(self):
+        source = IK_SCRIPT.read_text(encoding="utf-8")
+        start = source.index("class G1_29_ArmIK")
+        end = source.index("class G1_23_ArmIK")
+        self.assertNotIn("WeightedMovingFilter(", source[start:end])
+        self.assertNotIn("smooth_filter", source[start:end])
