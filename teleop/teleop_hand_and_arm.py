@@ -30,7 +30,7 @@ from teleimager.image_client import ImageClient
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
-from teleop.utils.quest_controls import joystick_to_locomotion
+from teleop.utils.quest_controls import dispatch_joystick_locomotion, joystick_to_locomotion
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
 from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
 from teleop.utils.human_arm_calibration import HumanArmSweep, HumanCalibratedWristCalibrator
@@ -927,14 +927,13 @@ if __name__ == '__main__':
             
             # Controller samples own arm IK, locomotion, and Dex3 freshness.
             controller_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)
-            locomotion = (0.0, 0.0, 0.0)
-            if args.motion:
-                if controller_is_fresh:
-                    locomotion = joystick_to_locomotion(
-                        tele_data.left_ctrl_thumbstickValue,
-                        tele_data.right_ctrl_thumbstickValue,
-                    )
-                loco_wrapper.Move(*locomotion)
+            locomotion = dispatch_joystick_locomotion(
+                loco_wrapper if args.motion else None,
+                motion_enabled=args.motion,
+                controller_is_fresh=controller_is_fresh,
+                left_xy=tele_data.left_ctrl_thumbstickValue,
+                right_xy=tele_data.right_ctrl_thumbstickValue,
+            )
 
             tracking_pressure_timestamps = (0.0, 0.0)
             if args.ee == "dex3":

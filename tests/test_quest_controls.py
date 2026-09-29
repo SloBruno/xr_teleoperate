@@ -12,16 +12,55 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from teleop.utils.quest_controls import joystick_to_locomotion
+from teleop.utils import quest_controls
+
+
+def test_joystick_locomotion_uses_minimum_reviewed_operator_speed_caps():
+    assert quest_controls.MIN_OPERATOR_WALK_SPEED_MPS == 0.05
+    assert quest_controls.MIN_OPERATOR_TURN_RATE_RADPS == 0.10
+
+    assert joystick_to_locomotion((0.0, 1.0), (1.0, 0.0)) == (-0.05, 0.0, -0.10)
+    assert joystick_to_locomotion((-1.0, -1.0), (-1.0, 0.0)) == (0.05, 0.05, 0.10)
+
+
+def test_locomotion_dispatch_preserves_enable_and_stale_release_to_zero_gates():
+    class FakeLocoWrapper:
+        def __init__(self):
+            self.calls = []
+
+        def Move(self, *command):
+            self.calls.append(command)
+
+    disabled = FakeLocoWrapper()
+    assert quest_controls.dispatch_joystick_locomotion(
+        disabled, motion_enabled=False, controller_is_fresh=True,
+        left_xy=(1.0, 1.0), right_xy=(1.0, 0.0),
+    ) == (0.0, 0.0, 0.0)
+    assert disabled.calls == []
+
+    stale = FakeLocoWrapper()
+    assert quest_controls.dispatch_joystick_locomotion(
+        stale, motion_enabled=True, controller_is_fresh=False,
+        left_xy=(1.0, 1.0), right_xy=(1.0, 0.0),
+    ) == (0.0, 0.0, 0.0)
+    assert stale.calls == [(0.0, 0.0, 0.0)]
+
+    fresh = FakeLocoWrapper()
+    assert quest_controls.dispatch_joystick_locomotion(
+        fresh, motion_enabled=True, controller_is_fresh=True,
+        left_xy=(-1.0, -1.0), right_xy=(-1.0, 0.0),
+    ) == (0.05, 0.05, 0.10)
+    assert fresh.calls == [(0.05, 0.05, 0.10)]
 
 
 @pytest.mark.parametrize(
     ("left_xy", "right_xy", "expected"),
     [
         ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0, 0.0)),
-        ((0.0, 1.0), (0.0, 0.0), (-1.0, 0.0, 0.0)),
-        ((1.0, 0.0), (0.0, 0.0), (0.0, -1.0, 0.0)),
-        ((0.0, 0.0), (1.0, 0.0), (0.0, 0.0, -1.0)),
-        ((-1.0, 1.0), (0.0, 0.0), (-1.0, 1.0, 0.0)),
+        ((0.0, 1.0), (0.0, 0.0), (-0.05, 0.0, 0.0)),
+        ((1.0, 0.0), (0.0, 0.0), (0.0, -0.05, 0.0)),
+        ((0.0, 0.0), (1.0, 0.0), (0.0, 0.0, -0.10)),
+        ((-1.0, 1.0), (0.0, 0.0), (-0.05, 0.05, 0.0)),
         ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0, 0.0)),
     ],
 )
@@ -34,16 +73,15 @@ def test_joystick_small_movements_use_deadzone_and_precision_curve():
 
     shaped_half = ((0.50 - 0.12) / (1.0 - 0.12)) ** 3
     forward, lateral, yaw = joystick_to_locomotion((0.50, -0.50), (0.50, 0.0))
-    assert forward == pytest.approx(shaped_half)
-    assert lateral == pytest.approx(-shaped_half)
-    assert yaw == pytest.approx(-shaped_half)
+    assert forward == pytest.approx(0.05 * shaped_half)
+    assert lateral == pytest.approx(-0.05 * shaped_half)
+    assert yaw == pytest.approx(-0.10 * shaped_half)
 
-    # Precision shaping must not cap the robot's native full-stick command.
-    assert joystick_to_locomotion((1.0, -1.0), (1.0, 0.0)) == (1.0, -1.0, -1.0)
+    assert joystick_to_locomotion((1.0, -1.0), (1.0, 0.0)) == (0.05, -0.05, -0.10)
 
 
 def test_joystick_to_locomotion_clamps_finite_values():
-    assert joystick_to_locomotion((2.0, -2.0), (1.5, -1.5)) == (1.0, -1.0, -1.0)
+    assert joystick_to_locomotion((2.0, -2.0), (1.5, -1.5)) == (0.05, -0.05, -0.10)
 
 
 @pytest.mark.parametrize(
@@ -70,9 +108,9 @@ def _expected_precision(value):
 @pytest.mark.parametrize(
     ("left_xy", "right_xy", "expected"),
     [
-        ((math.nan, 0.25), (0.5, 0.0), (-_expected_precision(0.25), 0.0, -_expected_precision(0.5))),
-        ((0.25, math.inf), (0.5, 0.0), (0.0, -_expected_precision(0.25), -_expected_precision(0.5))),
-        ((0.25, -0.5), (-math.inf, 0.0), (_expected_precision(0.5), -_expected_precision(0.25), 0.0)),
+        ((math.nan, 0.25), (0.5, 0.0), (-0.05 * _expected_precision(0.25), 0.0, -0.10 * _expected_precision(0.5))),
+        ((0.25, math.inf), (0.5, 0.0), (0.0, -0.05 * _expected_precision(0.25), -0.10 * _expected_precision(0.5))),
+        ((0.25, -0.5), (-math.inf, 0.0), (0.05 * _expected_precision(0.5), -0.05 * _expected_precision(0.25), 0.0)),
     ],
 )
 def test_each_nonfinite_stick_axis_has_exact_zero_locomotion_contribution(left_xy, right_xy, expected):
@@ -245,7 +283,7 @@ def test_locomotion_is_not_gated_to_controller_mode_and_uses_freshness():
 
     assert "if args.motion:" in source
     assert "controller_sample_is_fresh" in source
-    assert "locomotion = (0.0, 0.0, 0.0)" in source
+    assert "dispatch_joystick_locomotion(" in source
 
 
 def test_hand_mode_teledata_carries_controller_sticks_and_sample_timestamp():
