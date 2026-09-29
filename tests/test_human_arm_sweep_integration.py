@@ -115,6 +115,12 @@ def test_left_x_rising_edge_requires_fresh_sample(teleop):
     assert teleop.HUMAN_SWEEP_REQUESTED
 
 
+def test_left_x_rising_edge_logs_human_sweep_started(teleop):
+    fresh = tele([0, 0, 0], [0, 0, 0], time.monotonic(), x=True)
+    teleop.poll_human_sweep_button(fresh, False)
+    assert any("STARTED" in message and "3 s" in message for _level, message in teleop.messages)
+
+
 def test_sweep_installs_calibration_emits_telemetry_and_never_touches_arm(teleop):
     sink = Sink()
     teleop.on_press("c")

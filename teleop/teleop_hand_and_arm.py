@@ -140,6 +140,7 @@ def _request_human_sweep_locked():
         return False
     HUMAN_SWEEP_REQUESTED = True
     LIFECYCLE_EVENTS.append("human_sweep_requested")
+    _log_best_effort("info", "[human-calib] STARTED: collecting 3 s arm sweep; move both straight arms slowly from down to forward.")
     return True
 
 
