@@ -375,7 +375,7 @@ def test_wrapper_first_target_is_w0_and_offset_blends_into_directional_mapping(b
     assert np.allclose(later[0][:3, 3] - W0["left"], offset, atol=1e-9)
 
 
-def test_wrapper_orientation_blend_is_zero_outside_extension_zone():
+def test_wrapper_orientation_stays_relative_one_to_one():
     operator = Operator()
     calibration = calibrated(operator)
     wrapper = hac.HumanCalibratedWristCalibrator(LegacyBase())
@@ -386,48 +386,10 @@ def test_wrapper_orientation_blend_is_zero_outside_extension_zone():
     request = time.monotonic()
     t0 = request + 0.001
     assert wrapper.calibrate(controllers, wrists, t0, request, now=t0)
-    assert np.linalg.norm(W0["left"] - hac.G1_29_SHOULDER_ORIGINS_M["left"]) < hac.EXTENSION_ORIENTATION_BLEND_START_M
     turn = np.array([[1, 0, 0], [0, math.cos(0.2), -math.sin(0.2)], [0, math.sin(0.2), math.cos(0.2)]])
     rotated = [pose(c[:3, 3], turn) for c in controllers]
     target = wrapper.targets(rotated, t0 + 0.01, now=t0 + 0.02)
     assert np.allclose(target[0][:3, :3], turn @ wrist_rotation)
-
-
-def test_wrapper_uses_calibration_wrist_orientation_at_maximum_shoulder_reach():
-    """The 0.42 m boundary must not send a known-incompatible wrist target.
-
-    The real inert right-arm replay rejects the controller's 1:1 orientation
-    here (2.638 rad FK residual).  A calibration-wrist orientation solves the
-    same projected position within the unchanged residual gate.
-    """
-    operator = Operator()
-    calibration = calibrated(operator)
-    wrapper = hac.HumanCalibratedWristCalibrator(LegacyBase())
-    wrapper.set_human_calibration(calibration)
-    controllers = [pose(operator.l_pose_controller(calibration, side)) for side in hac.SIDES]
-    wrist_rotation = hac.yaw_rotation(0.3)
-    wrists = (pose(W0["left"], wrist_rotation), pose(W0["right"], wrist_rotation))
-    request = time.monotonic()
-    t0 = request + 0.001
-    assert wrapper.calibrate(controllers, wrists, t0, request, now=t0)
-
-    side = "right"
-    index = hac.SIDES.index(side)
-    shoulder = hac.G1_29_SHOULDER_ORIGINS_M[side]
-    direction = (W0[side] - shoulder) / np.linalg.norm(W0[side] - shoulder)
-    final_position = shoulder + 0.42 * direction
-    fit = calibration.fits[side]
-    final_controller_position = fit.shoulder + calibration.rotation.T @ (final_position - shoulder) / fit.scale
-    target = None
-    for fraction in np.linspace(0.2, 1.0, 5):
-        step = [item.copy() for item in controllers]
-        step[index][:3, 3] = controllers[index][:3, 3] + fraction * (final_controller_position - controllers[index][:3, 3])
-        step[index][:3, :3] = hac.yaw_rotation(2.64 * fraction) @ controllers[index][:3, :3]
-        target = wrapper.targets(step, t0 + 0.02 * (fraction / 0.2), now=t0 + 0.02 * (fraction / 0.2) + 0.001)
-
-    assert target is not None
-    np.testing.assert_allclose(target[index][:3, 3], final_position, atol=1e-4)
-    np.testing.assert_allclose(target[index][:3, :3], wrist_rotation, atol=1e-6)
 
 
 def test_wrapper_refuses_calibration_outside_l_pose_and_base_stays_uncalibrated():

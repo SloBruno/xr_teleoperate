@@ -36,11 +36,8 @@ Everything here is pure numpy: no DDS, no publisher, no IK, no I/O.
 
 5. **Directional mapping.**  ``p_target = S_robot + k * R_align (p_C - S_h)``:
    a straight human arm (``|p_C - S_h| = L_h``) maps to a straight robot arm
-   (``0.424 m``) in the same body-relative direction.  Orientation stays
-   relative 1:1 until the final 4 cm of shoulder reach; there it is smoothly
-   blended toward the measured calibration wrist orientation.  This keeps the
-   unchanged downstream residual gate fail-closed while avoiding a known
-   incompatible controller orientation at the 0.42 m workspace boundary.
+   (``0.424 m``) in the same body-relative direction.  Orientation is not
+   touched here (it stays relative 1:1 in the base calibrator).
 
 6. **L-pose gate on ``r``.**  With an accepted calibration, ``r`` only
    authorizes tracking if the directionally-mapped controller position of
@@ -78,12 +75,6 @@ G1_29_SHOULDER_ORIGINS_M = {
     "right": np.array([-0.0000072, -0.10021, 0.29178]),
 }
 G1_29_STRAIGHT_ARM_REACH_M = 0.424
-# The workspace projects at 0.42 m.  Begin the feasibility transition only in
-# its final 4 cm; below this radius orientation is exactly the controller's
-# current 1:1 target.  The downstream EE rate limiter bounds every emitted
-# angular step after this pure target policy.
-EXTENSION_ORIENTATION_BLEND_START_M = 0.38
-EXTENSION_ORIENTATION_BLEND_END_M = 0.42
 
 DEFAULT_TRANSLATION_SCALE = 0.7
 MIN_TRANSLATION_SCALE = 0.3
@@ -509,49 +500,6 @@ class HumanArmSweep:
 # Directional target provider wrapping the base calibrator
 # --------------------------------------------------------------------------
 
-def _orthonormalize_rotation(rotation):
-    u, _, vt = np.linalg.svd(rotation)
-    result = u @ vt
-    if np.linalg.det(result) < 0.0:
-        u[:, -1] *= -1.0
-        result = u @ vt
-    return result
-
-
-def _rotation_log(rotation):
-    """Return the axis/angle for a finite rotation, including angles near pi."""
-    skew_axis = np.array([
-        rotation[2, 1] - rotation[1, 2],
-        rotation[0, 2] - rotation[2, 0],
-        rotation[1, 0] - rotation[0, 1],
-    ])
-    sine_twice = float(np.linalg.norm(skew_axis))
-    angle = math.atan2(sine_twice, float(np.trace(rotation) - 1.0))
-    if angle < 1e-9 or not math.isfinite(angle):
-        return np.array([1.0, 0.0, 0.0]), 0.0
-    if math.pi - angle < 1e-3:
-        eigenvalues, eigenvectors = np.linalg.eigh((rotation + rotation.T) / 2.0)
-        axis = eigenvectors[:, int(np.argmax(eigenvalues))]
-        if float(axis @ skew_axis) < 0.0:
-            axis = -axis
-        return axis / np.linalg.norm(axis), angle
-    return skew_axis / sine_twice, angle
-
-
-def _rotation_exp(axis, angle):
-    x, y, z = axis
-    skew = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
-    return np.eye(3) + math.sin(angle) * skew + (1.0 - math.cos(angle)) * (skew @ skew)
-
-
-def _blend_orientation(current, anchor, blend):
-    """Geodesically move ``current`` toward ``anchor`` by ``blend`` in SO(3)."""
-    if blend <= 0.0:
-        return current
-    axis, angle = _rotation_log(current.T @ anchor)
-    return _orthonormalize_rotation(current @ _rotation_exp(axis, angle * blend))
-
-
 class HumanCalibratedWristCalibrator:
     """Duck-typed wrapper adding the human-calibrated directional mapping.
 
@@ -625,16 +573,10 @@ class HumanCalibratedWristCalibrator:
         controllers = _rigid_pair(controller_poses)
         wrists = _rigid_pair(measured_wrist_poses)
         base_scale = self._configure_base_scale()
-        active = {
-            "base_scale": base_scale,
-            "calibration_timestamp": float(sample_timestamp),
-            "offsets": [],
-            "orientation_anchors": [],
-        }
+        active = {"base_scale": base_scale, "calibration_timestamp": float(sample_timestamp), "offsets": []}
         for index, side in enumerate(SIDES):
             mapped = map_controller_position(self._human, side, controllers[index][:3, 3])
             active["offsets"].append(mapped - wrists[index][:3, 3])
-            active["orientation_anchors"].append(wrists[index][:3, :3].copy())
         self._active = active
         virtual = self._virtual_poses(controllers, sample_timestamp)
         calibrated = self._base.calibrate(virtual, measured_wrist_poses, sample_timestamp, request_timestamp, now=now)
@@ -649,8 +591,7 @@ class HumanCalibratedWristCalibrator:
         if controllers is None:
             # Let the base record its own invalid-pose rejection.
             return self._base.targets(controller_poses, sample_timestamp, now=now)
-        targets = self._base.targets(self._virtual_poses(controllers, sample_timestamp), sample_timestamp, now=now)
-        return self._apply_extension_orientation_policy(targets)
+        return self._base.targets(self._virtual_poses(controllers, sample_timestamp), sample_timestamp, now=now)
 
     def mapped_positions(self, controller_poses, sample_timestamp):
         """Directional robot-frame wrist positions (after offset blend)."""
@@ -711,31 +652,3 @@ class HumanCalibratedWristCalibrator:
             pose[:3, 3] = (mapped + (1.0 - blend) * self._active["offsets"][index]) / base_scale
             virtual.append(pose)
         return tuple(virtual)
-
-    def _apply_extension_orientation_policy(self, targets):
-        """Blend only the extension boundary toward a measured feasible wrist.
-
-        ``targets`` has already passed the base calibrator's SE(3), freshness,
-        discontinuity, and workspace gates.  It is deliberately not repaired:
-        any invalid result remains ``None`` and the normal fail-closed path
-        applies.  The outer EE limiter subsequently limits angular steps.
-        """
-        if targets is None or self._active is None:
-            return targets
-        targets = _rigid_pair(targets)
-        if targets is None:
-            return None
-        adjusted = []
-        span = EXTENSION_ORIENTATION_BLEND_END_M - EXTENSION_ORIENTATION_BLEND_START_M
-        for index, (side, target) in enumerate(zip(SIDES, targets)):
-            reach = float(np.linalg.norm(target[:3, 3] - G1_29_SHOULDER_ORIGINS_M[side]))
-            blend = float(np.clip((reach - EXTENSION_ORIENTATION_BLEND_START_M) / span, 0.0, 1.0))
-            # Smoothstep has zero slope at both boundaries: no orientation kink
-            # when entering/exiting the feasibility zone.
-            blend = blend * blend * (3.0 - 2.0 * blend)
-            pose = target.copy()
-            pose[:3, :3] = _blend_orientation(
-                pose[:3, :3], self._active["orientation_anchors"][index], blend
-            )
-            adjusted.append(pose)
-        return tuple(adjusted) if _rigid_pair(adjusted) is not None else None
