@@ -61,16 +61,16 @@ class HeadOnlyModeLauncherTest(unittest.TestCase):
 
     def test_mode_is_explicit_env_with_default_both_cameras(self):
         self.assertIn('TELEIMAGER_CAMERA_MODE=${TELEIMAGER_CAMERA_MODE:-both}', self.source)
-        self.assertIn('both|head', self.source)
+        self.assertIn('both|head|any|single', self.source)
         self.assertIn("unsupported TELEIMAGER_CAMERA_MODE", self.source)
 
     def test_visible_banner_for_head_only(self):
         self.assertIn("TELEIMAGER: modo SOMENTE CABEÇA (pulso esquerdo desativado)", self.source)
 
     def test_head_probe_does_not_require_wrist_port_or_frame(self):
-        self.assertIn('ports = (60000, 55555) if mode == "head" else (60000, 55555, 55556)', self.source)
-        self.assertIn('frames = (head,) if mode == "head" else (head, left_wrist)', self.source)
-        self.assertIn('if mode == "head"', self.source)
+        self.assertIn('ports = (60000, 55555) if head_only else (60000, 55555, 55556)', self.source)
+        self.assertIn('frames = (head,) if head_only else (head, left_wrist)', self.source)
+        self.assertIn('head_only = mode == "head" or mode == "any"', self.source)
 
     def test_default_probe_still_requires_three_ports_and_both_frames(self):
         self.assertIn("55556", self.source)
@@ -91,6 +91,29 @@ class HeadOnlyModeLauncherTest(unittest.TestCase):
     def test_refuses_duplicate_when_running_server_has_other_mode(self):
         self.assertIn("running in mode", self.source)
         self.assertIn("refusing a duplicate start", self.source)
+
+
+class AnyModeLauncherTest(unittest.TestCase):
+    def setUp(self):
+        self.source = LAUNCHER.read_text(encoding="utf-8")
+
+    def test_any_and_single_accepted_single_normalized(self):
+        self.assertIn("both|head|any|single", self.source)
+        self.assertIn('TELEIMAGER_CAMERA_MODE=any', self.source)
+
+    def test_any_detects_camera_and_shows_banner_and_wrist_warning(self):
+        self.assertIn("--detect", self.source)
+        self.assertIn("TELEIMAGER: modo CÂMERA ÚNICA", self.source)
+        self.assertIn("AVISO", self.source)
+        self.assertIn("TELEIMAGER_CAMERA_SOURCE", self.source)
+
+    def test_any_uses_head_probe_and_head_layout(self):
+        self.assertIn('mode == "head" or mode == "any"', self.source)
+        self.assertIn("teleop_camera_layout=head", self.source)
+
+    def test_any_starts_through_wrapper_and_fails_without_camera(self):
+        self.assertIn('== any', self.source)
+        self.assertIn("teleimager_head_only_server", self.source)
 
 
 if __name__ == "__main__":

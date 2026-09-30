@@ -23,14 +23,20 @@ TELEIMAGER_LOCK_TIMEOUT_S=${TELEIMAGER_LOCK_TIMEOUT_S:-10}
 teleimager_python=${TELEIMAGER_PYTHON:-/home/unitree/miniconda3/envs/tv/bin/python}
 # Explicit camera mode. Default "both" = head + left wrist (vertical layout).
 # "head" = head camera only; the wrist camera is deliberately disabled.
+# "any" (alias "single") = whichever single camera (head or left wrist) is
+#   connected now, published as the main (head) image:
+#   TELEIMAGER_CAMERA_MODE=any bash teleop/run_g1_quest_dex3.sh
 TELEIMAGER_CAMERA_MODE=${TELEIMAGER_CAMERA_MODE:-both}
 teleimager_mode_file="$teleimager_state_dir/teleimager.mode"
 # Derived head-only server config lives in state, never inside the submodule.
 export TELEIMAGER_HEAD_ONLY_CONFIG="$teleimager_state_dir/cam_config_server.head_only.yaml"
+[[ "$TELEIMAGER_CAMERA_MODE" == single ]] && TELEIMAGER_CAMERA_MODE=any
+export TELEIMAGER_CAMERA_MODE
+export TELEIMAGER_CAMERA_SOURCE=head
 case "$TELEIMAGER_CAMERA_MODE" in
-    both|head) ;;
+    both|head|any|single) ;;
     *)
-        echo "unsupported TELEIMAGER_CAMERA_MODE='$TELEIMAGER_CAMERA_MODE' (use both|head)" >&2
+        echo "unsupported TELEIMAGER_CAMERA_MODE='$TELEIMAGER_CAMERA_MODE' (use both|head|any|single)" >&2
         exit 2
         ;;
 esac
@@ -38,6 +44,25 @@ if [[ "$TELEIMAGER_CAMERA_MODE" == head ]]; then
     teleop_camera_layout=head
     echo "================================================================"
     echo "TELEIMAGER: modo SOMENTE CABEÇA (pulso esquerdo desativado)"
+    echo "================================================================"
+elif [[ "$TELEIMAGER_CAMERA_MODE" == any ]]; then
+    teleop_camera_layout=head
+    # Detect which camera is connected right now (pyrealsense2, read-only).
+    if ! detected=$(cd "$repo" && "$teleimager_python" -s -m teleop.utils.teleimager_head_only_server --detect); then
+        echo "TELEIMAGER: nenhuma câmera conectada (cabeça 243122072230 / pulso 233622070789); não iniciando." >&2
+        exit 3
+    fi
+    read -r any_source any_serial any_count <<<"$detected"
+    export TELEIMAGER_CAMERA_SOURCE="$any_source"
+    if [[ "$any_source" == left_wrist ]]; then any_label="pulso esquerdo"; else any_label="cabeça"; fi
+    echo "================================================================"
+    echo "TELEIMAGER: modo CÂMERA ÚNICA ($any_label serial $any_serial publicada como imagem principal)"
+    if [[ "$any_count" == both ]]; then
+        echo "AVISO: cabeça e pulso conectados; modo any usa apenas a cabeça."
+    fi
+    if [[ "$any_source" == left_wrist ]]; then
+        echo "AVISO: a imagem principal vem da câmera do PULSO esquerdo — o ponto de vista é o da mão, não o da cabeça, e isso pode confundir a teleoperação."
+    fi
     echo "================================================================"
 else
     teleop_camera_layout=vertical
@@ -59,7 +84,8 @@ from teleimager.image_client import ImageClient
 
 host = sys.argv[1]
 mode = sys.argv[2]
-ports = (60000, 55555) if mode == "head" else (60000, 55555, 55556)
+head_only = mode == "head" or mode == "any"
+ports = (60000, 55555) if head_only else (60000, 55555, 55556)
 for port in ports:
     with socket.create_connection((host, port), timeout=1):
         pass
@@ -70,8 +96,8 @@ deadline = time.monotonic() + 6.0
 while time.monotonic() < deadline:
     head = client.get_head_frame()
     # Head-only mode never touches the (disabled) wrist camera.
-    left_wrist = None if mode == "head" else client.get_left_wrist_frame()
-    frames = (head,) if mode == "head" else (head, left_wrist)
+    left_wrist = None if head_only else client.get_left_wrist_frame()
+    frames = (head,) if head_only else (head, left_wrist)
     if all(
         (bgr := getattr(frame, "bgr", None)) is not None
         and getattr(bgr, "shape", None) == (720, 1280, 3)
@@ -130,7 +156,7 @@ ensure_teleimager() {
 
     echo "Starting Teleimager from $teleimager_dir (mode $TELEIMAGER_CAMERA_MODE)."
     local server_module=teleimager.image_server
-    if [[ "$TELEIMAGER_CAMERA_MODE" == head ]]; then
+    if [[ "$TELEIMAGER_CAMERA_MODE" == head || "$TELEIMAGER_CAMERA_MODE" == any ]]; then
         server_module=teleop.utils.teleimager_head_only_server
     fi
     echo "$TELEIMAGER_CAMERA_MODE" >"$teleimager_mode_file"

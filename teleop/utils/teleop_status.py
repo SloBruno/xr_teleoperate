@@ -223,6 +223,8 @@ class TeleopStatusMonitor:
                 "enabled": bool(motion_enabled),
                 "command": [float(value) for value in locomotion],
             },
+            # Which physical camera is published under "head" (head|left_wrist).
+            "camera_source": os.environ.get("TELEIMAGER_CAMERA_SOURCE", "head"),
             "cameras": {name: bool(available) for name, available in (cameras or {}).items()},
             "dex3_pressure": {
                 "left_age_ms": _age_ms(left_pressure_timestamp, now),

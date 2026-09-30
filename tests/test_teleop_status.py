@@ -193,3 +193,10 @@ def test_head_layout_camera_status_omits_unused_left_wrist():
     head = SimpleNamespace(bgr=object())
     assert camera_status_for_layout("head", head, None) == {"head": True}
     assert camera_status_for_layout("vertical", head, None) == {"head": True, "left_wrist": False}
+
+
+def test_status_reports_camera_source(monkeypatch):
+    from teleop.utils.teleop_status import TeleopStatusMonitor
+    import inspect
+    src = inspect.getsource(TeleopStatusMonitor)
+    assert "camera_source" in src and "TELEIMAGER_CAMERA_SOURCE" in src
