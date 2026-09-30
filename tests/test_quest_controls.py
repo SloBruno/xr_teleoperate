@@ -16,11 +16,16 @@ from teleop.utils import quest_controls
 
 
 def test_joystick_locomotion_uses_minimum_reviewed_operator_speed_caps():
-    assert quest_controls.MIN_OPERATOR_WALK_SPEED_MPS == 0.05
+    assert quest_controls.MIN_OPERATOR_WALK_SPEED_MPS == 0.10
     assert quest_controls.MIN_OPERATOR_TURN_RATE_RADPS == 0.10
 
-    assert joystick_to_locomotion((0.0, 1.0), (1.0, 0.0)) == (-0.05, 0.0, -0.10)
-    assert joystick_to_locomotion((-1.0, -1.0), (-1.0, 0.0)) == (0.05, 0.05, 0.10)
+    assert joystick_to_locomotion((0.0, 1.0), (1.0, 0.0)) == (-0.10, 0.0, -0.10)
+    assert joystick_to_locomotion((-1.0, -1.0), (-1.0, 0.0)) == (0.10, 0.10, 0.10)
+
+
+def test_full_forward_stick_uses_minimum_physical_walk_cap():
+    # The prior 0.05 m/s cap was below the observed G1 walking threshold.
+    assert joystick_to_locomotion((0.0, -1.0), (0.0, 0.0)) == (0.10, 0.0, 0.0)
 
 
 def test_locomotion_dispatch_preserves_enable_and_stale_release_to_zero_gates():
@@ -49,18 +54,18 @@ def test_locomotion_dispatch_preserves_enable_and_stale_release_to_zero_gates():
     assert quest_controls.dispatch_joystick_locomotion(
         fresh, motion_enabled=True, controller_is_fresh=True,
         left_xy=(-1.0, -1.0), right_xy=(-1.0, 0.0),
-    ) == (0.05, 0.05, 0.10)
-    assert fresh.calls == [(0.05, 0.05, 0.10)]
+    ) == (0.10, 0.10, 0.10)
+    assert fresh.calls == [(0.10, 0.10, 0.10)]
 
 
 @pytest.mark.parametrize(
     ("left_xy", "right_xy", "expected"),
     [
         ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0, 0.0)),
-        ((0.0, 1.0), (0.0, 0.0), (-0.05, 0.0, 0.0)),
-        ((1.0, 0.0), (0.0, 0.0), (0.0, -0.05, 0.0)),
+        ((0.0, 1.0), (0.0, 0.0), (-0.10, 0.0, 0.0)),
+        ((1.0, 0.0), (0.0, 0.0), (0.0, -0.10, 0.0)),
         ((0.0, 0.0), (1.0, 0.0), (0.0, 0.0, -0.10)),
-        ((-1.0, 1.0), (0.0, 0.0), (-0.05, 0.05, 0.0)),
+        ((-1.0, 1.0), (0.0, 0.0), (-0.10, 0.10, 0.0)),
         ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0, 0.0)),
     ],
 )
@@ -73,15 +78,15 @@ def test_joystick_small_movements_use_deadzone_and_precision_curve():
 
     shaped_half = ((0.50 - 0.12) / (1.0 - 0.12)) ** 3
     forward, lateral, yaw = joystick_to_locomotion((0.50, -0.50), (0.50, 0.0))
-    assert forward == pytest.approx(0.05 * shaped_half)
-    assert lateral == pytest.approx(-0.05 * shaped_half)
+    assert forward == pytest.approx(0.10 * shaped_half)
+    assert lateral == pytest.approx(-0.10 * shaped_half)
     assert yaw == pytest.approx(-0.10 * shaped_half)
 
-    assert joystick_to_locomotion((1.0, -1.0), (1.0, 0.0)) == (0.05, -0.05, -0.10)
+    assert joystick_to_locomotion((1.0, -1.0), (1.0, 0.0)) == (0.10, -0.10, -0.10)
 
 
 def test_joystick_to_locomotion_clamps_finite_values():
-    assert joystick_to_locomotion((2.0, -2.0), (1.5, -1.5)) == (0.05, -0.05, -0.10)
+    assert joystick_to_locomotion((2.0, -2.0), (1.5, -1.5)) == (0.10, -0.10, -0.10)
 
 
 @pytest.mark.parametrize(
@@ -108,9 +113,9 @@ def _expected_precision(value):
 @pytest.mark.parametrize(
     ("left_xy", "right_xy", "expected"),
     [
-        ((math.nan, 0.25), (0.5, 0.0), (-0.05 * _expected_precision(0.25), 0.0, -0.10 * _expected_precision(0.5))),
-        ((0.25, math.inf), (0.5, 0.0), (0.0, -0.05 * _expected_precision(0.25), -0.10 * _expected_precision(0.5))),
-        ((0.25, -0.5), (-math.inf, 0.0), (0.05 * _expected_precision(0.5), -0.05 * _expected_precision(0.25), 0.0)),
+        ((math.nan, 0.25), (0.5, 0.0), (-0.10 * _expected_precision(0.25), 0.0, -0.10 * _expected_precision(0.5))),
+        ((0.25, math.inf), (0.5, 0.0), (0.0, -0.10 * _expected_precision(0.25), -0.10 * _expected_precision(0.5))),
+        ((0.25, -0.5), (-math.inf, 0.0), (0.10 * _expected_precision(0.5), -0.10 * _expected_precision(0.25), 0.0)),
     ],
 )
 def test_each_nonfinite_stick_axis_has_exact_zero_locomotion_contribution(left_xy, right_xy, expected):
