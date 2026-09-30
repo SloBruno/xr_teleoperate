@@ -39,8 +39,8 @@ def test_fresh_hand_mode_sticks_remain_available_for_move_mapping():
 
     left = fresh_controller_value((0.8, -0.4), sample_timestamp=1.0, now=1.1)
     right = fresh_controller_value((0.0, 0.0), sample_timestamp=1.0, now=1.1)
-    expected_forward = 0.10 * ((0.4 - 0.12) / (1.0 - 0.12)) ** 3
-    expected_lateral = -0.10 * ((0.8 - 0.12) / (1.0 - 0.12)) ** 3
+    expected_forward = 0.15 * ((0.4 - 0.12) / (1.0 - 0.12)) ** 3
+    expected_lateral = -0.15 * ((0.8 - 0.12) / (1.0 - 0.12)) ** 3
     assert joystick_to_locomotion(left, right) == pytest.approx(
         (expected_forward, expected_lateral, 0.0)
     )

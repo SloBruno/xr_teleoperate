@@ -7,7 +7,7 @@ STICK_PRECISION_EXPONENT = 3
 # serializes floats and declares no positive minimum, so these are the
 # smallest reviewed non-zero operator caps; validate them on hardware before
 # reducing them further.
-MIN_OPERATOR_WALK_SPEED_MPS = 0.10
+MIN_OPERATOR_WALK_SPEED_MPS = 0.15
 MIN_OPERATOR_TURN_RATE_RADPS = 0.10
 
 
