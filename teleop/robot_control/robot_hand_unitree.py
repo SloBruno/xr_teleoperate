@@ -24,6 +24,9 @@ from teleop.utils.haptics import extract_dex3_pressure
 from teleop.utils.dex3_telemetry import (
     RateEstimator, extract_hand_snapshot, extract_published_command,
 )
+from teleop.utils.dex3_protection import (
+    Dex3HandProtector, ProtectionWarner, extract_protection_state,
+)
 
 import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
@@ -35,6 +38,9 @@ kTopicDex3RightCommand = "rt/dex3/right/cmd"
 kTopicDex3LeftState = "rt/dex3/left/state"
 kTopicDex3RightState = "rt/dex3/right/state"
 
+# PD gains (unchanged); protection never raises them.
+Dex3_Kp = 1.5
+Dex3_Kd = 0.2
 Dex3_Open_Pose = np.zeros(Dex3_Num_Motors)
 # Keep the validated conservative midpoint targets for index/middle. Thumb0
 # stays neutral; Thumb1/Thumb2 use the Unitree full-grasp targets so the thumb
@@ -112,6 +118,12 @@ class Dex3_1_Controller:
         self._right_action_timestamp = 0.0
         self._left_action = np.zeros(Dex3_Num_Motors)
         self._right_action = np.zeros(Dex3_Num_Motors)
+        # Torque/thermal protection (pure state machines, no I/O); gains untouched.
+        self._protectors = {
+            "left": Dex3HandProtector(Dex3_Open_Pose),
+            "right": Dex3HandProtector(Dex3_Open_Pose),
+        }
+        self._protection_warner = ProtectionWarner()
         self._left_state_sampled = threading.Event()
         self._right_state_sampled = threading.Event()
 
@@ -187,6 +199,7 @@ class Dex3_1_Controller:
                     self._left_state_valid = True
                     self._left_state_timestamp = time.monotonic()
                 self._record_extended_state("left", left_hand_msg, Dex3_1_Left_JointIndex, time.monotonic())
+                self._record_protection_state("left", left_hand_msg, Dex3_1_Left_JointIndex, time.monotonic())
                 self._left_state_sampled.set()
                 with self.left_pressure.get_lock():
                     self.left_pressure.value = extract_dex3_pressure(left_hand_msg)
@@ -201,6 +214,7 @@ class Dex3_1_Controller:
                     self._right_state_valid = True
                     self._right_state_timestamp = time.monotonic()
                 self._record_extended_state("right", right_hand_msg, Dex3_1_Right_JointIndex, time.monotonic())
+                self._record_protection_state("right", right_hand_msg, Dex3_1_Right_JointIndex, time.monotonic())
                 self._right_state_sampled.set()
                 with self.right_pressure.get_lock():
                     self.right_pressure.value = extract_dex3_pressure(right_hand_msg)
@@ -243,6 +257,45 @@ class Dex3_1_Controller:
         except Exception:
             self._note_extended_failure()
 
+    def _record_protection_state(self, side, hand_msg, joint_ids, timestamp):
+        """Keep the latest protection inputs in memory (no I/O; never raises)."""
+        try:
+            snapshot = extract_protection_state(hand_msg, joint_ids, timestamp)
+            with self._telemetry_lock:
+                self.__dict__.setdefault("_protection_state", {})[side] = snapshot
+        except Exception:
+            self._note_extended_failure()
+
+    def _apply_protection(self, side, now, target):
+        """Return (q_cmd, enable, flags). Bypass (raw target) if protection absent."""
+        protectors = self.__dict__.get("_protectors")
+        if not protectors:
+            return target, None
+        try:
+            with self._telemetry_lock:
+                state = self.__dict__.get("_protection_state", {}).get(side)
+            result = protectors[side].update(now, target, state)
+            warner = self.__dict__.get("_protection_warner")
+            if warner is not None and result.active:
+                for message in warner.messages(now, side, result.active):
+                    try:
+                        logger_mp.warning(message)
+                    except Exception:
+                        pass
+            self._record_protection_flags(side, result.flags())
+            return result.q_cmd, result.enable
+        except Exception:
+            # Fail safe: unexpected protection failure -> open rest pose.
+            self._note_extended_failure()
+            return Dex3_Open_Pose.copy(), None
+
+    def _record_protection_flags(self, side, flags):
+        try:
+            with self._telemetry_lock:
+                self.__dict__.setdefault("_protection_flags", {})[side] = flags
+        except Exception:
+            pass
+
     def get_extended_samples(self):
         """Latest extended state + published command per side (None if absent)."""
         out = {"left": None, "right": None}
@@ -260,6 +313,9 @@ class Dex3_1_Controller:
                 if command:
                     item.update(command)
                 item["failure_count"] = failures
+                flags = self.__dict__.get("_protection_flags", {}).get(side)
+                if flags is not None:
+                    item["protection"] = flags
                 out[side] = item
         except Exception:
             self._note_extended_failure()
@@ -325,13 +381,23 @@ class Dex3_1_Controller:
             self.motor_mode |= (self.timeout & 0x01) << 7
             return self.motor_mode
 
+    @staticmethod
+    def _set_gains(motor_cmd, enabled):
+        """Faulted/disabled motor: stop commanding torque (kp=kd=0, tau=0)."""
+        motor_cmd.kp = Dex3_Kp if enabled else 0.0
+        motor_cmd.kd = Dex3_Kd if enabled else 0.0
+        motor_cmd.tau = 0.0
+
     def ctrl_dual_hand(self, left_q_target, right_q_target,
-                       left_sample_timestamp=0.0, right_sample_timestamp=0.0):
+                       left_sample_timestamp=0.0, right_sample_timestamp=0.0,
+                       left_enable=None, right_enable=None):
         """Publish both targets, rechecking freshness immediately before output."""
         if not controller_sample_is_fresh(left_sample_timestamp):
             left_q_target = Dex3_Open_Pose.copy()
         for idx, id in enumerate(Dex3_1_Left_JointIndex):
             self.left_msg.motor_cmd[id].q = left_q_target[idx]
+            if left_enable is not None:
+                self._set_gains(self.left_msg.motor_cmd[id], left_enable[idx])
         self.LeftHandCmb_publisher.Write(self.left_msg)
         self._record_published_command("left", self.left_msg, Dex3_1_Left_JointIndex)
 
@@ -339,6 +405,8 @@ class Dex3_1_Controller:
             right_q_target = Dex3_Open_Pose.copy()
         for idx, id in enumerate(Dex3_1_Right_JointIndex):
             self.right_msg.motor_cmd[id].q = right_q_target[idx]
+            if right_enable is not None:
+                self._set_gains(self.right_msg.motor_cmd[id], right_enable[idx])
         self.RightHandCmb_publisher.Write(self.right_msg)
         self._record_published_command("right", self.right_msg, Dex3_1_Right_JointIndex)
 
@@ -386,8 +454,15 @@ class Dex3_1_Controller:
         right_q_target = trigger_to_dex3_targets(
             right_trigger, Dex3_Open_Pose, Dex3_Right_Closed_Pose)
 
+        # Torque/thermal protection only ever moves the command toward the
+        # measured/open pose; it cannot add closure beyond the trigger target.
+        now = time.monotonic()
+        left_q_target, left_enable = self._apply_protection("left", now, left_q_target)
+        right_q_target, right_enable = self._apply_protection("right", now, right_q_target)
+
         self.ctrl_dual_hand(
-            left_q_target, right_q_target, left_sample_timestamp, right_sample_timestamp)
+            left_q_target, right_q_target, left_sample_timestamp, right_sample_timestamp,
+            left_enable, right_enable)
         return left_q_target, right_q_target
     
     def control_process(self, left_hand_array_in, right_hand_array_in, left_hand_state_array, right_hand_state_array,
@@ -411,6 +486,7 @@ class Dex3_1_Controller:
         tau = 0.0
         kp = 1.5
         kd = 0.2
+        assert kp == Dex3_Kp and kd == Dex3_Kd
 
         # initialize dex3-1's left hand cmd msg
         self.left_msg  = unitree_hg_msg_dds__HandCmd_()
