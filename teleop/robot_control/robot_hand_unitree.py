@@ -21,6 +21,9 @@ from teleop.utils.weighted_moving_filter import WeightedMovingFilter
 from teleop.utils.dex3_controls import trigger_to_dex3_targets
 from teleop.utils.quest_safety import controller_sample_is_fresh
 from teleop.utils.haptics import extract_dex3_pressure
+from teleop.utils.dex3_telemetry import (
+    RateEstimator, extract_hand_snapshot, extract_published_command,
+)
 
 import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
@@ -183,6 +186,7 @@ class Dex3_1_Controller:
                 with self._telemetry_lock:
                     self._left_state_valid = True
                     self._left_state_timestamp = time.monotonic()
+                self._record_extended_state("left", left_hand_msg, Dex3_1_Left_JointIndex, time.monotonic())
                 self._left_state_sampled.set()
                 with self.left_pressure.get_lock():
                     self.left_pressure.value = extract_dex3_pressure(left_hand_msg)
@@ -196,12 +200,84 @@ class Dex3_1_Controller:
                 with self._telemetry_lock:
                     self._right_state_valid = True
                     self._right_state_timestamp = time.monotonic()
+                self._record_extended_state("right", right_hand_msg, Dex3_1_Right_JointIndex, time.monotonic())
                 self._right_state_sampled.set()
                 with self.right_pressure.get_lock():
                     self.right_pressure.value = extract_dex3_pressure(right_hand_msg)
                 with self.right_pressure_timestamp.get_lock():
                     self.right_pressure_timestamp.value = time.monotonic()
             time.sleep(0.002)
+
+    extended_telemetry_failure_count = 0
+
+    def _note_extended_failure(self):
+        """Count a telemetry failure; must itself never raise."""
+        try:
+            lock = self.__dict__.get("_telemetry_lock")
+            if lock is None:
+                self.extended_telemetry_failure_count += 1
+            else:
+                with lock:
+                    self.extended_telemetry_failure_count += 1
+        except Exception:
+            pass
+
+    def _record_extended_state(self, side, hand_msg, joint_ids, timestamp):
+        """Side-channel: keep the latest extended HandState_ snapshot in memory.
+
+        Pure in-memory bookkeeping (no I/O); a failure only bumps a counter.
+        """
+        try:
+            snapshot = extract_hand_snapshot(hand_msg, joint_ids)
+            with self._telemetry_lock:
+                store = self.__dict__.setdefault("_extended_state", {})
+                rates = self.__dict__.setdefault("_extended_rate", {})
+                estimator = rates.setdefault(side, RateEstimator())
+                estimator.add(timestamp)
+                store[side] = {
+                    "state": snapshot,
+                    "state_timestamp": timestamp,
+                    "state_count": estimator.count,
+                    "rate_hz": estimator.rate_hz(),
+                }
+        except Exception:
+            self._note_extended_failure()
+
+    def get_extended_samples(self):
+        """Latest extended state + published command per side (None if absent)."""
+        out = {"left": None, "right": None}
+        try:
+            with self._telemetry_lock:
+                states = dict(self.__dict__.get("_extended_state", {}))
+                commands = dict(self.__dict__.get("_published_command", {}))
+                failures = self.extended_telemetry_failure_count
+            for side in out:
+                state = states.get(side)
+                command = commands.get(side)
+                if state is None and command is None:
+                    continue
+                item = dict(state) if state else {"state": None}
+                if command:
+                    item.update(command)
+                item["failure_count"] = failures
+                out[side] = item
+        except Exception:
+            self._note_extended_failure()
+        return out
+
+    def _record_published_command(self, side, msg, joint_ids):
+        try:
+            snapshot = extract_published_command(msg.motor_cmd, joint_ids)
+            with self._telemetry_lock:
+                store = self.__dict__.setdefault("_published_command", {})
+                previous = store.get(side) or {}
+                store[side] = {
+                    "published_command": snapshot,
+                    "command_timestamp": time.monotonic(),
+                    "command_count": previous.get("command_count", 0) + 1,
+                }
+        except Exception:
+            self._note_extended_failure()
 
     def get_pressure_samples(self):
         """Read the latest timestamped pressure sample for each Dex3 side."""
@@ -257,12 +333,14 @@ class Dex3_1_Controller:
         for idx, id in enumerate(Dex3_1_Left_JointIndex):
             self.left_msg.motor_cmd[id].q = left_q_target[idx]
         self.LeftHandCmb_publisher.Write(self.left_msg)
+        self._record_published_command("left", self.left_msg, Dex3_1_Left_JointIndex)
 
         if not controller_sample_is_fresh(right_sample_timestamp):
             right_q_target = Dex3_Open_Pose.copy()
         for idx, id in enumerate(Dex3_1_Right_JointIndex):
             self.right_msg.motor_cmd[id].q = right_q_target[idx]
         self.RightHandCmb_publisher.Write(self.right_msg)
+        self._record_published_command("right", self.right_msg, Dex3_1_Right_JointIndex)
 
     def control_step(self, left_hand_array_in, right_hand_array_in,
                      left_ctrl_trigger_in=None, right_ctrl_trigger_in=None,

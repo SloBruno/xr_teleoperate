@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .quest_safety import controller_sample_is_fresh
+from .dex3_telemetry import EXTENDED_SCHEMA_VERSION, clean_number, sanitize
 
 
 class _FrozenMappingSnapshot(tuple):
@@ -139,6 +140,26 @@ def _split_dex3(values: list[float] | None) -> dict[str, list[float] | None]:
     return {"left": values[:7], "right": values[7:]}
 
 
+def _extended_side(item: object, now: float) -> dict | None:
+    """Sanitize one side of extended Dex3 telemetry; garbage becomes None."""
+    if not isinstance(item, Mapping):
+        return None
+    state_ts = _finite_timestamp(item.get("state_timestamp"))
+    command_ts = _finite_timestamp(item.get("command_timestamp"))
+    return {
+        "state": sanitize(item.get("state")),
+        "state_timestamp": state_ts,
+        "state_age_ms": _age_ms(state_ts, now),
+        "state_count": clean_number(item.get("state_count")),
+        "rate_hz": clean_number(item.get("rate_hz")),
+        "published_command": sanitize(item.get("published_command")),
+        "command_timestamp": command_ts,
+        "command_age_ms": _age_ms(command_ts, now),
+        "command_count": clean_number(item.get("command_count")),
+        "failure_count": clean_number(item.get("failure_count")),
+    }
+
+
 def _utc_timestamp(timestamp: float) -> str:
     return datetime.fromtimestamp(float(timestamp), timezone.utc).isoformat(
         timespec="milliseconds"
@@ -236,6 +257,7 @@ def build_pose_record(
     dex3_commanded_q: object = None,
     dex3_configured: bool = False,
     dex3_sample_metadata: Mapping[str, Mapping[str, object]] | None = None,
+    dex3_extended: Mapping[str, object] | None = None,
     arm_joint_split: tuple[int, int] = (7, 7),
     drop_count: int = 0,
     now: float | None = None,
@@ -268,6 +290,14 @@ def build_pose_record(
             "measured_q": measured_values[side] if state_valid else None,
             "commanded_q": commanded_values[side] if action_valid else None,
         }
+    if dex3_extended is not None:
+        for side in ("left", "right"):
+            try:
+                dex3[side]["extended"] = _extended_side(
+                    dex3_extended.get(side) if isinstance(dex3_extended, Mapping) else None,
+                    freshness_now)
+            except Exception:
+                dex3[side]["extended"] = None
     dex3_available = sample_count > 0
     if not dex3_configured:
         dex3_reason = "dex3_not_configured"
@@ -367,6 +397,7 @@ def build_pose_record(
             "reason": dex3_reason,
             "left": dex3["left"],
             "right": dex3["right"],
+            **({"extended_schema_version": EXTENDED_SCHEMA_VERSION} if dex3_extended is not None else {}),
         },
         "achieved_cartesian_pose": {"left": None, "right": None},
         "achieved_cartesian_pose_reason": "not_available_from_controller_state",

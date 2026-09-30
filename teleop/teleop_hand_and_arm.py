@@ -55,6 +55,7 @@ from teleop.utils.full_pose_telemetry import (
     emit_lifecycle_event_best_effort,
     emit_pose_record_best_effort,
 )
+from teleop.utils.dex3_telemetry import Dex3SlowFieldGate, collect_extended_payload
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -440,6 +441,7 @@ if __name__ == '__main__':
     shutdown_return_home = True
     arm_ik = None
     pose_telemetry_sink = None
+    dex3_slow_gate = Dex3SlowFieldGate(slow_every=10)
     status_sink = None
     img_client = None
     tv_wrapper = None
@@ -728,10 +730,12 @@ if __name__ == '__main__':
             ready_dex3_measured_q = None
             ready_dex3_commanded_q = None
             ready_dex3_metadata = None
+            ready_dex3_extended = None
             if args.ee == "dex3":
                 left_pressure_sample, right_pressure_sample = hand_ctrl.get_pressure_samples()
                 ready_pressure_timestamps = (left_pressure_sample[1], right_pressure_sample[1])
                 ready_dex3_measured_q, ready_dex3_commanded_q, ready_dex3_metadata = hand_ctrl.get_pose_samples()
+                ready_dex3_extended = collect_extended_payload(hand_ctrl, dex3_slow_gate, logger_mp.warning)
             status_monitor.observe(
                 now=time.monotonic(),
                 lifecycle="ready",
@@ -764,6 +768,7 @@ if __name__ == '__main__':
                 dex3_measured_q=ready_dex3_measured_q,
                 dex3_commanded_q=ready_dex3_commanded_q,
                 dex3_sample_metadata=ready_dex3_metadata,
+                dex3_extended=ready_dex3_extended,
                 drop_count=pose_telemetry_sink.drop_count,
                 now=time.monotonic(),
             )
@@ -986,8 +991,10 @@ if __name__ == '__main__':
             dex3_measured_q = None
             dex3_commanded_q = None
             dex3_metadata = None
+            dex3_extended = None
             if args.ee == "dex3":
                 dex3_measured_q, dex3_commanded_q, dex3_metadata = hand_ctrl.get_pose_samples()
+                dex3_extended = collect_extended_payload(hand_ctrl, dex3_slow_gate, logger_mp.warning)
             arm_request_id = (
                 int(cycle.publication)
                 if isinstance(cycle.publication, (int, np.integer))
@@ -1029,6 +1036,7 @@ if __name__ == '__main__':
                 dex3_measured_q=dex3_measured_q,
                 dex3_commanded_q=dex3_commanded_q,
                 dex3_sample_metadata=dex3_metadata,
+                dex3_extended=dex3_extended,
                 drop_count=pose_telemetry_sink.drop_count,
                 now=time.monotonic(),
             )
