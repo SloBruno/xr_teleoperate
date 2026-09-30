@@ -235,3 +235,11 @@ class TeleopStatusMonitor:
                     status["locomotion"][key] = value
         self._emit_best_effort(status)
         return status
+
+
+def camera_status_for_layout(layout: str, head_img: object, left_wrist_img: object) -> dict[str, bool]:
+    """Camera availability for status telemetry; head layout has no wrist camera to report."""
+    status = {"head": camera_frame_is_usable(head_img)}
+    if layout != "head":
+        status["left_wrist"] = camera_frame_is_usable(left_wrist_img)
+    return status

@@ -55,5 +55,42 @@ class G1QuestDex3LauncherTest(unittest.TestCase):
         self.assertLess(source.index("ensure_teleimager\nexec 9>&-"), source.index('exec "$teleimager_python"'))
 
 
+class HeadOnlyModeLauncherTest(unittest.TestCase):
+    def setUp(self):
+        self.source = LAUNCHER.read_text(encoding="utf-8")
+
+    def test_mode_is_explicit_env_with_default_both_cameras(self):
+        self.assertIn('TELEIMAGER_CAMERA_MODE=${TELEIMAGER_CAMERA_MODE:-both}', self.source)
+        self.assertIn('both|head', self.source)
+        self.assertIn("unsupported TELEIMAGER_CAMERA_MODE", self.source)
+
+    def test_visible_banner_for_head_only(self):
+        self.assertIn("TELEIMAGER: modo SOMENTE CABEÇA (pulso esquerdo desativado)", self.source)
+
+    def test_head_probe_does_not_require_wrist_port_or_frame(self):
+        self.assertIn('ports = (60000, 55555) if mode == "head" else (60000, 55555, 55556)', self.source)
+        self.assertIn('frames = (head,) if mode == "head" else (head, left_wrist)', self.source)
+        self.assertIn('if mode == "head"', self.source)
+
+    def test_default_probe_still_requires_three_ports_and_both_frames(self):
+        self.assertIn("55556", self.source)
+        self.assertIn("client.get_left_wrist_frame()", self.source)
+
+    def test_head_mode_starts_server_through_head_only_wrapper(self):
+        self.assertIn("teleop.utils.teleimager_head_only_server", self.source)
+        self.assertIn("server_module=teleimager.image_server", self.source)
+        self.assertIn("teleimager.mode", self.source)
+
+    def test_teleop_layout_follows_mode(self):
+        self.assertIn("--camera-layout \"$teleop_camera_layout\"", self.source)
+        self.assertIn("teleop_camera_layout=head", self.source)
+        self.assertIn("teleop_camera_layout=vertical", self.source)
+        self.assertNotIn("--camera-layout vertical", self.source)
+
+    def test_refuses_duplicate_when_running_server_has_other_mode(self):
+        self.assertIn("running in mode", self.source)
+        self.assertIn("refusing a duplicate start", self.source)
+
+
 if __name__ == "__main__":
     unittest.main()

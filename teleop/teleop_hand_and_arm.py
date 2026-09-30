@@ -44,6 +44,7 @@ from teleop.utils.teleop_status import (
     AsyncStatusFileSink,
     TeleopStatusMonitor,
     camera_frame_is_usable,
+    camera_status_for_layout,
     create_status_sink,
 )
 # from teleop.utils.teleop_status import AsyncStatusFileSink, TeleopStatusMonitor, camera_frame_is_usable
@@ -758,7 +759,7 @@ if __name__ == '__main__':
                 now=time.monotonic(),
                 lifecycle="ready",
                 controller_sample_timestamp=ready_tele_data.controller_sample_timestamp,
-                cameras={"head": camera_frame_is_usable(head_img), "left_wrist": camera_frame_is_usable(left_wrist_img)},
+                cameras=camera_status_for_layout(args.camera_layout, head_img, left_wrist_img),
                 dex3_pressure_timestamps=ready_pressure_timestamps,
             )
             get_ready_arm_q = getattr(arm_ctrl, "get_current_dual_arm_q", None)
@@ -984,7 +985,7 @@ if __name__ == '__main__':
                 motion_enabled=args.motion,
                 locomotion=locomotion,
                 stick=stick_log,
-                cameras={"head": camera_frame_is_usable(head_img), "left_wrist": camera_frame_is_usable(left_wrist_img)},
+                cameras=camera_status_for_layout(args.camera_layout, head_img, left_wrist_img),
                 dex3_pressure_timestamps=tracking_pressure_timestamps,
             )
 

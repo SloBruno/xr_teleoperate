@@ -21,6 +21,25 @@ teleimager_host=${TELEIMAGER_HOST:-127.0.0.1}
 TELEIMAGER_TIMEOUT_S=${TELEIMAGER_TIMEOUT_S:-30}
 TELEIMAGER_LOCK_TIMEOUT_S=${TELEIMAGER_LOCK_TIMEOUT_S:-10}
 teleimager_python=${TELEIMAGER_PYTHON:-/home/unitree/miniconda3/envs/tv/bin/python}
+# Explicit camera mode. Default "both" = head + left wrist (vertical layout).
+# "head" = head camera only; the wrist camera is deliberately disabled.
+TELEIMAGER_CAMERA_MODE=${TELEIMAGER_CAMERA_MODE:-both}
+teleimager_mode_file="$teleimager_state_dir/teleimager.mode"
+case "$TELEIMAGER_CAMERA_MODE" in
+    both|head) ;;
+    *)
+        echo "unsupported TELEIMAGER_CAMERA_MODE='$TELEIMAGER_CAMERA_MODE' (use both|head)" >&2
+        exit 2
+        ;;
+esac
+if [[ "$TELEIMAGER_CAMERA_MODE" == head ]]; then
+    teleop_camera_layout=head
+    echo "================================================================"
+    echo "TELEIMAGER: modo SOMENTE CABEÇA (pulso esquerdo desativado)"
+    echo "================================================================"
+else
+    teleop_camera_layout=vertical
+fi
 
 teleimager_is_healthy() {
     # The probe runs in its own session and never inherits the launcher lock
@@ -28,7 +47,7 @@ teleimager_is_healthy() {
     # process group, so an orphan can never hold the lock and freeze the next
     # launcher.
     local probe_pid rc=2 deadline=$((SECONDS + 9))
-    setsid "$teleimager_python" -s - "$teleimager_host" 9>&- <<'PY' &
+    setsid "$teleimager_python" -s - "$teleimager_host" "$TELEIMAGER_CAMERA_MODE" 9>&- <<'PY' &
 import os
 import socket
 import sys
@@ -37,7 +56,9 @@ import time
 from teleimager.image_client import ImageClient
 
 host = sys.argv[1]
-for port in (60000, 55555, 55556):
+mode = sys.argv[2]
+ports = (60000, 55555) if mode == "head" else (60000, 55555, 55556)
+for port in ports:
     with socket.create_connection((host, port), timeout=1):
         pass
 
@@ -46,8 +67,9 @@ client.get_cam_config()
 deadline = time.monotonic() + 6.0
 while time.monotonic() < deadline:
     head = client.get_head_frame()
-    left_wrist = client.get_left_wrist_frame()
-    frames = (head, left_wrist)
+    # Head-only mode never touches the (disabled) wrist camera.
+    left_wrist = None if mode == "head" else client.get_left_wrist_frame()
+    frames = (head,) if mode == "head" else (head, left_wrist)
     if all(
         (bgr := getattr(frame, "bgr", None)) is not None
         and getattr(bgr, "shape", None) == (720, 1280, 3)
@@ -83,9 +105,16 @@ ensure_teleimager() {
         return 1
     fi
 
+    local running_mode=both
+    [[ -s "$teleimager_mode_file" ]] && running_mode=$(<"$teleimager_mode_file")
     if teleimager_is_healthy; then
-        echo "Reusing healthy Teleimager on ports 60000, 55555, 55556."
+        echo "Reusing healthy Teleimager (mode $TELEIMAGER_CAMERA_MODE)."
         return 0
+    fi
+    if [[ -s "$teleimager_pid_file" ]] && kill -0 "$(<"$teleimager_pid_file")" 2>/dev/null \
+        && [[ "$running_mode" != "$TELEIMAGER_CAMERA_MODE" ]]; then
+        echo "Teleimager PID $(<"$teleimager_pid_file") is running in mode $running_mode, requested $TELEIMAGER_CAMERA_MODE; refusing a duplicate start. Stop it first." >&2
+        return 1
     fi
 
     if [[ -s "$teleimager_pid_file" ]]; then
@@ -97,10 +126,15 @@ ensure_teleimager() {
         fi
     fi
 
-    echo "Starting Teleimager from $teleimager_dir."
+    echo "Starting Teleimager from $teleimager_dir (mode $TELEIMAGER_CAMERA_MODE)."
+    local server_module=teleimager.image_server
+    if [[ "$TELEIMAGER_CAMERA_MODE" == head ]]; then
+        server_module=teleop.utils.teleimager_head_only_server
+    fi
+    echo "$TELEIMAGER_CAMERA_MODE" >"$teleimager_mode_file"
     (
         cd "$teleimager_dir"
-        setsid nohup "$teleimager_python" -s -m teleimager.image_server --rs --no-affinity \
+        setsid nohup "$teleimager_python" -s -m "$server_module" --rs --no-affinity \
             >>"$teleimager_log" 2>&1 < /dev/null 9>&- &
         echo "$!" >"$teleimager_pid_file"
     )
@@ -135,4 +169,4 @@ exec "$teleimager_python" -s teleop_hand_and_arm.py \
   --ee dex3 \
   --input-mode hand \
   --motion \
-  --camera-layout vertical
+  --camera-layout "$teleop_camera_layout"

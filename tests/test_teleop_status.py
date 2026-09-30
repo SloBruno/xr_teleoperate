@@ -1,4 +1,5 @@
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -184,3 +185,11 @@ def test_status_file_sink_contains_ordinary_buffer_fault_but_propagates_keyboard
         sink.emit({"event": "teleop_status"})
     monkeypatch.undo()
     sink.close()
+
+
+def test_head_layout_camera_status_omits_unused_left_wrist():
+    from teleop.utils.teleop_status import camera_status_for_layout
+
+    head = SimpleNamespace(bgr=object())
+    assert camera_status_for_layout("head", head, None) == {"head": True}
+    assert camera_status_for_layout("vertical", head, None) == {"head": True, "left_wrist": False}
