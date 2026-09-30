@@ -47,6 +47,10 @@ class LocoClientWrapper:
         self.client.Init()
         self.last_move_code = None
         self.nonzero_move_codes = 0
+        self.stop_count = 0
+        self.stop_failures = 0
+        self.last_stop_code = None
+        self.last_stop_reason = None
 
     def Enter_Damp_Mode(self):
         self.client.Damp()
@@ -63,6 +67,50 @@ class LocoClientWrapper:
             return None
         finally:
             self.client.SetTimeout(0.0001)
+
+    def make_fsm_reader(self, timeout=1.0):
+        """Callable doing GetFsmId on a SEPARATE client (own timeout), so a
+        background poller can never change the control client's 0.1 ms timeout."""
+        reader_client = LocoClient()
+        reader_client.SetTimeout(timeout)
+        reader_client.Init()
+
+        def read():
+            code, data = reader_client._Call(7001, "{}")
+            if code != 0 or not data:
+                return None
+            return int(json.loads(data)["data"])
+        return read
+
+    def StopMove(self, reason="", timeout=None, attempts=1):
+        """Explicit stop = SetVelocity(0,0,0,1.0), the SDK's StopMove wire call.
+
+        timeout=None: non-blocking (control-loop safe).  timeout=x: bounded
+        blocking retries (cleanup only).  Never raises; returns last RPC code
+        or None when nothing could be sent.
+        """
+        self.stop_count += 1
+        self.last_stop_reason = reason
+        code = None
+        blocking = timeout is not None
+        try:
+            if blocking:
+                self.client.SetTimeout(timeout)
+            for _ in range(max(1, int(attempts))):
+                code = self.client.SetVelocity(0.0, 0.0, 0.0, 1.0)
+                if code == 0:
+                    break
+        except BaseException:
+            self.stop_failures += 1
+            code = None
+        finally:
+            if blocking:
+                try:
+                    self.client.SetTimeout(0.0001)
+                except BaseException:
+                    pass
+        self.last_stop_code = code
+        return code
 
     def Move(self, vx, vy, vyaw):
         # Same wire call as LocoClient.Move(continous_move=False) (duration=1 s)

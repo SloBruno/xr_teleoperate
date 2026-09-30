@@ -39,6 +39,7 @@ from teleop.utils.arm_tracking_orchestration import build_arm_recording_actions,
 from teleop.utils.ee_rate_limiter import DualEePoseRateLimiter, G1_29_EE_RATE_LIMITER_CONFIG
 from teleop.utils.arm_enable_ramp import ArmEnableRamp, DEFAULT_ENABLE_RAMP_S
 from teleop.utils.arm_graceful_shutdown import run_graceful_arm_shutdown
+from teleop.utils.robot_state_monitor import RobotStateMonitor, stop_locomotion_best_effort
 from teleop.utils.teleop_status import (
     AsyncStatusFileSink,
     TeleopStatusMonitor,
@@ -446,6 +447,8 @@ if __name__ == '__main__':
     img_client = None
     tv_wrapper = None
     shutdown_cause = None
+    loco_wrapper = None
+    robot_monitor = None
 
     try:
         # setup dds communication domains id
@@ -520,6 +523,14 @@ if __name__ == '__main__':
             else:
                 logger_mp.warning(f"[loco] FSM id {fsm_id} is not a walk mode (500/501); "
                                   "joystick Move may lean but will not step. Enter Regular mode (R1+X) on the R3 remote.")
+            # Side channel: rt/sportmodestate callback + 1 Hz GetFsmId thread on
+            # its own client. Never touched by the control loop except snapshot().
+            try:
+                robot_monitor = RobotStateMonitor(fsm_reader=loco_wrapper.make_fsm_reader(), fsm_period_s=1.0)
+                robot_monitor.start()
+            except BaseException as e:
+                robot_monitor = None
+                logger_mp.warning(f"[loco] robot state monitor unavailable: {e}")
         else:
             motion_switcher = MotionSwitcher()
             status, result = motion_switcher.Enter_Debug_Mode()
@@ -955,6 +966,12 @@ if __name__ == '__main__':
             )
             stick_log["dispatched_command"] = [float(v) for v in locomotion]
             stick_log["controller_fresh"] = bool(controller_is_fresh)
+            if robot_monitor is not None:
+                stick_log["robot_state"] = robot_monitor.snapshot()
+            if loco_wrapper is not None:
+                stick_log["stop_count"] = loco_wrapper.stop_count
+                stick_log["last_stop_code"] = loco_wrapper.last_stop_code
+                stick_log["last_stop_reason"] = loco_wrapper.last_stop_reason
 
             tracking_pressure_timestamps = (0.0, 0.0)
             if args.ee == "dex3":
@@ -1228,6 +1245,10 @@ if __name__ == '__main__':
         import traceback
         logger_mp.error(traceback.format_exc())
     finally:
+        # Explicit StopMove first (bounded, never raises): the robot keeps the
+        # last SetVelocity for its duration (1 s), so do not wait for the arm
+        # shutdown to cancel it. Retried again after the arm shutdown below.
+        stop_locomotion_best_effort(loco_wrapper, shutdown_cause or "shutdown")
         # G1_29 graceful shutdown (q/B, Ctrl+C, exception): tracking has
         # already stopped; return to the all-zero preparation pose with a
         # velocity-limited trajectory, open Dex3, ramp the arm_sdk authority
@@ -1261,6 +1282,13 @@ if __name__ == '__main__':
                 arm_ctrl.ctrl_dual_arm_go_home()
             except Exception as e:
                 _log_best_effort("error", f"Failed to ctrl_dual_arm_go_home: {e}")
+
+        stop_locomotion_best_effort(loco_wrapper, "shutdown_post_arm")
+        try:
+            if robot_monitor is not None:
+                robot_monitor.close()
+        except BaseException as e:
+            _log_best_effort("error", f"Failed to close robot state monitor: {e}")
 
         # Normal control-path telemetry preserves KeyboardInterrupt/SystemExit
         # for the outer shutdown handler. Cleanup telemetry is different: it is

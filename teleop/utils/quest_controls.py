@@ -84,12 +84,42 @@ def stick_snapshot(left_xy, right_xy, loco_wrapper=None):
     }
 
 
+def _note_moving(loco_wrapper, moving):
+    try:
+        loco_wrapper._was_moving = moving
+    except Exception:
+        pass
+
+
+def _explicit_stop_on_release(loco_wrapper, reason):
+    """One non-blocking StopMove per non-zero -> zero transition; never raises."""
+    _note_moving(loco_wrapper, False)
+    stop = getattr(loco_wrapper, "StopMove", None)
+    if stop is None:
+        return
+    try:
+        stop(reason)
+    except Exception:
+        pass
+
+
 def dispatch_joystick_locomotion(loco_wrapper, motion_enabled, controller_is_fresh, left_xy, right_xy):
-    """Send only enabled, fresh joystick locomotion; stale input releases to zero."""
+    """Send only enabled, fresh joystick locomotion; stale input releases to zero.
+
+    Transition non-zero -> zero additionally issues one explicit StopMove
+    (reason release / stale / motion_disabled).
+    """
     locomotion = (0.0, 0.0, 0.0)
+    was_moving = bool(getattr(loco_wrapper, "_was_moving", False))
     if not motion_enabled:
+        if was_moving and loco_wrapper is not None:
+            _explicit_stop_on_release(loco_wrapper, "motion_disabled")
         return locomotion
     if controller_is_fresh:
         locomotion = joystick_to_locomotion(left_xy, right_xy)
     loco_wrapper.Move(*locomotion)
+    if any(locomotion):
+        _note_moving(loco_wrapper, True)
+    elif was_moving:
+        _explicit_stop_on_release(loco_wrapper, "release" if controller_is_fresh else "stale")
     return locomotion
