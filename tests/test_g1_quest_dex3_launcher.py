@@ -80,6 +80,7 @@ class HeadOnlyModeLauncherTest(unittest.TestCase):
         self.assertIn("teleop.utils.teleimager_head_only_server", self.source)
         self.assertIn("server_module=teleimager.image_server", self.source)
         self.assertIn("teleimager.mode", self.source)
+        self.assertIn('TELEIMAGER_HEAD_ONLY_CONFIG="$teleimager_state_dir/', self.source)
 
     def test_teleop_layout_follows_mode(self):
         self.assertIn("--camera-layout \"$teleop_camera_layout\"", self.source)

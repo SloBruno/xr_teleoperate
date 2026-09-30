@@ -25,6 +25,8 @@ teleimager_python=${TELEIMAGER_PYTHON:-/home/unitree/miniconda3/envs/tv/bin/pyth
 # "head" = head camera only; the wrist camera is deliberately disabled.
 TELEIMAGER_CAMERA_MODE=${TELEIMAGER_CAMERA_MODE:-both}
 teleimager_mode_file="$teleimager_state_dir/teleimager.mode"
+# Derived head-only server config lives in state, never inside the submodule.
+export TELEIMAGER_HEAD_ONLY_CONFIG="$teleimager_state_dir/cam_config_server.head_only.yaml"
 case "$TELEIMAGER_CAMERA_MODE" in
     both|head) ;;
     *)
