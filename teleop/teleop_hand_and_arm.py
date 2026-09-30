@@ -29,7 +29,7 @@ from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_Arm
 from teleimager.image_client import ImageClient
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
-from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
+from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper, is_walk_fsm
 from teleop.utils.quest_controls import dispatch_joystick_locomotion, joystick_to_locomotion
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
 from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
@@ -513,6 +513,13 @@ if __name__ == '__main__':
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
         if args.motion:
             loco_wrapper = LocoClientWrapper()
+            # Read-only preflight: SetVelocity only walks in FSM 500/501.
+            fsm_id = loco_wrapper.read_fsm_id()
+            if is_walk_fsm(fsm_id):
+                logger_mp.info(f"[loco] FSM id {fsm_id}: walk mode, joystick locomotion can step.")
+            else:
+                logger_mp.warning(f"[loco] FSM id {fsm_id} is not a walk mode (500/501); "
+                                  "joystick Move may lean but will not step. Enter Regular mode (R1+X) on the R3 remote.")
         else:
             motion_switcher = MotionSwitcher()
             status, result = motion_switcher.Enter_Debug_Mode()
