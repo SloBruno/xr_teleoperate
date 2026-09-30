@@ -57,6 +57,7 @@ from teleop.utils.full_pose_telemetry import (
     emit_lifecycle_event_best_effort,
     emit_pose_record_best_effort,
 )
+from teleop.utils.loop_diagnostics import LoopDiagnostics, ResourceSampler, GcWatcher
 from teleop.utils.dex3_telemetry import Dex3SlowFieldGate, collect_extended_payload
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -445,6 +446,7 @@ if __name__ == '__main__':
     pose_telemetry_sink = None
     dex3_slow_gate = Dex3SlowFieldGate(slow_every=10)
     status_sink = None
+    loop_diag = None
     img_client = None
     tv_wrapper = None
     shutdown_cause = None
@@ -672,6 +674,8 @@ if __name__ == '__main__':
             "/home/unitree/.local/state/xr_teleoperate",
         )
         pose_telemetry_sink = create_pose_telemetry_sink(pose_log_dir, logger_mp.warning)
+        loop_diag = LoopDiagnostics(status_sink.emit, sampler=ResourceSampler(), gc_watcher=GcWatcher())
+        loop_diag.start()
         arm_publication_telemetry = ArmPublicationTelemetryBridge(
             pose_telemetry_sink, profile=args.arm, warn=logger_mp.warning
         )
@@ -867,6 +871,8 @@ if __name__ == '__main__':
         # main loop. robot start to follow VR user's motion
         while not STOP:
             start_time = time.time()
+            _diag = loop_diag
+            if _diag is not None: _diag.begin()
             # get image
             if camera_config['head_camera']['enable_zmq']:
                 if args.record or xr_need_local_img:
@@ -874,6 +880,7 @@ if __name__ == '__main__':
             if camera_config['left_wrist_camera']['enable_zmq']:
                 if args.record or (xr_need_local_img and vertical_camera_stack):
                     left_wrist_img = img_client.get_left_wrist_frame()
+            if _diag is not None: _diag.mark("camera")
             if xr_need_local_img and head_img is not None:
                 if vertical_camera_stack:
                     stacked_img = stack_camera_images_vertical(
@@ -881,8 +888,11 @@ if __name__ == '__main__':
                         args.head_crop_bottom, args.wrist_crop_top, args.camera_divider_px)
                     if stacked_img is not None:
                         tv_wrapper.render_to_xr(stacked_img)
+                        if _diag is not None: _diag.record_video(stacked_img)
                 elif head_img.bgr is not None:
                     tv_wrapper.render_to_xr(head_img.bgr)
+                    if _diag is not None: _diag.record_video(head_img.bgr)
+            if _diag is not None: _diag.mark("render")
             if camera_config['right_wrist_camera']['enable_zmq']:
                 if args.record:
                     right_wrist_img = img_client.get_right_wrist_frame()
@@ -905,6 +915,7 @@ if __name__ == '__main__':
             tele_data = tv_wrapper.get_tele_data()
             right_a_was_pressed, right_b_was_pressed = poll_controller_lifecycle(
                 tele_data, right_a_was_pressed, right_b_was_pressed)
+            if _diag is not None: _diag.mark("controller")
 
             if args.ee in ("inspire_ftp", "inspire_dfx", "brainco") and args.input_mode == "hand":
                 with left_hand_pos_array.get_lock():
@@ -949,6 +960,7 @@ if __name__ == '__main__':
             with xr_motion_data_ready.get_lock():
                 xr_motion_data_ready.value = tele_data.motion_data_ready
             
+            if _diag is not None: _diag.mark("hand")
             # Controller samples own arm IK, locomotion, and Dex3 freshness.
             controller_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)
             locomotion = dispatch_joystick_locomotion(
@@ -974,6 +986,7 @@ if __name__ == '__main__':
                 stick_log["last_stop_code"] = loco_wrapper.last_stop_code
                 stick_log["last_stop_reason"] = loco_wrapper.last_stop_reason
 
+            if _diag is not None: _diag.mark("locomotion")
             tracking_pressure_timestamps = (0.0, 0.0)
             if args.ee == "dex3":
                 left_pressure_sample, right_pressure_sample = hand_ctrl.get_pressure_samples()
@@ -989,6 +1002,7 @@ if __name__ == '__main__':
                 dex3_pressure_timestamps=tracking_pressure_timestamps,
             )
 
+            if _diag is not None: _diag.mark("telemetry")
             # get current robot state data.
             current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()
             current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
@@ -996,6 +1010,7 @@ if __name__ == '__main__':
             # part of the controller-pose freshness window.
             controller_pose_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)
 
+            if _diag is not None: _diag.mark("state_read")
             candidate_targets = None
             calibration = arm_calibration if args.arm == "G1_29" else None
             first_target = first_controller_targets if args.arm == "G1_29" else None
@@ -1023,6 +1038,7 @@ if __name__ == '__main__':
             if cycle.target_accepted:
                 logger_mp.debug(f"ik:\t{round(time.time() - time_ik_start, 6)}")
 
+            if _diag is not None: _diag.mark("arm_cycle")
             dex3_measured_q = None
             dex3_commanded_q = None
             dex3_metadata = None
@@ -1040,6 +1056,8 @@ if __name__ == '__main__':
                 if arm_request_id is not None
                 else "arm_command_publication_unavailable"
             )
+            if _diag is not None: _diag.mark("hand")
+            _loop_timing, _loop_diag = (_diag.pose_fields(arm_rate_limiter, arm_calibration) if _diag is not None else (None, None))
             tracking_wall_clock = time.time()
             emit_pose_record_best_effort(
                 lambda record: arm_publication_telemetry.emit_cycle(record, arm_ctrl),
@@ -1075,7 +1093,10 @@ if __name__ == '__main__':
                 drop_count=pose_telemetry_sink.drop_count,
                 now=time.monotonic(),
                 locomotion=stick_log,
+                loop_timing=_loop_timing,
+                loop_diag=_loop_diag,
             )
+            if _diag is not None: _diag.mark("telemetry")
 
             # record data
             if args.record:
@@ -1232,10 +1253,14 @@ if __name__ == '__main__':
                     else:
                         recorder.add_item(colors=colors, depths=depths, states=states, actions=actions)
 
+            if _diag is not None: _diag.mark("record")
             current_time = time.time()
             time_elapsed = current_time - start_time
             sleep_time = max(0, (1 / args.frequency) - time_elapsed)
             time.sleep(sleep_time)
+            if _diag is not None:
+                _diag.mark("sleep")
+                _diag.cycle_end(tele_data.controller_sample_timestamp, arm_rate_limiter, arm_calibration)
             logger_mp.debug(f"main process sleep: {sleep_time}")
 
     except KeyboardInterrupt:
@@ -1325,6 +1350,11 @@ if __name__ == '__main__':
         except Exception as e:
             _log_best_effort("error", f"Failed to close televuer wrapper: {e}")
 
+        if loop_diag is not None:
+            try:
+                loop_diag.close()
+            except Exception:
+                pass
         _close_telemetry_best_effort(pose_telemetry_sink, "pose telemetry sink")
         _close_telemetry_best_effort(status_sink, "teleop status sink")
 

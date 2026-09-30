@@ -263,6 +263,8 @@ def build_pose_record(
     drop_count: int = 0,
     now: float | None = None,
     locomotion: Mapping[str, object] | None = None,
+    loop_timing: Mapping[str, object] | None = None,
+    loop_diag: Mapping[str, object] | None = None,
 ) -> dict:
     """Build a serializable snapshot without doing JSON or filesystem I/O."""
     monotonic_timestamp = _finite_timestamp(timestamp_monotonic)
@@ -407,6 +409,11 @@ def build_pose_record(
     }
     if isinstance(locomotion, Mapping):
         record["locomotion"] = _thaw_payload(_freeze_payload(locomotion))
+    # loop_timing: ms per stage of the PREVIOUS completed cycle (this one is still running).
+    if isinstance(loop_timing, Mapping):
+        record["loop_timing"] = dict(loop_timing)
+    if isinstance(loop_diag, Mapping):
+        record["loop_diag"] = _thaw_payload(_freeze_payload(loop_diag))
     return record
 
 
