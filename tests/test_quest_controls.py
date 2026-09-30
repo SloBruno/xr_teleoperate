@@ -132,8 +132,9 @@ def test_loco_wrapper_passes_exact_native_tuple_to_client(monkeypatch):
         def Init(self):
             pass
 
-        def Move(self, vx, vy, vyaw, continous_move):
-            calls.append((vx, vy, vyaw, continous_move))
+        def SetVelocity(self, vx, vy, vyaw, duration):
+            calls.append((vx, vy, vyaw, duration))
+            return 0
 
     loco_module = types.ModuleType("unitree_sdk2py.g1.loco.g1_loco_client")
     loco_module.LocoClient = FakeLocoClient
@@ -156,9 +157,63 @@ def test_loco_wrapper_passes_exact_native_tuple_to_client(monkeypatch):
     wrapper = switcher_module.LocoClientWrapper()
     locomotion = joystick_to_locomotion((0.25, -0.75), (-0.5, 0.0))
 
-    wrapper.Move(*locomotion)
+    assert wrapper.Move(*locomotion) == 0
 
-    assert calls == [(*locomotion, False)]
+    # duration=1.0 is the SDK's Move(continous_move=False) contract, but the
+    # RPC status is now observable instead of discarded.
+    assert calls == [(*locomotion, 1.0)]
+    assert wrapper.last_move_code == 0
+
+
+def _load_switcher(monkeypatch, client_cls):
+    loco_module = types.ModuleType("unitree_sdk2py.g1.loco.g1_loco_client")
+    loco_module.LocoClient = client_cls
+    motion_module = types.ModuleType("unitree_sdk2py.comm.motion_switcher.motion_switcher_client")
+    motion_module.MotionSwitcherClient = object
+    channel_module = types.ModuleType("unitree_sdk2py.core.channel")
+    channel_module.ChannelFactoryInitialize = object
+    for name, mod in {
+        "unitree_sdk2py": types.ModuleType("unitree_sdk2py"),
+        "unitree_sdk2py.core": types.ModuleType("unitree_sdk2py.core"),
+        "unitree_sdk2py.core.channel": channel_module,
+        "unitree_sdk2py.g1": types.ModuleType("unitree_sdk2py.g1"),
+        "unitree_sdk2py.g1.loco": types.ModuleType("unitree_sdk2py.g1.loco"),
+        "unitree_sdk2py.g1.loco.g1_loco_client": loco_module,
+        "unitree_sdk2py.comm": types.ModuleType("unitree_sdk2py.comm"),
+        "unitree_sdk2py.comm.motion_switcher": types.ModuleType("unitree_sdk2py.comm.motion_switcher"),
+        "unitree_sdk2py.comm.motion_switcher.motion_switcher_client": motion_module,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+    return importlib.reload(importlib.import_module("teleop.utils.motion_switcher"))
+
+
+def test_loco_wrapper_surfaces_nonzero_rpc_status_without_raising(monkeypatch):
+    class FakeLocoClient:
+        def SetTimeout(self, timeout): pass
+        def Init(self): pass
+        def SetVelocity(self, vx, vy, vyaw, duration): return 3104
+
+    wrapper = _load_switcher(monkeypatch, FakeLocoClient).LocoClientWrapper()
+
+    assert wrapper.Move(0.1, 0.0, 0.0) == 3104
+    assert wrapper.last_move_code == 3104
+    assert wrapper.nonzero_move_codes == 1
+
+
+def test_loco_wrapper_reads_fsm_id_and_flags_modes_that_cannot_walk(monkeypatch):
+    class FakeLocoClient:
+        fsm = 500
+        def SetTimeout(self, timeout): pass
+        def Init(self): pass
+        def _Call(self, api_id, parameter):
+            assert api_id == 7001
+            return 0, '{"data": %d}' % FakeLocoClient.fsm
+
+    mod = _load_switcher(monkeypatch, FakeLocoClient)
+    wrapper = mod.LocoClientWrapper()
+    assert wrapper.read_fsm_id() == 500
+    assert mod.is_walk_fsm(500) and mod.is_walk_fsm(501)
+    assert not mod.is_walk_fsm(1) and not mod.is_walk_fsm(801) and not mod.is_walk_fsm(None)
 
 
 def test_controller_lifecycle_edges_use_the_right_controller_and_no_damping():
