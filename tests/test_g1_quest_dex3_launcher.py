@@ -59,8 +59,8 @@ class HeadOnlyModeLauncherTest(unittest.TestCase):
     def setUp(self):
         self.source = LAUNCHER.read_text(encoding="utf-8")
 
-    def test_mode_is_explicit_env_with_default_both_cameras(self):
-        self.assertIn('TELEIMAGER_CAMERA_MODE=${TELEIMAGER_CAMERA_MODE:-both}', self.source)
+    def test_mode_defaults_to_auto_detection(self):
+        self.assertIn('TELEIMAGER_CAMERA_MODE=${TELEIMAGER_CAMERA_MODE:-auto}', self.source)
         self.assertIn('both|head|any|single', self.source)
         self.assertIn("unsupported TELEIMAGER_CAMERA_MODE", self.source)
 

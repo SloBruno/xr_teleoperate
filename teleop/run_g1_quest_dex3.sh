@@ -13,7 +13,7 @@ export XR_TELEOP_CERT=/home/unitree/.config/xr_teleoperate/cert.pem
 export XR_TELEOP_KEY=/home/unitree/.config/xr_teleoperate/key.pem
 
 teleimager_dir="$repo/teleop/teleimager"
-teleimager_state_dir=/home/unitree/.local/state/xr_teleoperate
+teleimager_state_dir=${TELEIMAGER_STATE_DIR:-/home/unitree/.local/state/xr_teleoperate}
 teleimager_pid_file="$teleimager_state_dir/teleimager.pid"
 teleimager_log="$teleimager_state_dir/teleimager.log"
 teleimager_lock="$teleimager_state_dir/teleimager.lock"
@@ -21,25 +21,62 @@ teleimager_host=${TELEIMAGER_HOST:-127.0.0.1}
 TELEIMAGER_TIMEOUT_S=${TELEIMAGER_TIMEOUT_S:-30}
 TELEIMAGER_LOCK_TIMEOUT_S=${TELEIMAGER_LOCK_TIMEOUT_S:-10}
 teleimager_python=${TELEIMAGER_PYTHON:-/home/unitree/miniconda3/envs/tv/bin/python}
-# Explicit camera mode. Default "both" = head + left wrist (vertical layout).
-# "head" = head camera only; the wrist camera is deliberately disabled.
-# "any" (alias "single") = whichever single camera (head or left wrist) is
-#   connected now, published as the main (head) image:
+# Camera mode. Default "auto": detect the connected RealSense cameras
+# (pyrealsense2, read-only) and pick the mode by itself:
+#   2 cameras (head + left wrist) -> "both"  (layout vertical)
+#   1 camera (either one)         -> "any"   (published as head_camera, layout head)
+#   0 cameras / detection error   -> clear failure, nothing is started
+# Explicit overrides keep working: both | head | any (alias "single").
 #   TELEIMAGER_CAMERA_MODE=any bash teleop/run_g1_quest_dex3.sh
-TELEIMAGER_CAMERA_MODE=${TELEIMAGER_CAMERA_MODE:-both}
+TELEIMAGER_CAMERA_MODE=${TELEIMAGER_CAMERA_MODE:-auto}
+TELEIMAGER_DETECT_TIMEOUT_S=${TELEIMAGER_DETECT_TIMEOUT_S:-15}
 teleimager_mode_file="$teleimager_state_dir/teleimager.mode"
+teleimager_source_file="$teleimager_state_dir/teleimager.source"
 # Derived head-only server config lives in state, never inside the submodule.
 export TELEIMAGER_HEAD_ONLY_CONFIG="$teleimager_state_dir/cam_config_server.head_only.yaml"
 [[ "$TELEIMAGER_CAMERA_MODE" == single ]] && TELEIMAGER_CAMERA_MODE=any
-export TELEIMAGER_CAMERA_MODE
-export TELEIMAGER_CAMERA_SOURCE=head
 case "$TELEIMAGER_CAMERA_MODE" in
-    both|head|any|single) ;;
+    auto|both|head|any) ;;
     *)
-        echo "unsupported TELEIMAGER_CAMERA_MODE='$TELEIMAGER_CAMERA_MODE' (use both|head|any|single)" >&2
+        echo "unsupported TELEIMAGER_CAMERA_MODE='$TELEIMAGER_CAMERA_MODE' (use auto|both|head|any|single)" >&2
         exit 2
         ;;
 esac
+export TELEIMAGER_CAMERA_SOURCE=head
+
+# Detection runs in its own session with a short timeout and never inherits
+# the launcher lock (FD 9). Any failure (exception, timeout, import error) is a
+# clear failure: no guessing.
+detect_cameras() {
+    local rc=0
+    detected=$(cd "$repo" && timeout -k 2 "$TELEIMAGER_DETECT_TIMEOUT_S" setsid "$teleimager_python" -s -m teleop.utils.teleimager_head_only_server --detect 9>&-) || rc=$?
+    if (( rc == 3 )); then
+        echo "TELEIMAGER: nenhuma câmera conectada (cabeça 243122072230 / pulso 233622070789); não iniciando." >&2
+        exit 3
+    elif (( rc != 0 )); then
+        echo "TELEIMAGER: falha ao detectar câmeras (pyrealsense2 rc=$rc, timeout ${TELEIMAGER_DETECT_TIMEOUT_S}s); não iniciando." >&2
+        exit 4
+    fi
+    read -r any_source any_serial any_count <<<"$detected"
+    if [[ -z "${any_source:-}" || -z "${any_serial:-}" || -z "${any_count:-}" ]]; then
+        echo "TELEIMAGER: saída de detecção inválida ('$detected'); não iniciando." >&2
+        exit 4
+    fi
+}
+
+if [[ "$TELEIMAGER_CAMERA_MODE" == auto ]]; then
+    detect_cameras
+    if [[ "$any_count" == both ]]; then
+        TELEIMAGER_CAMERA_MODE=both
+    else
+        TELEIMAGER_CAMERA_MODE=any
+    fi
+    echo "TELEIMAGER: detecção automática -> modo $TELEIMAGER_CAMERA_MODE"
+elif [[ "$TELEIMAGER_CAMERA_MODE" == any ]]; then
+    detect_cameras
+fi
+export TELEIMAGER_CAMERA_MODE
+teleimager_source=""
 if [[ "$TELEIMAGER_CAMERA_MODE" == head ]]; then
     teleop_camera_layout=head
     echo "================================================================"
@@ -47,13 +84,8 @@ if [[ "$TELEIMAGER_CAMERA_MODE" == head ]]; then
     echo "================================================================"
 elif [[ "$TELEIMAGER_CAMERA_MODE" == any ]]; then
     teleop_camera_layout=head
-    # Detect which camera is connected right now (pyrealsense2, read-only).
-    if ! detected=$(cd "$repo" && "$teleimager_python" -s -m teleop.utils.teleimager_head_only_server --detect); then
-        echo "TELEIMAGER: nenhuma câmera conectada (cabeça 243122072230 / pulso 233622070789); não iniciando." >&2
-        exit 3
-    fi
-    read -r any_source any_serial any_count <<<"$detected"
     export TELEIMAGER_CAMERA_SOURCE="$any_source"
+    teleimager_source="$any_source $any_serial"
     if [[ "$any_source" == left_wrist ]]; then any_label="pulso esquerdo"; else any_label="cabeça"; fi
     echo "================================================================"
     echo "TELEIMAGER: modo CÂMERA ÚNICA ($any_label serial $any_serial publicada como imagem principal)"
@@ -66,7 +98,37 @@ elif [[ "$TELEIMAGER_CAMERA_MODE" == any ]]; then
     echo "================================================================"
 else
     teleop_camera_layout=vertical
+    echo "TELEIMAGER: modo DUAS CÂMERAS (cabeça + pulso esquerdo, layout vertical)"
 fi
+
+teleop_is_running() {
+    pgrep -f 'python.*[t]eleop_hand_and_arm\.py' >/dev/null 2>&1
+}
+
+# Stop the known Teleimager PID (SIGTERM, bounded wait) so it can be restarted
+# in the mode matching the cameras connected now. Only when no teleop runs.
+stop_teleimager_for_restart() {
+    local pid=$1 reason=$2
+    if teleop_is_running; then
+        echo "Teleimager PID $pid precisa reiniciar ($reason), mas há teleop_hand_and_arm.py em execução; recusando e não mexendo em nada. Encerre o teleop primeiro." >&2
+        return 1
+    fi
+    if ! tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q teleimager; then
+        echo "PID $pid do arquivo $teleimager_pid_file não parece ser o Teleimager; recusando matar." >&2
+        return 1
+    fi
+    echo "Reiniciando Teleimager PID $pid ($reason): SIGTERM e aguardando."
+    kill -TERM "$pid" 2>/dev/null || true
+    local stop_deadline=$((SECONDS + ${TELEIMAGER_STOP_TIMEOUT_S:-10}))
+    while kill -0 "$pid" 2>/dev/null && (( SECONDS < stop_deadline )); do
+        sleep 0.2
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "Teleimager PID $pid não encerrou após SIGTERM; recusando prosseguir." >&2
+        return 1
+    fi
+    rm -f "$teleimager_mode_file" "$teleimager_source_file" "$teleimager_pid_file"
+}
 
 teleimager_is_healthy() {
     # The probe runs in its own session and never inherits the launcher lock
@@ -133,25 +195,28 @@ ensure_teleimager() {
         return 1
     fi
 
-    local running_mode=both
+    local running_mode=both running_source="" running_pid="" restart_reason=""
     [[ -s "$teleimager_mode_file" ]] && running_mode=$(<"$teleimager_mode_file")
-    if teleimager_is_healthy; then
-        echo "Reusing healthy Teleimager (mode $TELEIMAGER_CAMERA_MODE)."
-        return 0
-    fi
-    if [[ -s "$teleimager_pid_file" ]] && kill -0 "$(<"$teleimager_pid_file")" 2>/dev/null \
-        && [[ "$running_mode" != "$TELEIMAGER_CAMERA_MODE" ]]; then
-        echo "Teleimager PID $(<"$teleimager_pid_file") is running in mode $running_mode, requested $TELEIMAGER_CAMERA_MODE; refusing a duplicate start. Stop it first." >&2
-        return 1
-    fi
-
-    if [[ -s "$teleimager_pid_file" ]]; then
-        local pid
-        pid=$(<"$teleimager_pid_file")
-        if kill -0 "$pid" 2>/dev/null; then
-            echo "Teleimager PID $pid is running but unhealthy; refusing a duplicate start." >&2
+    [[ -s "$teleimager_source_file" ]] && running_source=$(<"$teleimager_source_file")
+    [[ -s "$teleimager_pid_file" ]] && running_pid=$(<"$teleimager_pid_file")
+    if [[ -n "$running_pid" ]] && kill -0 "$running_pid" 2>/dev/null; then
+        if [[ "$running_mode" != "$TELEIMAGER_CAMERA_MODE" ]]; then
+            restart_reason="running in mode $running_mode, câmeras agora pedem $TELEIMAGER_CAMERA_MODE"
+        elif [[ -n "$teleimager_source" && -n "$running_source" && "$running_source" != "$teleimager_source" ]]; then
+            restart_reason="câmera mudou de '$running_source' para '$teleimager_source'"
+        fi
+        if [[ -n "$restart_reason" ]]; then
+            stop_teleimager_for_restart "$running_pid" "$restart_reason" || return 1
+        elif teleimager_is_healthy; then
+            echo "Reusing healthy Teleimager (mode $TELEIMAGER_CAMERA_MODE)."
+            return 0
+        else
+            echo "Teleimager PID $running_pid is running but unhealthy; refusing a duplicate start." >&2
             return 1
         fi
+    elif teleimager_is_healthy; then
+        echo "Reusing healthy Teleimager (mode $TELEIMAGER_CAMERA_MODE)."
+        return 0
     fi
 
     echo "Starting Teleimager from $teleimager_dir (mode $TELEIMAGER_CAMERA_MODE)."
@@ -160,6 +225,7 @@ ensure_teleimager() {
         server_module=teleop.utils.teleimager_head_only_server
     fi
     echo "$TELEIMAGER_CAMERA_MODE" >"$teleimager_mode_file"
+    if [[ -n "$teleimager_source" ]]; then echo "$teleimager_source" >"$teleimager_source_file"; else rm -f "$teleimager_source_file"; fi
     (
         cd "$teleimager_dir"
         setsid nohup "$teleimager_python" -s -m "$server_module" --rs --no-affinity \

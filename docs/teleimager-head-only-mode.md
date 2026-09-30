@@ -1,6 +1,24 @@
 # Teleimager: modo somente cabeça
 
-Padrão (inalterado): `bash teleop/run_g1_quest_dex3.sh` exige cabeça + pulso esquerdo e usa `--camera-layout vertical`.
+## Comando único (detecção automática)
+
+```bash
+bash teleop/run_g1_quest_dex3.sh
+```
+
+Sem variáveis. O padrão é `TELEIMAGER_CAMERA_MODE=auto`: o launcher detecta por pyrealsense2 (leitura, timeout `TELEIMAGER_DETECT_TIMEOUT_S`=15s, sessão própria, sem herdar o lock FD 9) as câmeras {cabeça 243122072230, pulso esquerdo 233622070789}:
+
+| Conectadas | Modo | Teleimager / probe | Teleop |
+|---|---|---|---|
+| 2 | `both` | servidor padrão; probe 60000/55555/55556 + 2 frames | `--camera-layout vertical` |
+| 1 (qualquer) | `any` | `head_camera` = a presente; probe 60000/55555 | `--camera-layout head` (aviso se for o pulso) |
+| 0, ou erro/timeout de detecção | — | falha clara (exit 3 / exit 4), nada é iniciado | — |
+
+Reinício seguro: se o Teleimager já no ar está em modo/câmera diferente do detectado agora (`teleimager.mode`, `teleimager.source`), o launcher o reinicia (SIGTERM no PID de `teleimager.pid` após checar que é o Teleimager, espera limitada, limpa mode/source/pid, sobe no modo certo) **somente se não houver `teleop_hand_and_arm.py` rodando**; com teleop ativo recusa com mensagem clara e não mexe em nada. Servidor saudável no mesmo modo/câmera é reutilizado.
+
+`TELEIMAGER_CAMERA_MODE=both|head|any` explícito continua valendo como override (sem auto-detecção no `both`/`head`).
+
+Descrição abaixo: modos explícitos (histórico). O "padrão" anterior (`both` rígido) agora é `auto`.
 
 Modo explícito, com uma só câmera (cabeça, RealSense 243122072230):
 

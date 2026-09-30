@@ -85,6 +85,9 @@ def detect_main():
     except RuntimeError as exc:
         print(f"TELEIMAGER: {exc}", file=sys.stderr)
         sys.exit(3)
+    except Exception as exc:  # pyrealsense2 missing/broken: never guess
+        print(f"TELEIMAGER: falha na detecção pyrealsense2: {exc!r}", file=sys.stderr)
+        sys.exit(4)
     print(f"{source} {serial} {'both' if both else 'single'}")
 
 
