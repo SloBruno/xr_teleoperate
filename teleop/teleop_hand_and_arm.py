@@ -30,7 +30,7 @@ from teleimager.image_client import ImageClient
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper, is_walk_fsm
-from teleop.utils.quest_controls import dispatch_joystick_locomotion, joystick_to_locomotion
+from teleop.utils.quest_controls import dispatch_joystick_locomotion, joystick_to_locomotion, stick_snapshot
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
 from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
 from teleop.utils.human_arm_calibration import HumanArmSweep, HumanCalibratedWristCalibrator
@@ -947,6 +947,15 @@ if __name__ == '__main__':
                 right_xy=tele_data.right_ctrl_thumbstickValue,
             )
 
+            # In-memory only (no I/O); raw sticks are logged before any shaping.
+            stick_log = stick_snapshot(
+                tele_data.left_ctrl_thumbstickValue,
+                tele_data.right_ctrl_thumbstickValue,
+                loco_wrapper if args.motion else None,
+            )
+            stick_log["dispatched_command"] = [float(v) for v in locomotion]
+            stick_log["controller_fresh"] = bool(controller_is_fresh)
+
             tracking_pressure_timestamps = (0.0, 0.0)
             if args.ee == "dex3":
                 left_pressure_sample, right_pressure_sample = hand_ctrl.get_pressure_samples()
@@ -957,6 +966,7 @@ if __name__ == '__main__':
                 controller_sample_timestamp=tele_data.controller_sample_timestamp,
                 motion_enabled=args.motion,
                 locomotion=locomotion,
+                stick=stick_log,
                 cameras={"head": camera_frame_is_usable(head_img), "left_wrist": camera_frame_is_usable(left_wrist_img)},
                 dex3_pressure_timestamps=tracking_pressure_timestamps,
             )
@@ -1046,6 +1056,7 @@ if __name__ == '__main__':
                 dex3_extended=dex3_extended,
                 drop_count=pose_telemetry_sink.drop_count,
                 now=time.monotonic(),
+                locomotion=stick_log,
             )
 
             # record data

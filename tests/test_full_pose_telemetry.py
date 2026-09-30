@@ -672,3 +672,15 @@ def test_jsonl_sink_close_is_bounded_when_writer_is_stuck(tmp_path):
     start = time.monotonic()
     sink.close()
     assert time.monotonic() - start < 0.2
+
+
+def test_build_record_carries_locomotion_stick_snapshot_only_when_given():
+    from teleop.utils.full_pose_telemetry import build_pose_record
+    kw = dict(timestamp=2.0, timestamp_monotonic=2.0, lifecycle="tracking",
+              controller_sample_timestamp=2.0, left_wrist_pose=None, right_wrist_pose=None,
+              measured_arm_q=np.zeros(14), commanded_arm_q=None, now=2.0)
+    assert "locomotion" not in build_pose_record(**kw)
+    snap = {"raw_left_xy": [0.0, -1.0], "command": [0.15, 0.0, 0.0]}
+    rec = build_pose_record(**kw, locomotion=snap)
+    assert rec["locomotion"] == snap
+    json.dumps(rec)

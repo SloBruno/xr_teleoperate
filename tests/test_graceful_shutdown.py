@@ -542,7 +542,7 @@ def _run_launcher(monkeypatch, *, raise_in_tele_data=None, press_q=True):
             G1_29_ArmIK=FakeArmIK, G1_23_ArmIK=FakeArmIK, H1_2_ArmIK=FakeArmIK, H1_ArmIK=FakeArmIK, H2_ArmIK=FakeArmIK),
         "teleop.utils.episode_writer": types.SimpleNamespace(EpisodeWriter=object),
         "teleop.utils.ipc": types.SimpleNamespace(IPC_Server=FakeIPCServer),
-        "teleop.utils.motion_switcher": types.SimpleNamespace(MotionSwitcher=object, LocoClientWrapper=lambda: None),
+        "teleop.utils.motion_switcher": types.SimpleNamespace(MotionSwitcher=object, LocoClientWrapper=lambda: types.SimpleNamespace(read_fsm_id=lambda: 500, last_move_code=None, nonzero_move_codes=0), is_walk_fsm=lambda fsm_id: False),
     }
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)

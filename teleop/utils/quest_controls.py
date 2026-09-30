@@ -38,6 +38,52 @@ def joystick_to_locomotion(left_xy, right_xy):
     )
 
 
+def _raw_axis(value):
+    try:
+        value = float(value)
+    except Exception:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _raw_xy(xy):
+    """Raw stick pair as JSON-safe floats (before clamp/deadzone/curve)."""
+    try:
+        x, y = xy
+    except Exception:
+        return None
+    return [_raw_axis(x), _raw_axis(y)]
+
+
+def _shaped_xy(xy):
+    try:
+        x, y = xy
+        return [_shape_stick_value(x), _shape_stick_value(y)]
+    except Exception:
+        return None
+
+
+def stick_snapshot(left_xy, right_xy, loco_wrapper=None):
+    """In-memory diagnostic record: raw sticks, shaped sticks, command, Move code.
+
+    Pure (no I/O) and never raises; the command is the unchanged
+    joystick_to_locomotion result.  Sign conventions are NOT altered here.
+    """
+    try:
+        command = list(joystick_to_locomotion(left_xy, right_xy))
+    except Exception:
+        command = None
+    return {
+        "raw_left_xy": _raw_xy(left_xy),
+        "raw_right_xy": _raw_xy(right_xy),
+        "shaped_left_xy": _shaped_xy(left_xy),
+        "shaped_right_xy": _shaped_xy(right_xy),
+        "command": command,
+        "last_move_code": getattr(loco_wrapper, "last_move_code", None),
+        "nonzero_move_codes": getattr(loco_wrapper, "nonzero_move_codes", None),
+    }
+
+
 def dispatch_joystick_locomotion(loco_wrapper, motion_enabled, controller_is_fresh, left_xy, right_xy):
     """Send only enabled, fresh joystick locomotion; stale input releases to zero."""
     locomotion = (0.0, 0.0, 0.0)

@@ -432,6 +432,9 @@ def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
         def __init__(self):
             moves.append("initialized")
 
+        def read_fsm_id(self):
+            return 500
+
         def Move(self, *locomotion):
             moves.append(locomotion)
             raise StopAfterMove
@@ -522,7 +525,7 @@ def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
             G1_29_ArmIK=FakeArmIK, G1_23_ArmIK=FakeArmIK, H1_2_ArmIK=FakeArmIK, H1_ArmIK=FakeArmIK, H2_ArmIK=FakeArmIK),
         "teleop.utils.episode_writer": types.SimpleNamespace(EpisodeWriter=object),
         "teleop.utils.ipc": types.SimpleNamespace(IPC_Server=FakeIPCServer),
-        "teleop.utils.motion_switcher": types.SimpleNamespace(MotionSwitcher=object, LocoClientWrapper=FakeLocoWrapper),
+        "teleop.utils.motion_switcher": types.SimpleNamespace(MotionSwitcher=object, LocoClientWrapper=FakeLocoWrapper, is_walk_fsm=lambda fsm_id: fsm_id in (500, 501)),
     }
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
@@ -536,3 +539,28 @@ def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
     runpy.run_path(str(script), run_name="__main__")
 
     assert moves == ["initialized", (0.0, 0.0, 0.0)]
+
+
+def test_stick_snapshot_records_raw_before_clamp_deadzone_and_curve():
+    snap = quest_controls.stick_snapshot((0.05, -2.0), (0.5, 0.3))
+    assert snap["raw_left_xy"] == [0.05, -2.0]  # not clamped
+    assert snap["raw_right_xy"] == [0.5, 0.3]
+    assert snap["shaped_left_xy"] == [0.0, -1.0]
+    assert snap["command"] == list(joystick_to_locomotion((0.05, -2.0), (0.5, 0.3)))
+    assert snap["command"][0] == 0.15  # sign unchanged: stick y<0 -> vx>0
+
+
+def test_stick_snapshot_nonfinite_raw_is_null_and_never_raises():
+    snap = quest_controls.stick_snapshot((float("nan"), float("inf")), (float("-inf"), 0.0))
+    assert snap["raw_left_xy"] == [None, None]
+    assert snap["raw_right_xy"] == [None, 0.0]
+    assert snap["command"] == [0.0, 0.0, 0.0]
+    assert quest_controls.stick_snapshot((0, 0), None)["raw_right_xy"] is None
+    assert quest_controls.stick_snapshot(object(), 5)["raw_left_xy"] is None
+
+
+def test_stick_snapshot_includes_wrapper_move_code_when_available():
+    wrapper = types.SimpleNamespace(last_move_code=3104, nonzero_move_codes=7)
+    snap = quest_controls.stick_snapshot((0, -1), (0, 0), loco_wrapper=wrapper)
+    assert snap["last_move_code"] == 3104 and snap["nonzero_move_codes"] == 7
+    assert quest_controls.stick_snapshot((0, -1), (0, 0))["last_move_code"] is None

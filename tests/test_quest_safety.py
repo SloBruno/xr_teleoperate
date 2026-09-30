@@ -55,3 +55,18 @@ def test_stale_left_and_right_triggers_neutralize_independently():
 def test_nonfinite_controller_timestamp_is_not_fresh():
     controller_sample_is_fresh = safety_api().controller_sample_is_fresh
     assert not controller_sample_is_fresh(math.nan, now=1.0)
+
+
+def test_status_locomotion_carries_stick_snapshot_and_survives_bad_snapshot():
+    from teleop.utils.teleop_status import TeleopStatusMonitor
+    out = []
+    mon = TeleopStatusMonitor(out.append)
+    snap = {"raw_left_xy": [0.0, -1.0], "command": [0.15, 0.0, 0.0], "last_move_code": 0}
+    s = mon.observe(now=10.0, lifecycle="tracking", controller_sample_timestamp=10.0,
+                    motion_enabled=True, locomotion=(0.15, 0.0, 0.0), stick=snap)
+    assert s["locomotion"]["command"] == [0.15, 0.0, 0.0]
+    assert s["locomotion"]["raw_left_xy"] == [0.0, -1.0]
+    assert s["locomotion"]["last_move_code"] == 0
+    s2 = TeleopStatusMonitor(out.append).observe(now=1.0, lifecycle="tracking",
+        controller_sample_timestamp=1.0, stick=5)
+    assert s2 is None or "command" in s2["locomotion"]

@@ -196,6 +196,7 @@ class TeleopStatusMonitor:
         locomotion: Sequence[float] = (0.0, 0.0, 0.0),
         cameras: Mapping[str, object] | None = None,
         dex3_pressure_timestamps: tuple[float, float] = (0.0, 0.0),
+        stick: Mapping[str, object] | None = None,
     ) -> dict | None:
         """Observe a control cycle and emit a heartbeat at the configured rate."""
         controller_age_ms = _age_ms(controller_sample_timestamp, now)
@@ -228,5 +229,9 @@ class TeleopStatusMonitor:
                 "right_age_ms": _age_ms(right_pressure_timestamp, now),
             },
         }
+        if isinstance(stick, Mapping):
+            for key, value in stick.items():
+                if key != "command":  # command stays the dispatched value
+                    status["locomotion"][key] = value
         self._emit_best_effort(status)
         return status

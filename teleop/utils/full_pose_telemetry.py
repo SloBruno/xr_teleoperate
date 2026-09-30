@@ -261,6 +261,7 @@ def build_pose_record(
     arm_joint_split: tuple[int, int] = (7, 7),
     drop_count: int = 0,
     now: float | None = None,
+    locomotion: Mapping[str, object] | None = None,
 ) -> dict:
     """Build a serializable snapshot without doing JSON or filesystem I/O."""
     monotonic_timestamp = _finite_timestamp(timestamp_monotonic)
@@ -366,7 +367,7 @@ def build_pose_record(
     if commanded_arm_q_reason is not None:
         for side in (arm_record["left"], arm_record["right"]):
             side["commanded_q_reason"] = str(commanded_arm_q_reason)
-    return {
+    record = {
         "schema_version": 1,
         "event": "full_pose_telemetry",
         "timestamp": float(timestamp),
@@ -403,6 +404,9 @@ def build_pose_record(
         "achieved_cartesian_pose_reason": "not_available_from_controller_state",
         "drop_count": max(0, int(drop_count)),
     }
+    if isinstance(locomotion, Mapping):
+        record["locomotion"] = _thaw_payload(_freeze_payload(locomotion))
+    return record
 
 
 @dataclass(frozen=True)
