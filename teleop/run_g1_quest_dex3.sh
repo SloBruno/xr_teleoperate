@@ -11,6 +11,18 @@ export CYCLONEDDS_URI='<CycloneDDS><Domain><General><Interfaces><NetworkInterfac
 export PYTHONPATH=$repo:$repo/teleop/televuer/src:$repo/teleop/teleimager/src:$repo/teleop/robot_control/dex-retargeting/src:/home/unitree/unitree_sdk2_python${PYTHONPATH:+:${PYTHONPATH}}
 export XR_TELEOP_CERT=/home/unitree/.config/xr_teleoperate/cert.pem
 export XR_TELEOP_KEY=/home/unitree/.config/xr_teleoperate/key.pem
+source "$repo/teleop/lib/vuer_connection.sh"
+
+# Select a currently routable address before starting any service. The certificate
+# is checked against that exact address to fail closed rather than advertising a
+# WebSocket URL that Quest will reject during TLS verification.
+if ! xr_teleop_select_vuer_ip; then
+    exit 1
+fi
+if ! xr_teleop_verify_cert_san "$XR_TELEOP_CERT" "$XR_TELEOP_VUER_IP"; then
+    exit 1
+fi
+echo "Quest Vuer URL: $(xr_teleop_quest_url "$XR_TELEOP_VUER_IP")"
 
 teleimager_dir="$repo/teleop/teleimager"
 teleimager_state_dir=/home/unitree/.local/state/xr_teleoperate
