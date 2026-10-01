@@ -30,7 +30,7 @@ from teleimager.image_client import ImageClient
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper, is_walk_fsm
-from teleop.utils.quest_controls import (dispatch_joystick_locomotion, joystick_to_locomotion, stick_snapshot,
+from teleop.utils.quest_controls import (LocomotionRamp, dispatch_joystick_locomotion, joystick_to_locomotion, stick_snapshot,
                                          resolve_speed_caps, speed_cap_banner, loco_stick_is_fresh)
 from teleop.utils.loco_preflight import run_loco_preflight
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
@@ -433,7 +433,7 @@ if __name__ == '__main__':
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
-    parser.add_argument('--walk-speed-cap', type=float, default=None, help='Walk cap m/s (default 0.5, hard max 0.6; env G1_WALK_SPEED_CAP)')
+    parser.add_argument('--walk-speed-cap', type=float, default=None, help='Walk cap m/s (default 0.3, hard max 0.6; env G1_WALK_SPEED_CAP)')
     parser.add_argument('--turn-rate-cap', type=float, default=None, help='Turn cap rad/s (default 0.3, hard max 1.0; env G1_TURN_RATE_CAP)')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
@@ -449,6 +449,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     walk_cap, turn_cap = resolve_speed_caps(args.walk_speed_cap, args.turn_rate_cap, os.environ)
+    loco_ramp = LocomotionRamp()  # accel slew + pulse debounce; safety zero bypasses it
     logger_mp.debug(f"args: {args}")
     outputs_activated = False
     hand_outputs_activated = False
@@ -995,6 +996,7 @@ if __name__ == '__main__':
                 right_xy=tele_data.right_ctrl_thumbstickValue,
                 walk_cap=walk_cap,
                 turn_cap=turn_cap,
+                ramp=loco_ramp,
             )
 
             # In-memory only (no I/O); raw sticks are logged before any shaping.
@@ -1004,6 +1006,9 @@ if __name__ == '__main__':
                 loco_wrapper if args.motion else None,
             )
             stick_log["dispatched_command"] = [float(v) for v in locomotion]
+            stick_log["raw_command"] = loco_ramp.last["raw_command"]      # post-curve, pre-ramp
+            stick_log["ramp_command"] = loco_ramp.last["ramp_command"]    # post-ramp/debounce
+            stick_log["ramp_reason"] = loco_ramp.last["reason"]
             stick_log["controller_fresh"] = bool(controller_is_fresh)
             if robot_monitor is not None:
                 stick_log["robot_state"] = robot_monitor.snapshot()

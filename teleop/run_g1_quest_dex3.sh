@@ -16,7 +16,7 @@ export XR_TELEOP_KEY=/home/unitree/.config/xr_teleoperate/key.pem
 # linearSpeed 0.5 m/s, angularSpeed 0.3 rad/s). Passed explicitly to the
 # teleop; override with G1_WALK_SPEED_CAP / G1_TURN_RATE_CAP. The Python code
 # keeps its hard limits (0.6 m/s, 1.0 rad/s) and validation.
-walk_speed_cap=${G1_WALK_SPEED_CAP:-0.5}
+walk_speed_cap=${G1_WALK_SPEED_CAP:-0.3}
 turn_rate_cap=${G1_TURN_RATE_CAP:-0.3}
 
 teleimager_dir="$repo/teleop/teleimager"

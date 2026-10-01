@@ -11,12 +11,19 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from teleop.utils.quest_controls import joystick_to_locomotion
 from teleop.utils import quest_controls
+
+# Curve/mapping tests use an explicit 0.5 m/s cap (the historical default) so the
+# stick math stays covered independent of the operator default (now 0.3).
+_CURVE_CAP = 0.5
+
+
+def joystick_to_locomotion(left_xy, right_xy, walk_cap=_CURVE_CAP, turn_cap=quest_controls.MIN_OPERATOR_TURN_RATE_RADPS):
+    return quest_controls.joystick_to_locomotion(left_xy, right_xy, walk_cap, turn_cap)
 
 
 def test_joystick_locomotion_uses_minimum_reviewed_operator_speed_caps():
-    assert quest_controls.MIN_OPERATOR_WALK_SPEED_MPS == 0.5
+    assert quest_controls.MIN_OPERATOR_WALK_SPEED_MPS == 0.3
     assert quest_controls.MIN_OPERATOR_TURN_RATE_RADPS == 0.3
 
     assert joystick_to_locomotion((0.0, 1.0), (1.0, 0.0)) == (-0.5, 0.0, -0.3)
@@ -24,8 +31,8 @@ def test_joystick_locomotion_uses_minimum_reviewed_operator_speed_caps():
 
 
 def test_full_forward_stick_uses_minimum_physical_walk_cap():
-    # Default = BotBrain frontend G1 profile (0.5 m/s, 0.3 rad/s).
-    assert joystick_to_locomotion((0.0, -1.0), (0.0, 0.0)) == (0.5, 0.0, 0.0)
+    # Operator default = 0.3 m/s (lowered from 0.5 after the 0.5 m/s session).
+    assert quest_controls.joystick_to_locomotion((0.0, -1.0), (0.0, 0.0)) == (0.3, 0.0, 0.0)
 
 
 def test_locomotion_dispatch_preserves_enable_and_stale_release_to_zero_gates():
@@ -54,8 +61,8 @@ def test_locomotion_dispatch_preserves_enable_and_stale_release_to_zero_gates():
     assert quest_controls.dispatch_joystick_locomotion(
         fresh, motion_enabled=True, controller_is_fresh=True,
         left_xy=(-1.0, -1.0), right_xy=(-1.0, 0.0),
-    ) == (0.5, 0.5, 0.3)
-    assert fresh.calls == [(0.5, 0.5, 0.3)]
+    ) == (0.3, 0.3, 0.3)
+    assert fresh.calls == [(0.3, 0.3, 0.3)]
 
 
 @pytest.mark.parametrize(
@@ -558,8 +565,8 @@ def test_stick_snapshot_records_raw_before_clamp_deadzone_and_curve():
     assert snap["raw_left_xy"] == [0.05, -2.0]  # not clamped
     assert snap["raw_right_xy"] == [0.5, 0.3]
     assert snap["shaped_left_xy"] == [0.0, -1.0]
-    assert snap["command"] == list(joystick_to_locomotion((0.05, -2.0), (0.5, 0.3)))
-    assert snap["command"][0] == 0.5  # sign unchanged: stick y<0 -> vx>0
+    assert snap["command"] == list(quest_controls.joystick_to_locomotion((0.05, -2.0), (0.5, 0.3)))
+    assert snap["command"][0] == 0.3  # sign unchanged: stick y<0 -> vx>0
 
 
 def test_stick_snapshot_nonfinite_raw_is_null_and_never_raises():

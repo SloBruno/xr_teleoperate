@@ -35,7 +35,8 @@ def test_stale_joystick_is_replaced_with_exact_zero_velocity_input():
 
 def test_fresh_hand_mode_sticks_remain_available_for_move_mapping():
     fresh_controller_value = safety_api().fresh_controller_value
-    from teleop.utils.quest_controls import joystick_to_locomotion
+    from teleop.utils.quest_controls import joystick_to_locomotion as _jtl
+    joystick_to_locomotion = lambda l, r: _jtl(l, r, walk_cap=0.5)  # explicit cap; default is now 0.3
 
     left = fresh_controller_value((0.8, -0.4), sample_timestamp=1.0, now=1.1)
     right = fresh_controller_value((0.0, 0.0), sample_timestamp=1.0, now=1.1)

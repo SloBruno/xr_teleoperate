@@ -186,7 +186,7 @@ def test_dispatch_none_wrapper_when_disabled_still_ok():
 
 
 def test_stick_curve_and_caps_unchanged():
-    assert quest_controls.joystick_to_locomotion((0.0, -1.0), (-1.0, 0.0)) == (0.5, 0.0, 0.3)
+    assert quest_controls.joystick_to_locomotion((0.0, -1.0), (-1.0, 0.0)) == (0.3, 0.0, 0.3)
 
 
 # --- robot state monitor -----------------------------------------------------

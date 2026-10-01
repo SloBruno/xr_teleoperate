@@ -133,22 +133,22 @@ def test_continuous_gait_false_failure_is_not_fatal():
 # --- caps ------------------------------------------------------------------------
 
 def test_defaults_are_botbrain_frontend_profile():
-    assert quest_controls.MIN_OPERATOR_WALK_SPEED_MPS == 0.5
+    assert quest_controls.MIN_OPERATOR_WALK_SPEED_MPS == 0.3
     assert quest_controls.MIN_OPERATOR_TURN_RATE_RADPS == 0.3
     assert quest_controls.MAX_WALK_SPEED_CAP_MPS == 0.6 and quest_controls.MAX_TURN_RATE_CAP_RADPS == 1.0
-    assert quest_controls.joystick_to_locomotion((0.0, -1.0), (0.0, 0.0)) == (0.5, 0.0, 0.0)
+    assert quest_controls.joystick_to_locomotion((0.0, -1.0), (0.0, 0.0)) == (0.3, 0.0, 0.0)
 
 
 def test_cap_scales_full_stick_and_keeps_curve():
     cmd = quest_controls.joystick_to_locomotion((0.0, -1.0), (1.0, 0.0), walk_cap=0.35, turn_cap=0.2)
     assert cmd == (0.35, 0.0, -0.2)
     half = quest_controls.joystick_to_locomotion((0.0, -0.56), (0, 0), walk_cap=0.30)[0]
-    base = quest_controls.joystick_to_locomotion((0.0, -0.56), (0, 0))[0]
+    base = quest_controls.joystick_to_locomotion((0.0, -0.56), (0, 0), walk_cap=0.5)[0]
     assert half == pytest.approx(base * 0.6)
 
 
 def test_resolve_caps_defaults_env_and_validation():
-    assert quest_controls.resolve_speed_caps(None, None, {}) == (0.5, 0.3)
+    assert quest_controls.resolve_speed_caps(None, None, {}) == (0.3, 0.3)
     assert quest_controls.resolve_speed_caps(None, None, {"G1_WALK_SPEED_CAP": "0.25", "G1_TURN_RATE_CAP": "0.4"}) == (0.25, 0.4)
     assert quest_controls.resolve_speed_caps(0.15, 0.1, {"G1_WALK_SPEED_CAP": "0.25"}) == (0.15, 0.1)
     for bad in (0.0, -0.1, 0.61, float("nan"), float("inf")):
