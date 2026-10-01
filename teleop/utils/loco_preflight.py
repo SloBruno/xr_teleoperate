@@ -15,6 +15,13 @@ def run_loco_preflight(wrapper, sleep=time.sleep, attempts=SPEED_MODE_ATTEMPTS):
     checked zero Move.  Returns dict with loco_enabled and refusal_reason."""
     res = {"loco_enabled": False, "refusal_reason": None, "message": "", "fsm_id": None,
            "set_speed_mode_rc": None, "set_speed_mode_ok": None, "preflight_ok": False}
+    res["backend"] = getattr(wrapper, "backend", "setvelocity")
+    berr = getattr(wrapper, "backend_error", None)
+    if berr:   # fail-safe: no silent fallback to another backend
+        res["refusal_reason"] = f"backend_unavailable:{berr}"
+        res["message"] = (f"Backend {res['backend']} indisponível ({berr}); locomoção DESABILITADA. "
+                          "Use G1_LOCO_BACKEND=setvelocity para forçar o backend antigo.")
+        return res
     fsm = wrapper.read_fsm_id(timeout=0.3)
     res["fsm_id"] = fsm
     if fsm is None:
@@ -27,6 +34,16 @@ def run_loco_preflight(wrapper, sleep=time.sleep, attempts=SPEED_MODE_ATTEMPTS):
                           "Enter Regular mode with R1+X on the R3 remote and restart.")
         return res
     rc = None
+    if res["backend"] == "wirelesscontroller":
+        # SetSpeedMode/ContinuousGait are RPCs of the SetVelocity path; the
+        # joystick-state backend does not need them (not called, cannot fail).
+        zrc = wrapper.checked_zero()
+        if zrc != 0:
+            res["refusal_reason"] = f"zero_publish_failed:{zrc}"
+            res["message"] = f"Zero publish on rt/wirelesscontroller failed (rc={zrc}); locomotion disabled."
+            return res
+        res.update(loco_enabled=True, preflight_ok=True, message=f"FSM {fsm} Regular walk; preflight ok (wirelesscontroller).")
+        return res
     for i in range(max(1, attempts)):
         rc = wrapper.set_speed_mode(0)
         if rc == 0:

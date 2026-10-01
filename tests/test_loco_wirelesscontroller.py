@@ -258,8 +258,90 @@ def test_wireless_telemetry_exposed_by_wrapper(monkeypatch):
 
 # --- CLI / default -------------------------------------------------------------
 
-def test_cli_default_is_setvelocity_and_choice_present():
+def test_cli_default_is_wirelesscontroller_and_choice_present():
     src = MAIN.read_text()
     assert "--loco-backend" in src
     assert "choices=['setvelocity', 'wirelesscontroller']" in src
-    assert "default='setvelocity'" in src.split("--loco-backend")[1].split("\n")[0]
+    assert "default='wirelesscontroller'" in src.split("--loco-backend")[1].split("\n")[0]
+
+
+def test_launcher_defaults_to_wirelesscontroller_and_passes_flag():
+    sh = (MAIN.parent / "run_g1_quest_dex3.sh").read_text()
+    assert "loco_backend=${G1_LOCO_BACKEND:-wirelesscontroller}" in sh
+    assert '--loco-backend "$loco_backend"' in sh
+    assert 'echo "Backend de caminhada: ${loco_backend}"' in sh
+
+
+def test_wireless_init_failure_disables_locomotion_without_fallback(monkeypatch):
+    from teleop.utils.loco_preflight import run_loco_preflight
+    ms = _load_switcher(monkeypatch, FakeClient)
+
+    def boom():
+        raise ImportError("no WirelessController_ IDL")
+    monkeypatch.setattr("teleop.utils.loco_wireless.make_dds_writer", boom)
+    w = ms.LocoClientWrapper(backend="wirelesscontroller")
+    assert w.backend == "wirelesscontroller" and w.backend_error
+    res = run_loco_preflight(w)
+    assert res["loco_enabled"] is False
+    assert res["refusal_reason"].startswith("backend_unavailable:")
+    w.start_move_sender()
+    assert w.wireless is None and w.sender is None
+    assert w.client.calls == [] and w._cfg_client is None   # no SetVelocity/SetSpeedMode fallback
+    assert w.backend_telemetry()["backend_error"]
+
+
+def test_forced_setvelocity_still_uses_rpc_preflight(monkeypatch):
+    ms = _load_switcher(monkeypatch, FakeClient)
+    w = ms.LocoClientWrapper(backend="setvelocity")
+    assert w.backend_error is None and w.wireless is None
+
+
+def test_wireless_preflight_skips_speedmode_and_gait(monkeypatch):
+    from teleop.utils.loco_preflight import run_loco_preflight
+    ms = _load_switcher(monkeypatch, FakeClient)
+    w = ms.LocoClientWrapper(backend="wirelesscontroller", wireless_writer=lambda *a: True)
+    w.read_fsm_id = lambda timeout=0.3: 500
+    w.set_speed_mode = lambda m=0: (_ for _ in ()).throw(AssertionError("SetSpeedMode called"))
+    w.set_balance_mode = lambda m=0: (_ for _ in ()).throw(AssertionError("ContinuousGait called"))
+    res = run_loco_preflight(w)
+    assert res["loco_enabled"] and res["backend"] == "wirelesscontroller"
+
+
+def test_wireless_preflight_still_refuses_non_regular_fsm(monkeypatch):
+    from teleop.utils.loco_preflight import run_loco_preflight
+    ms = _load_switcher(monkeypatch, FakeClient)
+    w = ms.LocoClientWrapper(backend="wirelesscontroller", wireless_writer=lambda *a: True)
+    w.read_fsm_id = lambda timeout=0.3: 801
+    assert not run_loco_preflight(w)["loco_enabled"]
+
+
+def test_shutdown_burst_of_three_zeros_even_after_exception(monkeypatch):
+    pub, sent, clk = make()
+    pub.set_command(0.3, 0, 0)
+    tick(pub, clk, 5)
+    n = len(sent)
+    pub.stop(burst_gap_s=0)
+    assert sent[n:] == [(0.0, 0.0, 0.0, 0.0, 0)] * 3
+
+
+def test_writer_exception_never_propagates_and_counts_failures():
+    def bad(*a):
+        raise RuntimeError("dds down")
+    pub = WirelessControllerPublisher(bad, clock=Clock())
+    assert pub.zero_now("x") is False
+    pub.stop(burst_gap_s=0)
+    assert pub.telemetry()["write_failures"] >= 4
+
+
+def test_idle_publishes_zero_continuously_and_telemetry_fields():
+    pub, sent, clk = make()
+    tick(pub, clk, 5)
+    assert sent == [(0.0, 0.0, 0.0, 0.0, 0)] * 5
+    t = pub.telemetry()
+    assert t["actual_hz"] and abs(t["actual_hz"] - 20.0) < 1e-6
+    assert {"backend", "published", "write_failures", "actual_hz"} <= set(t)
+
+
+def test_teleop_logs_loco_enabled_and_reason():
+    src = MAIN.read_text()
+    assert 'stick_log["loco_enabled"]' in src and 'stick_log["loco_disabled_reason"]' in src

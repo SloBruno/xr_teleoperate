@@ -61,6 +61,15 @@ class LocoClientWrapper:
         self.sender = None
         self.watchdog_stop_code = None
         self._cfg_client = None
+        # wirelesscontroller is the default walking backend; if its publisher
+        # cannot be created we NEVER fall back to another backend silently:
+        # backend_error makes the preflight disable locomotion with the reason.
+        self.backend_error = None
+        if backend == "wirelesscontroller":
+            try:
+                self._ensure_wireless()
+            except Exception as e:
+                self.backend_error = f"{type(e).__name__}: {e}"
 
     # --- BotBrain-style Regular-mode walking (FSM 500/501) -------------------
     # Config RPCs use a separate client with a short BLOCKING timeout so the
@@ -84,10 +93,14 @@ class LocoClientWrapper:
 
     def backend_telemetry(self):
         if self.wireless is not None:
-            return self.wireless.telemetry()
-        return {"backend": self.backend}
+            t = self.wireless.telemetry()
+            t["backend_error"] = self.backend_error
+            return t
+        return {"backend": self.backend, "backend_error": self.backend_error} if self.backend_error else {"backend": self.backend}
 
     def _ensure_wireless(self):
+        if self.backend_error:
+            raise RuntimeError(self.backend_error)
         if self.wireless is None:
             from teleop.utils.loco_wireless import WirelessControllerPublisher, make_dds_writer
             writer = self._wireless_writer or make_dds_writer()
@@ -96,11 +109,16 @@ class LocoClientWrapper:
 
     def checked_zero(self):
         if self.backend == "wirelesscontroller":
-            return 0 if self._ensure_wireless().zero_now("preflight") else 3104
+            try:
+                return 0 if self._ensure_wireless().zero_now("preflight") else 3104
+            except Exception:
+                return 3104
         return self._cfg().SetVelocity(0.0, 0.0, 0.0, 1.0)
 
     def start_move_sender(self, move_timeout=0.2):
         if self.backend == "wirelesscontroller":
+            if self.backend_error:
+                return   # locomotion disabled; nothing is published
             self._ensure_wireless().start()   # dedicated 20 Hz thread, zeros included
             return
         from teleop.utils.loco_preflight import LatestMoveSender

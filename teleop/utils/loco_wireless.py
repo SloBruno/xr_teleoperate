@@ -12,7 +12,14 @@ sends Damp.  Nothing here touches DDS unless a real writer is injected.
 Robot mapping (reference teleop.py): robot reads [ly, -lx, -rx] -> [vx, vy,
 omega], scaled by its own limit (1.0 m/s forward by default), so
 ly = vx / 1.0, lx = -vy / 1.0, rx = -omega / ROBOT_MAX_YAW_RADPS.
-ROBOT_MAX_YAW_RADPS is an ASSUMPTION (1.0) pending physical validation.
+Verified against unitree_webrtc_connect (examples/r1/data_channel/teleop/teleop.py):
+the robot's update_state() reads the message as [ly, -lx, -rx] -> [vx, vy, omega]
+and its forward limit is 1.0 m/s, so ly+ = forward, lx+ = right strafe,
+rx+ = clockwise turn (omega = -rx, i.e. counter-clockwise positive).  Our
+vy/omega are therefore negated exactly once (lx = -vy, rx = -omega); nothing else
+is inverted.  Scale sent = cap/1.0 m/s (linear) and cap/ROBOT_MAX_YAW_RADPS.
+ROBOT_MAX_YAW_RADPS = 1.0 is an ASSUMPTION (no yaw limit in the reference)
+pending physical validation.
 """
 import math
 import threading
@@ -151,12 +158,17 @@ class WirelessControllerPublisher:
         self._thread = threading.Thread(target=self._loop, name="loco-wireless", daemon=True)
         self._thread.start()
 
-    def stop(self):
+    def stop(self, burst=3, burst_gap_s=0.05):
+        """Join the thread, then a final burst of immediate zeros (like the
+        reference teleop.py: 3 publications), never raising."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(1.0)
         self._thread = None
-        self.zero_now("shutdown")
+        for i in range(max(1, int(burst))):
+            self.zero_now("shutdown")
+            if i < burst - 1 and burst_gap_s:
+                time.sleep(burst_gap_s)
 
     def telemetry(self):
         with self._lock:

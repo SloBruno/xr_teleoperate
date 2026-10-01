@@ -18,6 +18,9 @@ export XR_TELEOP_KEY=${XR_TELEOP_KEY:-/home/unitree/.config/xr_teleoperate/key.p
 # keeps its hard limits (0.6 m/s, 1.0 rad/s) and validation.
 walk_speed_cap=${G1_WALK_SPEED_CAP:-0.3}
 turn_rate_cap=${G1_TURN_RATE_CAP:-0.3}
+# Walking backend: rt/wirelesscontroller (continuous 20 Hz) by default;
+# G1_LOCO_BACKEND=setvelocity forces the legacy SetVelocity RPC.
+loco_backend=${G1_LOCO_BACKEND:-wirelesscontroller}
 
 teleimager_dir="$repo/teleop/teleimager"
 teleimager_state_dir=${TELEIMAGER_STATE_DIR:-/home/unitree/.local/state/xr_teleoperate}
@@ -273,6 +276,7 @@ fi
 cd "$repo/teleop"
 [[ -n "${XR_TELEOP_VUER_IP:-}" ]] && echo "Quest: https://vuer.ai?ws=wss://${XR_TELEOP_VUER_IP}:${XR_NET_PORT}&grid=False"
 echo "Teto de caminhada: ${walk_speed_cap} m/s linear, ${turn_rate_cap} rad/s angular (BotBrain g1-r1)"
+echo "Backend de caminhada: ${loco_backend}"
 # Optional XR video plane (unset = historical 1.0 m at 1.0 m). Ex.: XR_VIDEO_PLANE_HEIGHT=auto
 video_plane_args=()
 [[ -n "${XR_VIDEO_PLANE_HEIGHT:-}" ]] && video_plane_args+=(--video-plane-height "$XR_VIDEO_PLANE_HEIGHT")
@@ -285,4 +289,5 @@ exec "$teleimager_python" -s teleop_hand_and_arm.py \
   --camera-layout "$teleop_camera_layout" \
   --walk-speed-cap "$walk_speed_cap" \
   --turn-rate-cap "$turn_rate_cap" \
+  --loco-backend "$loco_backend" \
   ${video_plane_args[@]+"${video_plane_args[@]}"}
