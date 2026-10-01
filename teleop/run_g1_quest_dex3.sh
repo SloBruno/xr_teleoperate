@@ -266,6 +266,10 @@ if [[ "${G1_LAUNCHER_SKIP_TELEOP:-0}" == 1 ]]; then
 fi
 cd "$repo/teleop"
 echo "Teto de caminhada: ${walk_speed_cap} m/s linear, ${turn_rate_cap} rad/s angular (BotBrain g1-r1)"
+# Optional XR video plane (unset = historical 1.0 m at 1.0 m). Ex.: XR_VIDEO_PLANE_HEIGHT=auto
+video_plane_args=()
+[[ -n "${XR_VIDEO_PLANE_HEIGHT:-}" ]] && video_plane_args+=(--video-plane-height "$XR_VIDEO_PLANE_HEIGHT")
+[[ -n "${XR_VIDEO_PLANE_DISTANCE:-}" ]] && video_plane_args+=(--video-plane-distance "$XR_VIDEO_PLANE_DISTANCE")
 exec "$teleimager_python" -s teleop_hand_and_arm.py \
   --arm G1_29 \
   --ee dex3 \
@@ -273,4 +277,5 @@ exec "$teleimager_python" -s teleop_hand_and_arm.py \
   --motion \
   --camera-layout "$teleop_camera_layout" \
   --walk-speed-cap "$walk_speed_cap" \
-  --turn-rate-cap "$turn_rate_cap"
+  --turn-rate-cap "$turn_rate_cap" \
+  ${video_plane_args[@]+"${video_plane_args[@]}"}
