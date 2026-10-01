@@ -36,10 +36,10 @@ KNOWN_API_TOPICS = (
 )
 # (topic, type) de estado conhecidos -> projecao de campos (None = completo)
 STATE_TOPICS = {
-    "rt/sportmodestate": ("unitree_go.msg.dds_.SportModeState_", None, 0.0),
-    "rt/odommodestate": ("unitree_go.msg.dds_.SportModeState_", None, 0.0),
-    "rt/lf/sportmodestate": ("unitree_go.msg.dds_.SportModeState_", None, 0.0),
-    "rt/lf/odommodestate": ("unitree_go.msg.dds_.SportModeState_", None, 0.0),
+    "rt/sportmodestate": ("unitree_go.msg.dds_.SportModeState_", None, 0.5),
+    "rt/odommodestate": ("unitree_go.msg.dds_.SportModeState_", None, 0.5),
+    "rt/lf/sportmodestate": ("unitree_go.msg.dds_.SportModeState_", None, 0.5),
+    "rt/lf/odommodestate": ("unitree_go.msg.dds_.SportModeState_", None, 0.5),
     "rt/lowstate": ("unitree_hg.msg.dds_.LowState_", ("imu_state", "wireless_remote"), 0.5),
     "rt/lf/lowstate": ("unitree_hg.msg.dds_.LowState_", ("imu_state", "wireless_remote"), 0.5),
     "rt/wirelesscontroller": ("unitree_go.msg.dds_.WirelessController_", None, 0.2),
