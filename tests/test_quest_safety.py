@@ -39,8 +39,8 @@ def test_fresh_hand_mode_sticks_remain_available_for_move_mapping():
 
     left = fresh_controller_value((0.8, -0.4), sample_timestamp=1.0, now=1.1)
     right = fresh_controller_value((0.0, 0.0), sample_timestamp=1.0, now=1.1)
-    expected_forward = 0.15 * ((0.4 - 0.12) / (1.0 - 0.12)) ** 3
-    expected_lateral = -0.15 * ((0.8 - 0.12) / (1.0 - 0.12)) ** 3
+    expected_forward = 0.5 * ((0.4 - 0.12) / (1.0 - 0.12)) ** 3
+    expected_lateral = -0.5 * ((0.8 - 0.12) / (1.0 - 0.12)) ** 3
     assert joystick_to_locomotion(left, right) == pytest.approx(
         (expected_forward, expected_lateral, 0.0)
     )
@@ -61,10 +61,10 @@ def test_status_locomotion_carries_stick_snapshot_and_survives_bad_snapshot():
     from teleop.utils.teleop_status import TeleopStatusMonitor
     out = []
     mon = TeleopStatusMonitor(out.append)
-    snap = {"raw_left_xy": [0.0, -1.0], "command": [0.15, 0.0, 0.0], "last_move_code": 0}
+    snap = {"raw_left_xy": [0.0, -1.0], "command": [0.5, 0.0, 0.0], "last_move_code": 0}
     s = mon.observe(now=10.0, lifecycle="tracking", controller_sample_timestamp=10.0,
-                    motion_enabled=True, locomotion=(0.15, 0.0, 0.0), stick=snap)
-    assert s["locomotion"]["command"] == [0.15, 0.0, 0.0]
+                    motion_enabled=True, locomotion=(0.5, 0.0, 0.0), stick=snap)
+    assert s["locomotion"]["command"] == [0.5, 0.0, 0.0]
     assert s["locomotion"]["raw_left_xy"] == [0.0, -1.0]
     assert s["locomotion"]["last_move_code"] == 0
     s2 = TeleopStatusMonitor(out.append).observe(now=1.0, lifecycle="tracking",

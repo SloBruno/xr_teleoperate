@@ -1,0 +1,146 @@
+"""BotBrain-style Regular-mode (FSM 500/501) walking preflight, watchdog and
+latest-only Move sender.  Never sends SetFsmId; RUN (801) is not supported."""
+import threading
+import time
+
+ACCEPTED_FSM_IDS = frozenset({500, 501})  # Regular mode (R1+X) only
+SPEED_MODE_ATTEMPTS = 3
+STICK_TIMEOUT_S = 0.2
+
+
+def run_loco_preflight(wrapper, sleep=time.sleep, attempts=SPEED_MODE_ATTEMPTS):
+    """Read-only FSM check, then SetSpeedMode(0) w/ retries, ContinuousGait(false),
+    checked zero Move.  Returns dict with loco_enabled and refusal_reason."""
+    res = {"loco_enabled": False, "refusal_reason": None, "message": "", "fsm_id": None,
+           "set_speed_mode_rc": None, "preflight_ok": False}
+    fsm = wrapper.read_fsm_id(timeout=0.3)
+    res["fsm_id"] = fsm
+    if fsm is None:
+        res["refusal_reason"] = "fsm_unreadable"
+        res["message"] = "FSM unreadable; locomotion disabled. Put the robot in Regular mode (R1+X on the R3 remote)."
+        return res
+    if fsm not in ACCEPTED_FSM_IDS:
+        res["refusal_reason"] = f"fsm_not_walk:{fsm}"
+        res["message"] = (f"FSM id {fsm} is not Regular walk (500/501); locomotion disabled. "
+                          "Enter Regular mode with R1+X on the R3 remote and restart.")
+        return res
+    rc = None
+    for i in range(max(1, attempts)):
+        rc = wrapper.set_speed_mode(0)
+        if rc == 0:
+            break
+        sleep(0.25 * (i + 1))
+    res["set_speed_mode_rc"] = rc
+    if rc != 0:
+        res["refusal_reason"] = f"set_speed_mode_failed:{rc}"
+        res["message"] = f"SetSpeedMode(0) failed (rc={rc}); locomotion disabled."
+        return res
+    wrapper.set_balance_mode(0)  # ContinuousGait(false), as BotBrain; best effort
+    zrc = wrapper.checked_zero()
+    if zrc != 0:
+        res["refusal_reason"] = f"zero_move_failed:{zrc}"
+        res["message"] = f"Zero Move not acknowledged (rc={zrc}); locomotion disabled."
+        return res
+    res.update(loco_enabled=True, preflight_ok=True, message=f"FSM {fsm} Regular walk; preflight ok.")
+    return res
+
+
+class LocoWatchdog:
+    """Sends StopMove if a non-zero command is older than timeout_s; retries
+    until acked; re-arms on the next non-zero command."""
+
+    def __init__(self, stop_fn, timeout_s=STICK_TIMEOUT_S):
+        self._stop = stop_fn
+        self.timeout_s = timeout_s
+        self._last_nonzero = None
+        self.armed_stop = False
+        self.trips = 0
+        self.stop_failures = 0
+        self.last_rc = None
+        self._counted = False
+
+    def feed(self, nonzero, now):
+        if nonzero:
+            self._last_nonzero = now
+            self.armed_stop = True
+        else:
+            self._last_nonzero = None
+            self.armed_stop = False
+
+    def check(self, now):
+        if not self.armed_stop or self._last_nonzero is None:
+            return False
+        if now - self._last_nonzero <= self.timeout_s:
+            return False
+        try:
+            rc = self._stop("watchdog_timeout")
+        except BaseException:
+            self.stop_failures += 1
+            rc = None
+        self.last_rc = rc
+        if rc == 0:
+            self.armed_stop = False
+        if not self._counted:
+            self.trips += 1
+            self._counted = True
+        if rc == 0:
+            self._counted = False
+        return True
+
+
+class LatestMoveSender:
+    """Daemon thread sending Move over a client with a short blocking timeout.
+    One-slot mailbox: newer commands replace unsent older ones, so the control
+    loop never blocks and a zero is never queued behind stale motion. Idle ticks
+    run the watchdog, so a stalled control loop still stops the robot."""
+
+    def __init__(self, send, stop_fn=None, watchdog_timeout_s=STICK_TIMEOUT_S, tick_s=0.05):
+        self._send = send
+        self._cv = threading.Condition()
+        self._slot = None
+        self._running = False
+        self._thread = None
+        self._tick = tick_s
+        self.last_rc = None
+        self.sent = 0
+        self.nonzero_rc = 0
+        self.watchdog = LocoWatchdog(stop_fn, watchdog_timeout_s) if stop_fn else None
+
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, name="loco-move", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        with self._cv:
+            self._running = False
+            self._cv.notify_all()
+        if self._thread:
+            self._thread.join(1.0)
+
+    def submit(self, cmd):
+        with self._cv:
+            self._slot = tuple(cmd)
+            if self.watchdog:
+                self.watchdog.feed(any(cmd), time.monotonic())
+            self._cv.notify()
+
+    def _loop(self):
+        while True:
+            with self._cv:
+                if self._slot is None and self._running:
+                    self._cv.wait(self._tick)
+                if not self._running:
+                    return
+                cmd, self._slot = self._slot, None
+            if cmd is not None:
+                try:
+                    rc = self._send(*cmd)
+                except BaseException:
+                    rc = None
+                self.last_rc = rc
+                self.sent += 1
+                if rc != 0:
+                    self.nonzero_rc += 1
+            elif self.watchdog:
+                self.watchdog.check(time.monotonic())

@@ -51,6 +51,51 @@ class LocoClientWrapper:
         self.stop_failures = 0
         self.last_stop_code = None
         self.last_stop_reason = None
+        self.sender = None
+        self.watchdog_stop_code = None
+        self._cfg_client = None
+
+    # --- BotBrain-style Regular-mode walking (FSM 500/501) -------------------
+    # Config RPCs use a separate client with a short BLOCKING timeout so the
+    # return code is real; the control loop only ever hands Move to a
+    # latest-only sender thread (own client, 0.2 s blocking), never blocks.
+    def _cfg(self, timeout=0.3):
+        if self._cfg_client is None:
+            self._cfg_client = LocoClient()
+            self._cfg_client.Init()
+        self._cfg_client.SetTimeout(timeout)
+        return self._cfg_client
+
+    def set_speed_mode(self, mode=0):
+        import json as _json
+        code, _ = self._cfg()._Call(7107, _json.dumps({"data": mode}))
+        return code
+
+    def set_balance_mode(self, mode=0):
+        # ContinuousGait(false) == SetBalanceMode(0); never enable it.
+        return self._cfg().SetBalanceMode(mode)
+
+    def checked_zero(self):
+        return self._cfg().SetVelocity(0.0, 0.0, 0.0, 1.0)
+
+    def start_move_sender(self, move_timeout=0.2):
+        from teleop.utils.loco_preflight import LatestMoveSender
+        mc = LocoClient()
+        mc.SetTimeout(move_timeout)
+        mc.Init()
+
+        def send(vx, vy, w):
+            return mc.SetVelocity(vx, vy, w, 1.0)
+
+        def stop(reason):
+            self.watchdog_stop_code = mc.SetVelocity(0.0, 0.0, 0.0, 1.0)
+            return self.watchdog_stop_code
+        self.sender = LatestMoveSender(send, stop_fn=stop)
+        self.sender.start()
+
+    def stop_move_sender(self):
+        if self.sender is not None:
+            self.sender.stop()
 
     def Enter_Damp_Mode(self):
         self.client.Damp()
@@ -118,6 +163,11 @@ class LocoClientWrapper:
         # timeout is 0.1 ms (non-blocking), so a reply is rarely in time and
         # code 3104 (timeout) is expected; use read_fsm_id / rt/sportmodestate
         # as the authoritative state, not this code.
+        if self.sender is not None:
+            self.sender.submit((vx, vy, vyaw))
+            self.last_move_code = self.sender.last_rc  # rc of an earlier send
+            self.nonzero_move_codes = self.sender.nonzero_rc
+            return self.last_move_code
         code = self.client.SetVelocity(vx, vy, vyaw, 1.0)
         self.last_move_code = code
         if code != 0:

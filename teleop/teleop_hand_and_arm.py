@@ -30,7 +30,9 @@ from teleimager.image_client import ImageClient
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper, is_walk_fsm
-from teleop.utils.quest_controls import dispatch_joystick_locomotion, joystick_to_locomotion, stick_snapshot
+from teleop.utils.quest_controls import (dispatch_joystick_locomotion, joystick_to_locomotion, stick_snapshot,
+                                         resolve_speed_caps, speed_cap_banner, loco_stick_is_fresh)
+from teleop.utils.loco_preflight import run_loco_preflight
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
 from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
 from teleop.utils.human_arm_calibration import HumanArmSweep, HumanCalibratedWristCalibrator
@@ -425,6 +427,8 @@ if __name__ == '__main__':
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
+    parser.add_argument('--walk-speed-cap', type=float, default=None, help='Walk cap m/s (default 0.5, hard max 0.6; env G1_WALK_SPEED_CAP)')
+    parser.add_argument('--turn-rate-cap', type=float, default=None, help='Turn cap rad/s (default 0.3, hard max 1.0; env G1_TURN_RATE_CAP)')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
@@ -438,6 +442,7 @@ if __name__ == '__main__':
     parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording at json file')
 
     args = parser.parse_args()
+    walk_cap, turn_cap = resolve_speed_caps(args.walk_speed_cap, args.turn_rate_cap, os.environ)
     logger_mp.debug(f"args: {args}")
     outputs_activated = False
     hand_outputs_activated = False
@@ -451,6 +456,7 @@ if __name__ == '__main__':
     tv_wrapper = None
     shutdown_cause = None
     loco_wrapper = None
+    loco_preflight = None
     robot_monitor = None
 
     try:
@@ -519,13 +525,14 @@ if __name__ == '__main__':
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
         if args.motion:
             loco_wrapper = LocoClientWrapper()
-            # Read-only preflight: SetVelocity only walks in FSM 500/501.
-            fsm_id = loco_wrapper.read_fsm_id()
-            if is_walk_fsm(fsm_id):
-                logger_mp.info(f"[loco] FSM id {fsm_id}: walk mode, joystick locomotion can step.")
+            # BotBrain-style preflight, Regular mode only (FSM 500/501, R1+X). Never sends SetFsmId.
+            loco_preflight = run_loco_preflight(loco_wrapper)
+            logger_mp.info(f"[loco] preflight: {loco_preflight}")
+            logger_mp.warning(speed_cap_banner(walk_cap, turn_cap))
+            if loco_preflight["loco_enabled"]:
+                loco_wrapper.start_move_sender()
             else:
-                logger_mp.warning(f"[loco] FSM id {fsm_id} is not a walk mode (500/501); "
-                                  "joystick Move may lean but will not step. Enter Regular mode (R1+X) on the R3 remote.")
+                logger_mp.warning(f"[loco] LOCOMOTION DISABLED: {loco_preflight['message']}")
             # Side channel: rt/sportmodestate callback + 1 Hz GetFsmId thread on
             # its own client. Never touched by the control loop except snapshot().
             try:
@@ -963,12 +970,15 @@ if __name__ == '__main__':
             if _diag is not None: _diag.mark("hand")
             # Controller samples own arm IK, locomotion, and Dex3 freshness.
             controller_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)
+            loco_on = bool(args.motion and loco_preflight and loco_preflight["loco_enabled"])
             locomotion = dispatch_joystick_locomotion(
-                loco_wrapper if args.motion else None,
-                motion_enabled=args.motion,
-                controller_is_fresh=controller_is_fresh,
+                loco_wrapper if loco_on else None,
+                motion_enabled=loco_on,
+                controller_is_fresh=loco_stick_is_fresh(tele_data.controller_sample_timestamp),  # 0.2 s dead-man
                 left_xy=tele_data.left_ctrl_thumbstickValue,
                 right_xy=tele_data.right_ctrl_thumbstickValue,
+                walk_cap=walk_cap,
+                turn_cap=turn_cap,
             )
 
             # In-memory only (no I/O); raw sticks are logged before any shaping.
@@ -985,6 +995,12 @@ if __name__ == '__main__':
                 stick_log["stop_count"] = loco_wrapper.stop_count
                 stick_log["last_stop_code"] = loco_wrapper.last_stop_code
                 stick_log["last_stop_reason"] = loco_wrapper.last_stop_reason
+                stick_log["loco_preflight"] = loco_preflight
+                stick_log["walk_cap"] = walk_cap
+                stick_log["turn_cap"] = turn_cap
+                stick_log["watchdog_stop_code"] = getattr(loco_wrapper, "watchdog_stop_code", None)
+                if getattr(loco_wrapper, "sender", None) is not None:
+                    stick_log["watchdog_trips"] = loco_wrapper.sender.watchdog.trips
 
             if _diag is not None: _diag.mark("locomotion")
             tracking_pressure_timestamps = (0.0, 0.0)
@@ -1128,6 +1144,7 @@ if __name__ == '__main__':
                         current_body_action = list(joystick_to_locomotion(
                             tele_data.left_ctrl_thumbstickValue,
                             tele_data.right_ctrl_thumbstickValue,
+                            walk_cap, turn_cap,
                         ))
                 elif (args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
                     with dual_hand_data_lock:
@@ -1147,6 +1164,7 @@ if __name__ == '__main__':
                         current_body_action = list(joystick_to_locomotion(
                             tele_data.left_ctrl_thumbstickValue,
                             tele_data.right_ctrl_thumbstickValue,
+                            walk_cap, turn_cap,
                         ))
                 else:
                     left_ee_state = []
@@ -1274,6 +1292,8 @@ if __name__ == '__main__':
         # Explicit StopMove first (bounded, never raises): the robot keeps the
         # last SetVelocity for its duration (1 s), so do not wait for the arm
         # shutdown to cancel it. Retried again after the arm shutdown below.
+        if getattr(loco_wrapper, "stop_move_sender", None) is not None:
+            loco_wrapper.stop_move_sender()
         stop_locomotion_best_effort(loco_wrapper, shutdown_cause or "shutdown")
         # G1_29 graceful shutdown (q/B, Ctrl+C, exception): tracking has
         # already stopped; return to the all-zero preparation pose with a
