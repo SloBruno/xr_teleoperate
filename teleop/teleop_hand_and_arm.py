@@ -17,6 +17,7 @@ def _log_best_effort(level, message):
         pass
 
 import os 
+from teleop.utils.com_monitor import create_from_env as create_com_monitor_from_env
 import sys
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
@@ -461,6 +462,7 @@ if __name__ == '__main__':
     dex3_slow_gate = Dex3SlowFieldGate(slow_every=10)
     status_sink = None
     loop_diag = None
+    com_monitor = None
     img_client = None
     tv_wrapper = None
     shutdown_cause = None
@@ -706,6 +708,9 @@ if __name__ == '__main__':
         pose_telemetry_sink = create_pose_telemetry_sink(pose_log_dir, logger_mp.warning)
         loop_diag = LoopDiagnostics(status_sink.emit, sampler=ResourceSampler(), gc_watcher=GcWatcher())
         loop_diag.start()
+        com_monitor = create_com_monitor_from_env(
+            os.environ, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "g1", "g1_body29_hand14.urdf"),
+            args.arm, logger_mp.warning)
         arm_publication_telemetry = ArmPublicationTelemetryBridge(
             pose_telemetry_sink, profile=args.arm, warn=logger_mp.warning
         )
@@ -1058,6 +1063,8 @@ if __name__ == '__main__':
             # part of the controller-pose freshness window.
             controller_pose_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)
 
+            if com_monitor is not None:
+                com_monitor.update(current_lr_arm_q)  # warn-only; never publishes
             if _diag is not None: _diag.mark("state_read")
             candidate_targets = None
             calibration = arm_calibration if args.arm == "G1_29" else None
