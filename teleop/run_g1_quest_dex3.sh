@@ -9,8 +9,8 @@ export LD_LIBRARY_PATH=/home/unitree/cyclonedds/build/lib${LD_LIBRARY_PATH:+:${L
 # Cyclone DDS here so Wi-Fi/Tailscale never becomes the discovery interface.
 export CYCLONEDDS_URI='<CycloneDDS><Domain><General><Interfaces><NetworkInterface name="enP8p1s0"/></Interfaces></General></Domain></CycloneDDS>'
 export PYTHONPATH=$repo:$repo/teleop/televuer/src:$repo/teleop/teleimager/src:$repo/teleop/robot_control/dex-retargeting/src:/home/unitree/unitree_sdk2_python${PYTHONPATH:+:${PYTHONPATH}}
-export XR_TELEOP_CERT=/home/unitree/.config/xr_teleoperate/cert.pem
-export XR_TELEOP_KEY=/home/unitree/.config/xr_teleoperate/key.pem
+export XR_TELEOP_CERT=${XR_TELEOP_CERT:-/home/unitree/.config/xr_teleoperate/cert.pem}
+export XR_TELEOP_KEY=${XR_TELEOP_KEY:-/home/unitree/.config/xr_teleoperate/key.pem}
 
 # Walking cap, same as the BotBrain frontend G1 profile (g1-r1.ts:
 # linearSpeed 0.5 m/s, angularSpeed 0.3 rad/s). Passed explicitly to the
@@ -70,6 +70,12 @@ detect_cameras() {
         exit 4
     fi
 }
+
+# Show the robot's current Wi-Fi IP + Quest URL and keep the TLS cert SAN in sync.
+# Never blocks the launch (always returns 0; warnings only).
+# shellcheck source=lib/vuer_network.sh
+source "$repo/teleop/lib/vuer_network.sh"
+[[ "${G1_LAUNCHER_SKIP_NET:-0}" == 1 ]] || xr_net_announce || true
 
 if [[ "$TELEIMAGER_CAMERA_MODE" == auto ]]; then
     detect_cameras
@@ -265,6 +271,7 @@ if [[ "${G1_LAUNCHER_SKIP_TELEOP:-0}" == 1 ]]; then
     exit 0
 fi
 cd "$repo/teleop"
+[[ -n "${XR_TELEOP_VUER_IP:-}" ]] && echo "Quest: https://vuer.ai?ws=wss://${XR_TELEOP_VUER_IP}:${XR_NET_PORT}&grid=False"
 echo "Teto de caminhada: ${walk_speed_cap} m/s linear, ${turn_rate_cap} rad/s angular (BotBrain g1-r1)"
 # Optional XR video plane (unset = historical 1.0 m at 1.0 m). Ex.: XR_VIDEO_PLANE_HEIGHT=auto
 video_plane_args=()

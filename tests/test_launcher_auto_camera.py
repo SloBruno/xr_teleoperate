@@ -68,7 +68,7 @@ class AutoCameraTest(unittest.TestCase):
         env.pop("TELEIMAGER_CAMERA_MODE", None)
         env.update({
             "TELEIMAGER_STATE_DIR": str(self.state), "TELEIMAGER_PYTHON": str(self.fake),
-            "FAKE_LOG": str(self.log), "PATH": f"{self.bindir}:{env['PATH']}",
+            "G1_LAUNCHER_SKIP_NET": "1", "FAKE_LOG": str(self.log), "PATH": f"{self.bindir}:{env['PATH']}",
             "TELEIMAGER_TIMEOUT_S": "5", "TELEIMAGER_LOCK_TIMEOUT_S": "2",
             "FAKE_DETECT_RC": str(rc),
         })
