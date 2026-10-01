@@ -65,12 +65,15 @@ CLOSE_TORQUE_CEILING_NM = (0.75, 0.75, 0.75) + (FINGER_CLOSE_CEILING_NM,) * 4
 # Calibrar no teste fisico.
 OPEN_TORQUE_CEILING_NM = (1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5)
 
-# --- (2) Stall detection ----------------------------------------------------
-# Stall = closing direction AND |target-q| > STALL_ERR_RAD AND |dq| < STALL_DQ
-# AND |tau_est| >= STALL_TAU_RAW, continuously for STALL_TIME_S.
-# Blocked thumb: err 0.5-1.7 rad, dq exactly 0.00, tau 0.5-1.4 M raw.
-# Free resting joints: tau ~0.01-0.05 M raw; moving p90 ~0.09 M. Calibrar.
+# --- (2) Stall / grip-contact detection -------------------------------------
+# Thumb stall keeps its existing threshold. For long fingers, a grip hold needs
+# a *signed closing* position error: high tau and low velocity alone are not
+# contact evidence. 0.20 rad is below the smallest recorded box-contact error
+# (0.26 rad) and above the observed false-hold errors (0.00-0.10 rad).
+# STALL_TIME_S remains the continuous confirmation window, so one sample never
+# enters hold. Calibrar no teste fisico.
 STALL_ERR_RAD = 0.35
+FINGER_CONTACT_ERR_RAD = 0.20
 STALL_DQ = 0.3            # rest noise seen up to ~0.23; moving joints >> 1
 STALL_TAU_RAW = 100_000.0  # raw units of tau_est (uncalibrated)
 STALL_TIME_S = 0.75
@@ -324,6 +327,7 @@ class Dex3HandProtector:
         sign = np.sign(t_eff - open_q)
         err = t_eff - q
         closing = bool(sign != 0 and sign * err > 0)
+        closing_err = float(sign * err)
 
         # --- (2) stall ------------------------------------------------------
         if self._stall[i]:
@@ -343,7 +347,11 @@ class Dex3HandProtector:
             else:
                 self._release_since[i] = None
         else:
-            cond = (closing and abs(err) > STALL_ERR_RAD and dq is not None
+            # Long-finger grip holds require actual closing contact evidence;
+            # preserve the thumb's established generic stall rule unchanged.
+            contact_err = (closing_err + 1e-9 >= FINGER_CONTACT_ERR_RAD if i >= 3
+                           else abs(err) > STALL_ERR_RAD)
+            cond = (closing and contact_err and dq is not None
                     and abs(dq) < STALL_DQ and (tau is None or abs(tau) >= STALL_TAU_RAW))
             if cond:
                 if self._stall_since[i] is None:
