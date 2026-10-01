@@ -52,7 +52,10 @@ DEX3_KP = 1.5
 # (err transient p90 0.7-1.3 rad, median 0.3), but when blocked the error sat
 # at 0.5-1.7 rad for seconds and the motor heated to 83/90 C.
 # Calibrar no teste fisico.
-CLOSE_TORQUE_CEILING_NM = (0.75, 0.75, 0.75, 1.0, 1.0, 1.0, 1.0)
+# Long fingers (index/middle) raised 1.0 -> 1.4 N*m (= URDF rated effort) because
+# the closed pose now sits further than the old 0.67 rad error cap would allow
+# when blocked by an object. Thumb ceiling UNCHANGED (0.75): not the reported issue.
+CLOSE_TORQUE_CEILING_NM = (0.75, 0.75, 0.75, 1.4, 1.4, 1.4, 1.4)
 # Opening ceiling (toward rest pose). Higher so the hand can still open
 # quickly on trigger release, but still below the old 2.6 N*m implicit peak.
 # Calibrar no teste fisico.
@@ -67,7 +70,14 @@ STALL_ERR_RAD = 0.35
 STALL_DQ = 0.3            # rest noise seen up to ~0.23; moving joints >> 1
 STALL_TAU_RAW = 100_000.0  # raw units of tau_est (uncalibrated)
 STALL_TIME_S = 0.75
-# Once stalled, hold relaxed (q_cmd = q_meas) until the trigger-driven target
+# Grip hold: while stalled, keep pushing toward the trigger target with a
+# reduced implicit torque instead of relaxing to q_meas (relaxing lets a held
+# object push the finger back and the box slips). Time-limited, fades with the
+# thermal derate factor, never while faulted. Calibrar no teste fisico.
+# Thumb = 0.0: thumb keeps the old relax-on-stall behaviour (thermal history).
+GRIP_HOLD_TORQUE_NM = (0.0, 0.0, 0.0, 0.8, 0.8, 0.8, 0.8)
+GRIP_HOLD_MAX_S = 10.0
+# Once stalled (after the hold window, or without hold), hold relaxed (q_cmd = q_meas) until the trigger-driven target
 # backs off by this much toward open (rad). Calibrar.
 STALL_RELEASE_DELTA_RAD = 0.3
 
@@ -145,7 +155,7 @@ def extract_protection_state(hand_state: Any, joint_ids: Sequence[int], timestam
 
 class ProtectionResult:
     __slots__ = ("q_cmd", "enable", "torque_limited", "stall", "derate", "fault",
-                 "state_stale", "active")
+                 "state_stale", "active", "grip_hold")
 
     def __init__(self, n=NUM_JOINTS):
         self.q_cmd = np.zeros(n)
@@ -155,6 +165,7 @@ class ProtectionResult:
         self.derate = [1.0] * n
         self.fault = [False] * n
         self.state_stale = False
+        self.grip_hold = [False] * n
         self.active: dict[tuple[str, int], str] = {}
 
     def flags(self) -> dict:
@@ -164,6 +175,7 @@ class ProtectionResult:
             "stall": [bool(v) for v in self.stall],
             "derate": [round(float(v), 3) for v in self.derate],
             "fault": [bool(v) for v in self.fault],
+            "grip_hold": [bool(v) for v in self.grip_hold],
             "state_stale": bool(self.state_stale),
         }
 
@@ -187,6 +199,7 @@ class Dex3HandProtector:
         self._stall_since: list[float | None] = [None] * n
         self._stall = [False] * n
         self._stall_mag = [0.0] * n
+        self._stall_start: list[float | None] = [None] * n
         self._hot = [False] * n
         self._derate_prev = [1.0] * n
         self._last_temp: list[float | None] = [None] * n
@@ -306,13 +319,26 @@ class Dex3HandProtector:
                 if now - self._stall_since[i] >= STALL_TIME_S:
                     self._stall[i] = True
                     self._stall_mag[i] = abs(t_eff - open_q)
+                    self._stall_start[i] = now
             else:
                 self._stall_since[i] = None
         if self._stall[i]:
             res.stall[i] = True
-            res.q_cmd[i] = q  # relax: zero implicit torque
-            res.active[("stall", i)] = (
-                f"{JOINT_NAMES[i]} travado (err {abs(err):.2f} rad, dq~0, tau alto): aliviando ate soltar/reduzir trigger")
+            hold_err = GRIP_HOLD_TORQUE_NM[i] / self.kp * d
+            held = (self._stall_start[i] is not None
+                    and now - self._stall_start[i] <= GRIP_HOLD_MAX_S and hold_err > 1e-9)
+            if held:
+                # keep a reduced, thermally-faded squeeze toward the target
+                step = min(hold_err, abs(t_eff - q))
+                res.q_cmd[i] = q + sign * step
+                res.grip_hold[i] = True
+                res.active[("stall", i)] = (
+                    f"{JOINT_NAMES[i]} travado (err {abs(err):.2f} rad): segurando pegada a "
+                    f"{step * self.kp:.2f} N*m implicitos (max {GRIP_HOLD_MAX_S:.0f} s)")
+            else:
+                res.q_cmd[i] = q  # relax: zero implicit torque
+                res.active[("stall", i)] = (
+                    f"{JOINT_NAMES[i]} travado (err {abs(err):.2f} rad, dq~0, tau alto): aliviando ate soltar/reduzir trigger")
             self._limit_since[i] = None
             return
 

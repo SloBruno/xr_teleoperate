@@ -45,12 +45,12 @@ def test_dex3_closed_poses_close_thumb_without_lateral_rotation_and_mirror_finge
     right_closed = assignments["Dex3_Right_Closed_Pose"]
 
     # Thumb0 remains centered to prevent lateral rotation. Thumb1/Thumb2 use
-    # the Unitree-published full grasp targets; index/middle stay at the
-    # previously validated conservative midpoint targets.
+    # the Unitree-published full grasp targets; index/middle close to ~73% of
+    # the physical range (was 50%; grip-hold fix).
     np.testing.assert_allclose(left_closed[:3], [0.0, 1.05, 1.75])
     np.testing.assert_allclose(right_closed[:3], [0.0, -1.05, -1.75])
-    np.testing.assert_allclose(left_closed[3:], [-0.78539816, -0.87266463, -0.78539816, -0.87266463])
-    np.testing.assert_allclose(right_closed[3:], [0.78539816, 0.87266463, 0.78539816, 0.87266463])
+    np.testing.assert_allclose(left_closed[3:], [-1.15, -1.30, -1.15, -1.30])
+    np.testing.assert_allclose(right_closed[3:], [1.15, 1.30, 1.15, 1.30])
 
 def test_released_trigger_returns_open_pose_for_all_seven_slots():
     open_pose = np.arange(7, dtype=float)
@@ -321,3 +321,17 @@ def test_control_step_uses_only_side_specific_triggers_when_hand_tracking_is_una
     )
     np.testing.assert_allclose(published[2][1], module.Dex3_Open_Pose)
     np.testing.assert_allclose(published[3][1], module.Dex3_Open_Pose)
+
+
+def test_finger_closed_poses_inside_physical_limits_with_margin():
+    import ast, pathlib
+    src = pathlib.Path(__file__).resolve().parents[1].joinpath("teleop/robot_control/robot_hand_unitree.py").read_text()
+    tree = ast.parse(src); vals = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call) and getattr(n.value.func, "attr", "") == "array" and n.targets[0].id.endswith("Closed_Pose"):
+            vals[n.targets[0].id] = np.array(ast.literal_eval(n.value.args[0]))
+    lim = np.array([1.5708, 1.7453, 1.5708, 1.7453])
+    for name, sign in (("Dex3_Left_Closed_Pose", -1), ("Dex3_Right_Closed_Pose", 1)):
+        f = vals[name][3:] * sign
+        assert np.all(f > 0.5 * lim + 0.1)      # closes more than the old 50%
+        assert np.all(f <= lim - 0.2)           # margin to hard stops

@@ -42,16 +42,20 @@ kTopicDex3RightState = "rt/dex3/right/state"
 Dex3_Kp = 1.5
 Dex3_Kd = 0.2
 Dex3_Open_Pose = np.zeros(Dex3_Num_Motors)
-# Keep the validated conservative midpoint targets for index/middle. Thumb0
+# Index/middle closed pose = ~73% of the URDF range (joint0 +-1.571, joint1
+# +-1.745) with ~0.4 rad margin to the stops. It was 50% (0.785/0.873): in the
+# 2026-10-01 session the fingers reached exactly that target (97-102%) with
+# protection active <2% of the time, so a box was only wrapped halfway.
+# Calibrar no teste fisico. Thumb0
 # stays neutral; Thumb1/Thumb2 use the Unitree full-grasp targets so the thumb
 # reaches full closure at trigger=1.0.
 Dex3_Left_Closed_Pose = np.array([
     0.0, 1.05, 1.75,
-    -0.78539816, -0.87266463, -0.78539816, -0.87266463,
+    -1.15, -1.30, -1.15, -1.30,
 ])
 Dex3_Right_Closed_Pose = np.array([
     0.0, -1.05, -1.75,
-    0.78539816, 0.87266463, 0.78539816, 0.87266463,
+    1.15, 1.30, 1.15, 1.30,
 ])
 
 

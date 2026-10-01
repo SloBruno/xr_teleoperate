@@ -109,7 +109,7 @@ def test_stall_detected_after_time_and_relaxes_to_measured():
     assert not res.stall[1] and not res.stall[2]
     res = run(p, dp.STALL_TIME_S - 0.1, 0.3, tgt, lambda t: blocked(t))
     assert res.stall[1] and res.stall[2]
-    assert res.q_cmd[1] == pytest.approx(q[1]) and res.q_cmd[2] == pytest.approx(q[2])
+    assert res.q_cmd[1] == pytest.approx(q[1]) and res.q_cmd[2] == pytest.approx(q[2])  # thumb relaxes
     assert ("stall", 1) in res.active
 
 
@@ -450,3 +450,83 @@ def test_replay_real_session_torque_and_thermal():
     for i in range(7):
         l = stats["left"][i]
         assert l["first_stall"] is None and l["first_derate"] is None and l["first_fault"] is None
+
+
+# ---- (8) grip hold under load (fix/dex3-grip-hold) -----------------------------
+# Long fingers (index/middle, slots 3-6). Left-hand sign convention (negative = closed).
+FQ = (0, 0, 0, -0.4, -0.4, -0.4, -0.4)
+
+
+def fblocked(t, temp=40.0):
+    return state(t, q=FQ, dq=np.zeros(7), tau=np.full(7, 8e5), temp=np.full(7, temp))
+
+
+def test_ceilings_bounded_by_rated_effort_thumb_unchanged():
+    assert all(c <= 1.4 + 1e-9 for c in dp.CLOSE_TORQUE_CEILING_NM[1:])
+    assert dp.CLOSE_TORQUE_CEILING_NM[:3] == (0.75, 0.75, 0.75)
+    assert all(h == 0.0 for h in dp.GRIP_HOLD_TORQUE_NM[:3])
+    assert dp.DEX3_KP == 1.5
+
+
+def test_thumb_stall_still_relaxes_to_measured():
+    p = Dex3HandProtector(OPEN)
+    tgt = -CLOSED.copy()
+    mk = lambda t: state(t, q=(0, -0.3, -1.0, 0, 0, 0, 0), dq=np.zeros(7), tau=np.full(7, 8e5))
+    res = run(p, 0.0, dp.STALL_TIME_S + 0.3, tgt, mk)
+    assert res.stall[2] and not res.grip_hold[2]
+    assert res.q_cmd[2] == pytest.approx(-1.0)
+
+
+def test_finger_stall_holds_pose_with_reduced_force():
+    p = Dex3HandProtector(OPEN)
+    tgt = np.array([0, 0, 0, 1.15, 1.3, 1.15, 1.3]) * -1
+    res = run(p, 0.0, dp.STALL_TIME_S + 0.3, tgt, fblocked)
+    for i in range(3, 7):
+        assert res.stall[i] and res.grip_hold[i]
+        implicit = dp.DEX3_KP * abs(res.q_cmd[i] - FQ[i])
+        assert implicit == pytest.approx(dp.GRIP_HOLD_TORQUE_NM[i])
+        assert res.q_cmd[i] < FQ[i]                      # still squeezing
+        assert abs(res.q_cmd[i]) <= abs(tgt[i]) + 1e-9   # never beyond trigger
+    assert dp.GRIP_HOLD_TORQUE_NM[3] < dp.CLOSE_TORQUE_CEILING_NM[3]
+
+
+def test_grip_hold_is_time_limited_then_relaxes_until_release():
+    p = Dex3HandProtector(OPEN)
+    tgt = np.array([0, 0, 0, 1.15, 1.3, 1.15, 1.3]) * -1
+    run(p, 0.0, dp.STALL_TIME_S + 0.3, tgt, fblocked)
+    t_late = dp.STALL_TIME_S + 0.3 + dp.GRIP_HOLD_MAX_S + 0.5
+    res = p.update(t_late, tgt, fblocked(t_late))
+    assert res.stall[3] and not res.grip_hold[3]
+    assert res.q_cmd[3] == pytest.approx(FQ[3])
+    res = p.update(t_late + 0.01, tgt * 0.4, fblocked(t_late + 0.01))
+    assert not res.stall[3]
+
+
+def test_grip_hold_fades_with_temperature_and_stops_when_hot():
+    FQ2 = (0, 0, 0, -0.1, -0.1, -0.1, -0.1)  # shallow block so the derated target still exceeds STALL_ERR
+    tgt = np.array([0, 0, 0, 1.15, 1.3, 1.15, 1.3]) * -1
+    for temp, frac in ((65.0, 1.0), (72.5, 0.5), (80.0, 0.0)):
+        p = Dex3HandProtector(OPEN)
+        res = run(p, 0.0, 1.5, tgt, lambda t, temp=temp: state(t, q=FQ2, dq=np.zeros(7), tau=np.full(7, 8e5), temp=np.full(7, temp)))
+        implicit = dp.DEX3_KP * abs(res.q_cmd[3] - FQ2[3])
+        assert res.derate[3] == pytest.approx(frac, abs=1e-6)
+        if frac == 0.0:
+            assert not res.grip_hold[3] and res.q_cmd[3] >= FQ2[3] - 1e-9
+        else:
+            assert res.grip_hold[3] and implicit <= dp.GRIP_HOLD_TORQUE_NM[3] * frac + 1e-6
+
+
+def test_grip_hold_never_when_fault():
+    p = Dex3HandProtector(OPEN)
+    tgt = np.array([0, 0, 0, 1.15, 1.3, 1.15, 1.3]) * -1
+    p.update(0.0, tgt, fblocked(0.0))
+    mk = lambda t: state(t, q=FQ, dq=np.zeros(7), tau=np.full(7, 8e5),
+                         mode=[1, 1, 1, 0, 1, 1, 1], ms=[0, 0, 0, 512, 0, 0, 0])
+    res = run(p, 0.01, 2.0, tgt, mk)
+    assert res.fault[3] and not res.grip_hold[3] and not res.enable[3]
+
+
+def test_flags_report_grip_hold():
+    p = Dex3HandProtector(OPEN)
+    res = p.update(0.0, OPEN, state(0.0))
+    assert res.flags()["grip_hold"] == [False] * 7
