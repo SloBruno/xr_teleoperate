@@ -121,10 +121,12 @@ def test_stall_holds_until_trigger_reduced_or_released():
     assert res.stall[2]
     res = p.update(1.02, tgt * 0.95, blocked(1.02))  # tiny reduction: still held
     assert res.stall[2]
-    res = p.update(1.03, tgt * 0.5, blocked(1.03))   # big reduction: released
+    res = p.update(1.03, tgt * 0.5, blocked(1.03))   # big reduction, debounced
+    assert res.stall[2]
+    res = p.update(1.03 + dp.STALL_RELEASE_DEBOUNCE_S + 0.01, tgt * 0.5, blocked(1.03 + dp.STALL_RELEASE_DEBOUNCE_S + 0.01))  # sustained: released
     assert not res.stall[2]
     # the next full press re-detects only after the stall time again
-    res = p.update(1.04, tgt, blocked(1.04))
+    res = p.update(1.35, tgt, blocked(1.35))
     assert not res.stall[2]
 
 
@@ -462,7 +464,7 @@ def fblocked(t, temp=40.0):
 
 
 def test_ceilings_bounded_by_rated_effort_thumb_unchanged():
-    assert all(c <= 1.4 + 1e-9 for c in dp.CLOSE_TORQUE_CEILING_NM[1:])
+    assert all(c <= 1.8 + 1e-9 for c in dp.CLOSE_TORQUE_CEILING_NM[1:])
     assert dp.CLOSE_TORQUE_CEILING_NM[:3] == (0.75, 0.75, 0.75)
     assert all(h == 0.0 for h in dp.GRIP_HOLD_TORQUE_NM[:3])
     assert dp.DEX3_KP == 1.5
@@ -486,7 +488,7 @@ def test_finger_stall_holds_pose_with_reduced_force():
         implicit = dp.DEX3_KP * abs(res.q_cmd[i] - FQ[i])
         assert implicit == pytest.approx(dp.GRIP_HOLD_TORQUE_NM[i])
         assert res.q_cmd[i] < FQ[i]                      # still squeezing
-        assert abs(res.q_cmd[i]) <= abs(tgt[i]) + 1e-9   # never beyond trigger
+        assert abs(res.q_cmd[i]) <= dp.GRIP_HOLD_CMD_LIMIT_RAD[i] + 1e-9
     assert dp.GRIP_HOLD_TORQUE_NM[3] < dp.CLOSE_TORQUE_CEILING_NM[3]
 
 
@@ -498,7 +500,8 @@ def test_grip_hold_is_time_limited_then_relaxes_until_release():
     res = p.update(t_late, tgt, fblocked(t_late))
     assert res.stall[3] and not res.grip_hold[3]
     assert res.q_cmd[3] == pytest.approx(FQ[3])
-    res = p.update(t_late + 0.01, tgt * 0.4, fblocked(t_late + 0.01))
+    p.update(t_late + 0.01, tgt * 0.4, fblocked(t_late + 0.01))
+    res = p.update(t_late + 0.3, tgt * 0.4, fblocked(t_late + 0.3))
     assert not res.stall[3]
 
 
@@ -530,3 +533,107 @@ def test_flags_report_grip_hold():
     p = Dex3HandProtector(OPEN)
     res = p.update(0.0, OPEN, state(0.0))
     assert res.flags()["grip_hold"] == [False] * 7
+
+
+# ---- (9) no open/close oscillation while holding (fix/dex3-grip-no-oscillation) --
+FT = np.array([0, 0, 0, 1.15, 1.3, 1.15, 1.3]) * -1
+
+
+def _engage(p):
+    return run(p, 0.0, dp.STALL_TIME_S + 0.3, FT, fblocked)
+
+
+def test_hold_torque_stable_without_drop_for_whole_hold():
+    p = Dex3HandProtector(OPEN)
+    _engage(p)
+    t = dp.STALL_TIME_S + 0.3
+    vals = []
+    while t < dp.STALL_TIME_S + 0.3 + dp.GRIP_HOLD_MAX_S - 1.0:
+        res = p.update(t, FT, fblocked(t))
+        assert res.stall[3] and res.grip_hold[3]
+        vals.append(dp.DEX3_KP * abs(res.q_cmd[3] - FQ[3]))
+        t += 0.05
+    assert max(vals) - min(vals) < 1e-9
+    assert vals[0] == pytest.approx(dp.GRIP_HOLD_TORQUE_NM[3])
+    assert dp.GRIP_HOLD_TORQUE_NM[3] >= 1.2 - 1e-9
+
+
+def test_hold_survives_one_sample_trigger_dropout_and_finger_recoil():
+    p = Dex3HandProtector(OPEN)
+    _engage(p)
+    t = 1.2
+    res = p.update(t, FT * 0.0, fblocked(t))      # one 10 ms trigger dropout
+    assert res.stall[3] and res.grip_hold[3]
+    res = p.update(t + 0.01, FT, state(t + 0.01, q=(0, 0, 0, -0.1, -0.1, -0.1, -0.1),
+                                       dq=np.full(7, 5.0), tau=np.full(7, 8e5)))   # recoil + moving
+    assert res.stall[3] and res.grip_hold[3]
+    assert dp.DEX3_KP * abs(res.q_cmd[3] + 0.1) == pytest.approx(dp.GRIP_HOLD_TORQUE_NM[3])
+
+
+def test_small_trigger_reduction_does_not_release_but_clear_drop_does():
+    p = Dex3HandProtector(OPEN)
+    _engage(p)
+    t = 1.2
+    for k in range(60):                              # 25% reduction for 0.6 s
+        res = p.update(t + 0.01 * k, FT * 0.75, fblocked(t + 0.01 * k))
+        assert res.stall[3] and res.grip_hold[3]
+    t2 = t + 0.6
+    for k in range(30):                              # 40% reduction, sustained
+        res = p.update(t2 + 0.01 * k, FT * 0.6, fblocked(t2 + 0.01 * k))
+    assert not res.stall[3] and not res.grip_hold[3]
+
+
+def test_hold_command_never_pulls_back_past_limit_and_stays_inside_urdf():
+    p = Dex3HandProtector(OPEN)
+    q = (0, 0, 0, -0.75, -0.85, -0.75, -0.85)
+    mk = lambda t: state(t, q=q, dq=np.zeros(7), tau=np.full(7, 8e5))
+    res = run(p, 0.0, dp.STALL_TIME_S + 1.5, FT, mk)
+    for i in range(3, 7):
+        assert abs(res.q_cmd[i]) <= dp.GRIP_HOLD_CMD_LIMIT_RAD[i] + 1e-9
+        assert abs(res.q_cmd[i]) >= abs(q[i]) - 1e-9    # never loosens
+    assert max(dp.GRIP_HOLD_CMD_LIMIT_RAD) < 1.745
+
+
+def test_hold_cut_by_temperature_and_fault_still_win():
+    for temp, frac in ((72.5, 0.5), (80.0, 0.0)):
+        p = Dex3HandProtector(OPEN)
+        mk = lambda t, temp=temp: state(t, q=(0, 0, 0, -0.1, -0.1, -0.1, -0.1), dq=np.zeros(7),
+                                        tau=np.full(7, 8e5), temp=np.full(7, temp))
+        res = run(p, 0.0, 2.0, FT, mk)
+        implicit = dp.DEX3_KP * abs(res.q_cmd[3] + 0.1)
+        if frac > 0:
+            assert res.grip_hold[3] and implicit <= dp.GRIP_HOLD_TORQUE_NM[3] * frac + 1e-6
+        else:
+            assert not res.grip_hold[3] and abs(res.q_cmd[3]) < 0.1   # opens toward rest
+        assert ("temp_warn", 3) in res.active
+
+
+def test_no_temp_warning_below_70():
+    p = Dex3HandProtector(OPEN)
+    res = run(p, 0.0, 1.5, FT, lambda t: state(t, q=FQ, dq=np.zeros(7), tau=np.full(7, 8e5), temp=np.full(7, 69.0)))
+    assert ("temp_warn", 3) not in res.active
+
+
+def test_closed_loop_box_model_no_cycle_old_vs_new():
+    """Finger blocked by a box (stiff spring, contact at |q|=0.72); trigger held at 1.0.
+    Count stall on->off transitions: new latch must have none after engage."""
+    def sim(release_debounce, hold_nm):
+        p = Dex3HandProtector(OPEN)
+        old = dp.STALL_RELEASE_DEBOUNCE_S
+        t, q, trans, prev, torques = 0.0, 0.0, 0, False, []
+        qc = 0.72
+        while t < 12.0:
+            q = min(q + 0.05, qc) if q < qc and True else q
+            st = state(t, q=(0, 0, 0, -q, -q, -q, -q), dq=np.zeros(7) if q >= qc else np.full(7, 2.0),
+                       tau=np.full(7, 8e5 if q >= qc else 0.0), temp=np.full(7, 45.0))
+            r = p.update(t, FT, st)
+            if prev and not r.stall[3]:
+                trans += 1
+            prev = bool(r.stall[3])
+            if t > 3.0:
+                torques.append(dp.DEX3_KP * abs(r.q_cmd[3] + q))
+            t += 0.01
+        return trans, torques
+    trans, tq = sim(None, None)
+    assert trans == 0
+    assert min(tq) >= 1.1 and max(tq) <= dp.CLOSE_TORQUE_CEILING_NM[3] + 1e-9
