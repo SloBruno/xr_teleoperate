@@ -26,3 +26,15 @@ def test_detects_measured_open_even_when_q_cmd_changes_with_it():
     out = a.analyze(recs)["right"]
     assert out["open_events"]
     assert out["open_events"][0]["command_changed"] is True
+
+
+def test_correlates_state_gap_grace_with_open_events():
+    recs = [rec(0.0, 1.2), rec(0.2, 0.7, ["state_grace_expired"])]
+    tp = recs[1]["dex3"]["right"]["extended"]["trigger_path"]
+    tp.update({"state_valid": False, "state_age_ms": 2010.0,
+               "state_grace_state": "expired", "state_grace_reason": "state_grace_expired",
+               "state_gap_count": 3, "state_gap_max_s": 2.01})
+    out = a.analyze(recs)["right"]
+    assert out["state_grace_counts"] == {"expired": 1}
+    assert out["state_gap_max_ms"] == 2010.0
+    assert out["open_events"][0]["state_grace_state"] == "expired"

@@ -26,6 +26,7 @@ from teleop.utils.haptics import extract_dex3_pressure
 from teleop.utils.dex3_telemetry import (
     RateEstimator, extract_hand_snapshot, extract_published_command,
 )
+from teleop.utils.dex3_state_grace import Dex3StateGrace, state_is_fresh
 from teleop.utils.dex3_protection import (
     Dex3HandProtector, ProtectionWarner, extract_protection_state,
 )
@@ -272,28 +273,69 @@ class Dex3_1_Controller:
         except Exception:
             self._note_extended_failure()
 
-    def _apply_protection(self, side, now, target):
-        """Return (q_cmd, enable, flags). Bypass (raw target) if protection absent."""
+    def _apply_protection_detail(self, side, now, target, *, warn_state_stale=True):
+        """Return (q_cmd, enable, flags); a stale result is never fresh feedback."""
         protectors = self.__dict__.get("_protectors")
         if not protectors:
-            return target, None
+            return target, None, None
         try:
             with self._telemetry_lock:
                 state = self.__dict__.get("_protection_state", {}).get(side)
             result = protectors[side].update(now, target, state)
             warner = self.__dict__.get("_protection_warner")
             if warner is not None and result.active:
-                for message in warner.messages(now, side, result.active):
+                active = result.active if warn_state_stale else {
+                    key: text for key, text in result.active.items() if key[0] != "state_stale"
+                }
+                for message in warner.messages(now, side, active):
                     try:
                         logger_mp.warning(message)
                     except Exception:
                         pass
-            self._record_protection_flags(side, result.flags())
-            return result.q_cmd, result.enable
+            flags = result.flags()
+            self._record_protection_flags(side, flags)
+            return result.q_cmd, result.enable, flags
         except Exception:
             # Fail safe: unexpected protection failure -> open rest pose.
             self._note_extended_failure()
-            return Dex3_Open_Pose.copy(), None
+            return Dex3_Open_Pose.copy(), None, None
+
+    def _apply_protection(self, side, now, target):
+        """Compatibility wrapper: return the public two-value protection result."""
+        q_cmd, enable, _ = self._apply_protection_detail(side, now, target)
+        return q_cmd, enable
+
+    def _protection_state_freshness(self, side, now):
+        """Snapshot state+age under one lock; all timestamps are monotonic."""
+        with self._telemetry_lock:
+            state = self.__dict__.get("_protection_state", {}).get(side)
+        ts = state.get("timestamp") if isinstance(state, dict) else None
+        try:
+            age_s = now - ts if np.isfinite(ts) and np.isfinite(now) else None
+        except TypeError:
+            age_s = None
+        return state_is_fresh(now, state), age_s
+
+    @staticmethod
+    def _safe_to_retain(flags, enable):
+        """Only cache an already protected output that remains thermally/fault safe."""
+        if flags is None or enable is None or any(flags.get("fault", [])):
+            return False
+        return bool(all(enable) and all(v > 0.0 for v in flags.get("derate", [])))
+
+    def _warn_state_grace(self, side, event, age_s):
+        if event is None:
+            return
+        detail = "?" if age_s is None else f"{age_s * 1000.0:.0f} ms"
+        messages = {
+            "state_gap_started": f"[Dex3 protecao {side}] estado DDS antigo/ausente ({detail}): retendo ultimo comando protegido por ate 1.5 s",
+            "state_gap_expired": f"[Dex3 protecao {side}] estado DDS ainda ausente ({detail}): graca expirou, comando aberto fail-safe",
+            "state_gap_recovered": f"[Dex3 protecao {side}] estado DDS recuperado ({detail}): protecao recalculada",
+        }
+        try:
+            logger_mp.warning(messages[event])
+        except Exception:
+            pass
 
     def _record_trigger_path(self, side, info, q_target, q_cmd):
         """Side-channel (in-memory, no I/O): trigger path of the latest cycle."""
@@ -500,12 +542,59 @@ class Dex3_1_Controller:
         right_q_target = trigger_to_dex3_targets(
             right_trigger, Dex3_Open_Pose, Dex3_Right_Closed_Pose)
 
-        # Torque/thermal protection only ever moves the command toward the
-        # measured/open pose; it cannot add closure beyond the trigger target.
+        # A short DDS state gap cannot be passed to protection as if it were a
+        # new feedback sample.  Instead retain only the last output protection
+        # already approved from fresh, non-faulted, sub-cutoff feedback.
         now = time.monotonic()
         left_pre, right_pre = left_q_target.copy(), right_q_target.copy()
-        left_q_target, left_enable = self._apply_protection("left", now, left_q_target)
-        right_q_target, right_enable = self._apply_protection("right", now, right_q_target)
+        graces = self.__dict__.setdefault("_state_graces", {
+            "left": Dex3StateGrace(), "right": Dex3StateGrace(),
+        })
+
+        def protected_or_grace(side, target, info):
+            # Test/pre-arm compatibility: without configured protectors there is
+            # no state feedback authority and this class historically bypassed.
+            if not self.__dict__.get("_protectors"):
+                info.update({"state_age_ms": None, "state_valid": False,
+                             "state_grace_state": "expired", "held_command": None,
+                             "state_hold_duration_s": 0.0, "state_grace_reason": "protection_unavailable",
+                             "state_gap_count": 0, "state_gap_max_s": 0.0})
+                return target, None
+            fresh, age_s = self._protection_state_freshness(side, now)
+            grip_active = info["trigger_effective"] > 0.05 and info["trigger_state"] in ("active", "held_stale")
+            if fresh:
+                q_cmd, enable, flags = self._apply_protection_detail(side, now, target)
+                decision = graces[side].update(
+                    now, fresh=True, grip_active=grip_active,
+                    safe=self._safe_to_retain(flags, enable), q_cmd=q_cmd, enable=enable,
+                )
+            else:
+                decision = graces[side].update(
+                    now, fresh=False, grip_active=grip_active, safe=False,
+                    gap_eligible=(age_s is None or age_s >= 0.0),
+                )
+                if decision["state"] == "holding":
+                    q_cmd, enable = decision["q_cmd"], decision["enable"]
+                else:
+                    # Existing fail-safe semantics after grace: open pose; keep
+                    # known motor-fault disables, but never retain squeeze torque.
+                    q_cmd, enable, _ = self._apply_protection_detail(
+                        side, now, target, warn_state_stale=False)
+            info.update({
+                "state_age_ms": None if age_s is None else round(age_s * 1000.0, 1),
+                "state_valid": bool(fresh),
+                "state_grace_state": decision["state"],
+                "held_command": decision["held_command"],
+                "state_hold_duration_s": decision["hold_duration_s"],
+                "state_grace_reason": decision["reason"],
+                "state_gap_count": decision["gap_count"],
+                "state_gap_max_s": decision["gap_max_s"],
+            })
+            self._warn_state_grace(side, decision["warning"], age_s)
+            return q_cmd, enable
+
+        left_q_target, left_enable = protected_or_grace("left", left_q_target, left_info)
+        right_q_target, right_enable = protected_or_grace("right", right_q_target, right_info)
         self._record_trigger_path("left", left_info, left_pre, left_q_target)
         self._record_trigger_path("right", right_info, right_pre, right_q_target)
 

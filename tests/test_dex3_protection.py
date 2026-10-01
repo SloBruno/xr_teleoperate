@@ -648,3 +648,71 @@ def test_stale_trigger_dropout_of_0p3s_does_not_release_latch():
         res = p.update(t + 0.01 * k, FT * 0.0, fblocked(t + 0.01 * k))
         assert res.stall[3] and res.grip_hold[3]
         assert dp.DEX3_KP * abs(res.q_cmd[3] - FQ[3]) == pytest.approx(dp.GRIP_HOLD_TORQUE_NM[3])
+
+
+# ---- (10) state feedback grace (fix/dex3-state-stale-grip-hold) ------------
+def test_control_step_holds_post_protection_output_for_short_state_gaps(module, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    c, written = make_controller(module, 0)
+    zeros = [0.0] * 7
+    feed_state(c, module, "left", zeros, dq=1.0, tau=0)
+    feed_state(c, module, "right", zeros, dq=1.0, tau=0)
+    left, _ = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(0.0))
+    assert 0 < abs(left[3]) < abs(module.Dex3_Left_Closed_Pose[3])  # protected, not raw target
+    for gap in (0.2, 0.7, 1.25):
+        clock[0] = 100.0 + gap
+        c._protection_state.pop("left", None)
+        held, _ = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(0.0))
+        np.testing.assert_allclose(held, left)
+        tp = c._trigger_path["left"]
+        assert tp["state_grace_state"] == "holding"
+        assert tp["state_valid"] is False
+        np.testing.assert_allclose(tp["held_command"], left)
+
+
+def test_state_grace_expires_and_fresh_thermal_or_fault_overrides_immediately(module, monkeypatch):
+    clock = [200.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    c, written = make_controller(module, 0)
+    zeros = [0.0] * 7
+    feed_state(c, module, "left", zeros, dq=1.0, tau=0)
+    feed_state(c, module, "right", zeros, dq=1.0, tau=0)
+    c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(1.0))
+    clock[0] = 202.01
+    c._protection_state.clear()
+    expired, _ = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(1.0))
+    np.testing.assert_allclose(expired, module.Dex3_Open_Pose)
+    assert c._trigger_path["left"]["state_grace_state"] == "expired"
+
+    # Fresh 80C feedback cannot be bypassed by a prior grace cache.
+    clock[0] = 202.02
+    feed_state(c, module, "left", zeros, temp=80, dq=1.0, tau=0)
+    feed_state(c, module, "right", zeros, dq=1.0, tau=0)
+    hot, _ = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(1.0))
+    np.testing.assert_allclose(hot, module.Dex3_Open_Pose)
+
+    # A fault never regains gains after state recovers.
+    for k in range(4):
+        clock[0] += 0.01
+        feed_state(c, module, "left", zeros, mode=0, ms=512, dq=0.0, tau=8e5)
+        feed_state(c, module, "right", zeros, dq=1.0, tau=0)
+        c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(0.0))
+    assert all(kp == 0.0 and kd == 0.0 for _, kp, kd, _ in written["left"][-1])
+
+
+def test_state_grace_is_side_independent_and_rejects_future_state_timestamp(module, monkeypatch):
+    clock = [300.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    c, written = make_controller(module, 0)
+    zeros = [0.0] * 7
+    feed_state(c, module, "left", zeros, dq=1.0, tau=0)
+    feed_state(c, module, "right", zeros, dq=1.0, tau=0)
+    left, right = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(1.0))
+    c._protection_state["left"]["timestamp"] = 301.0  # future is invalid, never grace-held
+    clock[0] = 300.2
+    next_left, next_right = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(1.0))
+    np.testing.assert_allclose(next_left, module.Dex3_Open_Pose)
+    np.testing.assert_allclose(next_right, right)
+    assert c._trigger_path["left"]["state_grace_state"] == "expired"
+    assert c._trigger_path["right"]["state_grace_state"] == "fresh"

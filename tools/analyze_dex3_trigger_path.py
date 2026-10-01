@@ -59,13 +59,18 @@ def analyze(records):
                 rows[side].append((t, q, cmd, tp, pmax))
     out = {}
     for side, rs in rows.items():
-        events, ages, gaps = [], [], []
+        events, ages, gaps, state_gaps = [], [], [], []
+        grace_counts = Counter()
         i = 0
         for k, (t, q, cmd, tp, pmax) in enumerate(rs):
             if tp.get("age_ms") is not None:
                 ages.append(tp["age_ms"])
             if tp.get("gap_max_s") is not None:
                 gaps.append(tp["gap_max_s"] * 1000)
+            if tp.get("state_grace_state") is not None:
+                grace_counts[tp["state_grace_state"]] += 1
+            if tp.get("state_gap_max_s") is not None:
+                state_gaps.append(tp["state_gap_max_s"] * 1000)
             while rs[i][0] < t - OPEN_WINDOW_S:
                 i += 1
             t0, q0, cmd0 = rs[i][0], rs[i][1], rs[i][2]
@@ -82,11 +87,17 @@ def analyze(records):
                                        "trigger_raw": tp.get("trigger_raw"), "trigger_effective": tp.get("trigger_effective"),
                                        "age_ms": tp.get("age_ms"), "grip_latch_state": tp.get("grip_latch_state"),
                                        "trigger_state": tp.get("trigger_state"),
+                                       "state_grace_state": tp.get("state_grace_state"),
+                                       "state_grace_reason": tp.get("state_grace_reason"),
+                                       "state_age_ms": tp.get("state_age_ms"),
+                                       "state_gap_max_s": tp.get("state_gap_max_s"),
                                        "reasons": tp.get("open_reasons") or [tp.get("exact_open_reason") or "unknown (no trigger-path telemetry)"],
                                        "pressure_peak": pmax})
         contact = [r for r in rs if (r[4] or 0) > 0]
         out[side] = {"records": len(rs), "open_events": events, "age_hist_ms": hist(ages),
                      "trigger_gap_max_hist_ms": hist(gaps),
+                     "state_grace_counts": dict(grace_counts),
+                     "state_gap_max_ms": None if not state_gaps else round(max(state_gaps), 3),
                      "stale_records": sum(1 for r in rs if r[3].get("stale")),
                      "records_with_pressure": len(contact),
                      "max_pressure": max([r[4] for r in rs if r[4] is not None], default=None)}
