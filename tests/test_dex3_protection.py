@@ -501,7 +501,7 @@ def test_grip_hold_is_time_limited_then_relaxes_until_release():
     assert res.stall[3] and not res.grip_hold[3]
     assert res.q_cmd[3] == pytest.approx(FQ[3])
     p.update(t_late + 0.01, tgt * 0.4, fblocked(t_late + 0.01))
-    res = p.update(t_late + 0.3, tgt * 0.4, fblocked(t_late + 0.3))
+    res = p.update(t_late + 0.5, tgt * 0.4, fblocked(t_late + 0.5))
     assert not res.stall[3]
 
 
@@ -578,7 +578,7 @@ def test_small_trigger_reduction_does_not_release_but_clear_drop_does():
         res = p.update(t + 0.01 * k, FT * 0.75, fblocked(t + 0.01 * k))
         assert res.stall[3] and res.grip_hold[3]
     t2 = t + 0.6
-    for k in range(30):                              # 40% reduction, sustained
+    for k in range(50):                              # 40% reduction, sustained > debounce
         res = p.update(t2 + 0.01 * k, FT * 0.6, fblocked(t2 + 0.01 * k))
     assert not res.stall[3] and not res.grip_hold[3]
 
@@ -637,3 +637,14 @@ def test_closed_loop_box_model_no_cycle_old_vs_new():
     trans, tq = sim(None, None)
     assert trans == 0
     assert min(tq) >= 1.1 and max(tq) <= dp.CLOSE_TORQUE_CEILING_NM[3] + 1e-9
+
+
+def test_stale_trigger_dropout_of_0p3s_does_not_release_latch():
+    """Real session: controller age hit 248-275 ms (limit 250) -> trigger forced 0 -> old latch released."""
+    p = Dex3HandProtector(OPEN)
+    _engage(p)
+    t = 1.2
+    for k in range(30):  # 0.3 s of trigger==0
+        res = p.update(t + 0.01 * k, FT * 0.0, fblocked(t + 0.01 * k))
+        assert res.stall[3] and res.grip_hold[3]
+        assert dp.DEX3_KP * abs(res.q_cmd[3] - FQ[3]) == pytest.approx(dp.GRIP_HOLD_TORQUE_NM[3])

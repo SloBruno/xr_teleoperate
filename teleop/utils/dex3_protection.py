@@ -94,7 +94,7 @@ GRIP_HOLD_CMD_LIMIT_RAD = (0.0, 0.0, 0.0, 1.47, 1.65, 1.47, 1.65)
 # only if that persists for STALL_RELEASE_DEBOUNCE_S (one-sample jitter or a
 # recoil of the finger never releases). Calibrar.
 STALL_RELEASE_FRACTION = 0.3
-STALL_RELEASE_DEBOUNCE_S = 0.2
+STALL_RELEASE_DEBOUNCE_S = 0.4
 # Terminal warning at this finger temperature (before derate bites hard).
 TEMP_WARN_C = 70.0
 # --- (3) Thermal derate -----------------------------------------------------
@@ -217,6 +217,7 @@ class Dex3HandProtector:
         self._stall_mag = [0.0] * n
         self._stall_start: list[float | None] = [None] * n
         self._release_since: list[float | None] = [None] * n
+        self._stall_sign = [0.0] * n
         self._hot = [False] * n
         self._derate_prev = [1.0] * n
         self._last_temp: list[float | None] = [None] * n
@@ -329,7 +330,9 @@ class Dex3HandProtector:
             # Latch: leave only when the trigger itself clearly backs off (or the
             # command is no longer a closing one), sustained for the debounce.
             mag = abs(target - open_q)
-            leaving = (not closing) or mag <= self._stall_mag[i] * (1.0 - STALL_RELEASE_FRACTION)
+            # NOT tied to `closing`/t_eff: thermal derate shrinks t_eff and must
+            # not release the latch (that re-created a heat-driven open/close cycle).
+            leaving = mag <= self._stall_mag[i] * (1.0 - STALL_RELEASE_FRACTION)
             if leaving:
                 if self._release_since[i] is None:
                     self._release_since[i] = now
@@ -348,6 +351,7 @@ class Dex3HandProtector:
                 if now - self._stall_since[i] >= STALL_TIME_S:
                     self._stall[i] = True
                     self._stall_mag[i] = abs(target - open_q)
+                    self._stall_sign[i] = float(sign)
                     self._release_since[i] = None
                     self._stall_start[i] = now
             else:
@@ -360,14 +364,15 @@ class Dex3HandProtector:
             if held:
                 # keep a reduced, thermally-faded squeeze toward the target
                 step = hold_err
-                q_hold = q + sign * step
+                hs = self._stall_sign[i]  # direction latched at entry (trigger dropout must not flip it)
+                q_hold = q + hs * step
                 lim = GRIP_HOLD_CMD_LIMIT_RAD[i]
                 if lim > 0.0:
                     q_hold = float(np.clip(q_hold, open_q - lim, open_q + lim))
-                    if sign * (q_hold - q) < 0:  # already past the limit: never pull back
+                    if hs * (q_hold - q) < 0:  # already past the limit: never pull back
                         q_hold = q
                 else:
-                    q_hold = q + sign * min(step, abs(t_eff - q))
+                    q_hold = q + hs * min(step, abs(t_eff - q))
                 step = abs(q_hold - q)
                 res.q_cmd[i] = q_hold
                 res.grip_hold[i] = True
