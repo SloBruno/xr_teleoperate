@@ -492,6 +492,60 @@ def test_finger_stall_holds_pose_with_reduced_force():
     assert dp.GRIP_HOLD_TORQUE_NM[3] < dp.CLOSE_TORQUE_CEILING_NM[3]
 
 
+@pytest.mark.parametrize("error", (0.0, 0.05, 0.10))
+def test_long_finger_low_closing_error_never_enters_grip_hold(error):
+    """High tau/dq=0 alone is not contact; no 'segurando pegada' message."""
+    p = Dex3HandProtector(OPEN)
+    tgt = np.array([0, 0, 0, -0.8, -0.8, -0.8, -0.8])
+    q = tgt.copy()
+    q[3:] += error  # negative closing target: q above target yields positive closing error
+    res = run(p, 0.0, dp.STALL_TIME_S + 0.3, tgt,
+              lambda t: state(t, q=q, dq=np.zeros(7), tau=np.full(7, 8e5)))
+    for i in range(3, 7):
+        assert not res.stall[i] and not res.grip_hold[i]
+        assert ("stall", i) not in res.active
+        assert "segurando pegada" not in " ".join(res.active.values())
+
+
+def test_long_finger_contact_error_at_gate_enters_hold_without_relaxing():
+    """0.20 rad is the smallest recorded-contact-class closing error (real: 0.26+)."""
+    p = Dex3HandProtector(OPEN)
+    tgt = np.array([0, 0, 0, -0.8, -0.8, -0.8, -0.8])
+    q = tgt.copy()
+    q[3:] += 0.20
+    res = run(p, 0.0, dp.STALL_TIME_S + 0.3, tgt,
+              lambda t: state(t, q=q, dq=np.zeros(7), tau=np.full(7, 8e5)))
+    for i in range(3, 7):
+        assert res.stall[i] and res.grip_hold[i]
+        assert res.q_cmd[i] < q[i]  # hold remains in the closing direction
+        assert dp.DEX3_KP * abs(res.q_cmd[i] - q[i]) <= dp.GRIP_HOLD_TORQUE_NM[i] + 1e-9
+        assert "segurando pegada" in res.active[("stall", i)]
+
+
+def test_long_finger_opening_error_is_not_contact():
+    p = Dex3HandProtector(OPEN)
+    tgt = np.array([0, 0, 0, -0.8, -0.8, -0.8, -0.8])
+    q = tgt.copy()
+    q[3:] -= 0.5  # target-q has opening sign, even though its magnitude is large
+    res = run(p, 0.0, dp.STALL_TIME_S + 0.3, tgt,
+              lambda t: state(t, q=q, dq=np.zeros(7), tau=np.full(7, 8e5)))
+    assert not any(res.stall[3:]) and not any(res.grip_hold[3:])
+
+
+def test_long_finger_single_contact_like_sample_cannot_enter_hold():
+    p = Dex3HandProtector(OPEN)
+    tgt = np.array([0, 0, 0, -0.8, -0.8, -0.8, -0.8])
+    contact_q = tgt.copy()
+    contact_q[3:] += dp.FINGER_CONTACT_ERR_RAD
+    res = p.update(0.0, tgt, state(0.0, q=contact_q, dq=np.zeros(7), tau=np.full(7, 8e5)))
+    assert not any(res.grip_hold[3:])
+    low_q = tgt.copy()
+    low_q[3:] += 0.05
+    res = run(p, 0.01, dp.STALL_TIME_S + 0.3, tgt,
+              lambda t: state(t, q=low_q, dq=np.zeros(7), tau=np.full(7, 8e5)))
+    assert not any(res.stall[3:]) and not any(res.grip_hold[3:])
+
+
 def test_grip_hold_is_time_limited_then_relaxes_until_release():
     p = Dex3HandProtector(OPEN)
     tgt = np.array([0, 0, 0, 1.15, 1.3, 1.15, 1.3]) * -1
@@ -651,6 +705,34 @@ def test_stale_trigger_dropout_of_0p3s_does_not_release_latch():
 
 
 # ---- (10) state feedback grace (fix/dex3-state-stale-grip-hold) ------------
+def test_state_grace_holds_safe_none_enable_protected_command(module, monkeypatch):
+    """None means normal enabled gains, not an absent command-cache permission."""
+    clock = [100.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    c, _ = make_controller(module, 0)
+    protected = np.array([0.0, 0.0, 0.0, -0.31, -0.42, -0.31, -0.42])
+    flags = {"fault": [False] * 7, "derate": [1.0] * 7}
+    c._protection_state = {"left": {"timestamp": 100.0}, "right": {"timestamp": 100.0}}
+
+    def detail(side, now, target, **_):
+        if side in c._protection_state:
+            return protected.copy(), None, flags
+        return module.Dex3_Open_Pose.copy(), None, flags
+
+    c._apply_protection_detail = detail
+    assert c._safe_to_retain(flags, None)
+    first, _ = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(0.0))
+    np.testing.assert_allclose(first, protected)
+
+    clock[0] = 100.2
+    c._protection_state.pop("left")
+    held, _ = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(0.0))
+    np.testing.assert_allclose(held, protected)
+    assert c._trigger_path["left"]["state_grace_state"] == "holding"
+    assert c._trigger_path["left"]["held_command"] == protected.tolist()
+    assert c._state_graces["left"]._enable is None
+
+
 def test_control_step_holds_post_protection_output_for_short_state_gaps(module, monkeypatch):
     clock = [100.0]
     monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
@@ -716,3 +798,32 @@ def test_state_grace_is_side_independent_and_rejects_future_state_timestamp(modu
     np.testing.assert_allclose(next_right, right)
     assert c._trigger_path["left"]["state_grace_state"] == "expired"
     assert c._trigger_path["right"]["state_grace_state"] == "fresh"
+
+
+def test_state_grace_keeps_safe_long_fingers_when_thumb_faults_before_a_gap(module, monkeypatch):
+    """A thumb fault is joint-local: it cannot discard the long-finger cache."""
+    clock = [400.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    c, written = make_controller(module, 0)
+    protected = np.array([0.0, -0.2, -0.3, -0.41, -0.42, -0.43, -0.44])
+    flags = {"fault": [False, True, False, False, False, False, False],
+             "derate": [1.0] * 7}
+    c._protection_state = {"left": {"timestamp": 400.0}, "right": {"timestamp": 400.0}}
+
+    def detail(side, now, target, **_):
+        return protected.copy(), [True, False, True, True, True, True, True], flags
+
+    c._apply_protection_detail = detail
+    first, _ = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(0.0))
+    assert first[1] == protected[1]  # fresh protection owns the immediate safe state.
+
+    clock[0] = 400.2
+    c._protection_state.pop("left")
+    held, _ = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(0.0))
+
+    assert held[1] == module.Dex3_Open_Pose[1]
+    np.testing.assert_allclose(held[3:7], protected[3:7])
+    assert c._trigger_path["left"]["state_grace_state"] == "holding"
+    assert c._trigger_path["left"]["state_grace_joint_hold"] == [0, 2, 3, 4, 5, 6]
+    assert c._trigger_path["left"]["state_grace_blocked_joints"] == [1]
+    assert written["left"][-1][1][1:3] == (0.0, 0.0)

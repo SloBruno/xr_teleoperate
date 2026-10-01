@@ -1,9 +1,8 @@
-"""Pure, per-hand output retention for short Dex3 DDS state gaps.
+"""Per-joint output retention for short Dex3 DDS state gaps.
 
-This is deliberately outside ``Dex3HandProtector``: it never treats stale state
-as fresh feedback.  It can only replay a command that protection computed from
-fresh, safe feedback, for a bounded interval while the grip latch remains
-closed.  On expiry the caller must use its normal fail-safe path.
+This remains outside ``Dex3HandProtector``: stale feedback is never treated as
+fresh.  It only replays joints whose last fresh, protected output was safe.
+Every other joint is commanded to the caller-provided open pose.
 """
 from __future__ import annotations
 
@@ -13,6 +12,7 @@ from typing import Sequence
 import numpy as np
 
 STATE_GRACE_S = 1.5
+_NUM_JOINTS = 7
 
 
 def state_is_fresh(now: float, state: dict | None, stale_s: float = 0.5) -> bool:
@@ -25,26 +25,50 @@ def state_is_fresh(now: float, state: dict | None, stale_s: float = 0.5) -> bool
 
 
 class Dex3StateGrace:
-    """Clock-injected state-gap FSM for one hand; no I/O and no protection math."""
+    """Clock-injected state-gap FSM; cache eligibility is independent per joint."""
 
     def __init__(self, grace_s: float = STATE_GRACE_S):
         self.grace_s = float(grace_s)
         self._q_cmd: np.ndarray | None = None
         self._enable: list[bool] | None = None
         self._safe_at: float | None = None
+        self._joint_q: list[float | None] = [None] * _NUM_JOINTS
+        self._joint_safe_at: list[float | None] = [None] * _NUM_JOINTS
+        self._joint_enable: list[bool] = [False] * _NUM_JOINTS
+        self._all_normal_enable = False
         self._gap_started_at: float | None = None
         self._gap_count = 0
         self._gap_max_s = 0.0
         self._was_holding = False
         self._was_expired = False
 
-    def update(self, now: float, *, fresh: bool, grip_active: bool, safe: bool,
-               q_cmd: Sequence[float] | None = None,
-               enable: Sequence[bool] | None = None, gap_eligible: bool = True) -> dict:
-        """Return fresh/holding/expired output metadata without mutating commands.
+    @staticmethod
+    def _joint_values(values, *, default: bool | None = None) -> list[bool] | None:
+        if isinstance(values, (bool, np.bool_)):
+            return [bool(values)] * _NUM_JOINTS
+        try:
+            out = [bool(v) for v in values]
+        except TypeError:
+            return [default] * _NUM_JOINTS if default is not None else None
+        return out if len(out) == _NUM_JOINTS else None
 
-        ``fresh`` must be based only on a monotonic receive timestamp.  A caller
-        supplies ``safe`` only after normal protection has evaluated fresh state.
+    @staticmethod
+    def _open_pose(open_q: Sequence[float] | None) -> np.ndarray:
+        try:
+            pose = np.asarray(np.zeros(_NUM_JOINTS) if open_q is None else open_q, dtype=float).reshape(_NUM_JOINTS)
+        except (TypeError, ValueError):
+            return np.zeros(_NUM_JOINTS)
+        return np.where(np.isfinite(pose), pose, 0.0)
+
+    def update(self, now: float, *, fresh: bool, grip_active: bool, safe: bool | Sequence[bool],
+               q_cmd: Sequence[float] | None = None,
+               enable: Sequence[bool] | None = None, gap_eligible: bool = True,
+               open_q: Sequence[float] | None = None) -> dict:
+        """Return fresh/holding/expired metadata and an optional hybrid command.
+
+        ``safe`` may be the legacy hand-wide bool or seven per-joint eligibility
+        bits. A joint is cached only with a finite protected command and enabled
+        fresh feedback. ``open_q`` is used for every uncacheable joint in a gap.
         """
         now = float(now)
         if not math.isfinite(now):
@@ -55,52 +79,82 @@ class Dex3StateGrace:
             self._gap_started_at = None
             self._was_holding = False
             self._was_expired = False
-            if safe and q_cmd is not None and enable is not None:
-                cmd = np.asarray(q_cmd, dtype=float).reshape(7).copy()
-                if np.all(np.isfinite(cmd)):
-                    self._q_cmd = cmd
-                    self._enable = [bool(v) for v in enable]
-                    self._safe_at = now
-                else:
-                    self._clear_cache()
-            else:
-                self._clear_cache()
+            self._cache_fresh(now, safe, q_cmd, enable)
             if was_gap:
                 warning = "state_gap_recovered"
-            return self._result("fresh", "fresh_state", warning, q_cmd, enable, 0.0)
+            return self._result("fresh", "fresh_state", warning, q_cmd, enable, 0.0, [], [])
 
         if not gap_eligible:
             self._clear_cache()
             self._was_holding, self._was_expired = False, True
-            return self._result("expired", "invalid_state_timestamp", "state_gap_expired", None, None, 0.0)
+            return self._result("expired", "invalid_state_timestamp", "state_gap_expired", None, None, 0.0, [], list(range(_NUM_JOINTS)))
 
         if self._gap_started_at is None:
             self._gap_started_at = now
             self._gap_count += 1
         elapsed = max(0.0, now - self._gap_started_at)
         self._gap_max_s = max(self._gap_max_s, elapsed)
-        can_hold = (grip_active and self._q_cmd is not None and self._enable is not None
-                    and self._safe_at is not None and now - self._safe_at <= self.grace_s
-                    and elapsed <= self.grace_s)
-        if can_hold:
+        held_joints = self._held_joints(now) if grip_active and elapsed <= self.grace_s else []
+        if held_joints:
             if not self._was_holding:
                 warning = "state_gap_started"
             self._was_holding, self._was_expired = True, False
-            return self._result("holding", "state_gap_short", warning,
-                                self._q_cmd.copy(), list(self._enable), elapsed)
+            q_out = self._open_pose(open_q)
+            for i in held_joints:
+                q = self._joint_q[i]
+                assert q is not None
+                q_out[i] = q
+            blocked = [i for i in range(_NUM_JOINTS) if i not in held_joints]
+            enable_out = None if self._all_normal_enable and len(held_joints) == _NUM_JOINTS else [i in held_joints for i in range(_NUM_JOINTS)]
+            return self._result("holding", "state_gap_short", warning, q_out, enable_out, elapsed, held_joints, blocked)
 
         reason = "grip_not_active" if not grip_active else "state_grace_expired"
         if not self._was_expired:
             warning = "state_gap_expired"
         self._was_holding, self._was_expired = False, True
-        return self._result("expired", reason, warning, None, None, elapsed)
+        return self._result("expired", reason, warning, None, None, elapsed, [], list(range(_NUM_JOINTS)))
+
+    def _cache_fresh(self, now, safe, q_cmd, enable):
+        try:
+            cmd = np.asarray(q_cmd, dtype=float).reshape(_NUM_JOINTS).copy()
+        except (TypeError, ValueError):
+            self._clear_cache()
+            return
+        safe_bits = self._joint_values(safe)
+        enable_bits = [True] * _NUM_JOINTS if enable is None else self._joint_values(enable)
+        if safe_bits is None or enable_bits is None:
+            self._clear_cache()
+            return
+        for i in range(_NUM_JOINTS):
+            if safe_bits[i] and enable_bits[i] and math.isfinite(cmd[i]):
+                self._joint_q[i] = float(cmd[i])
+                self._joint_safe_at[i] = now
+                self._joint_enable[i] = True
+            else:
+                self._joint_q[i] = None
+                self._joint_safe_at[i] = None
+                self._joint_enable[i] = False
+        self._q_cmd = cmd if all(self._joint_enable) else None
+        self._enable = None if enable is None and all(self._joint_enable) else [bool(v) for v in enable_bits]
+        self._safe_at = now if any(self._joint_enable) else None
+        self._all_normal_enable = enable is None and all(self._joint_enable)
+
+    def _held_joints(self, now: float) -> list[int]:
+        return [i for i in range(_NUM_JOINTS)
+                if self._joint_enable[i] and self._joint_q[i] is not None
+                and self._joint_safe_at[i] is not None
+                and now - self._joint_safe_at[i] <= self.grace_s]
 
     def _clear_cache(self):
         self._q_cmd = None
         self._enable = None
         self._safe_at = None
+        self._joint_q = [None] * _NUM_JOINTS
+        self._joint_safe_at = [None] * _NUM_JOINTS
+        self._joint_enable = [False] * _NUM_JOINTS
+        self._all_normal_enable = False
 
-    def _result(self, state, reason, warning, q_cmd, enable, duration):
+    def _result(self, state, reason, warning, q_cmd, enable, duration, held_joints, blocked_joints):
         held = None if q_cmd is None else np.asarray(q_cmd, dtype=float).tolist()
         return {
             "state": state,
@@ -112,4 +166,6 @@ class Dex3StateGrace:
             "hold_duration_s": round(float(duration), 3),
             "gap_count": self._gap_count,
             "gap_max_s": round(self._gap_max_s, 3),
+            "state_grace_joint_hold": list(held_joints),
+            "state_grace_blocked_joints": list(blocked_joints),
         }
