@@ -277,6 +277,7 @@ cd "$repo/teleop"
 [[ -n "${XR_TELEOP_VUER_IP:-}" ]] && echo "Quest: https://vuer.ai?ws=wss://${XR_TELEOP_VUER_IP}:${XR_NET_PORT}&grid=False"
 echo "Teto de caminhada: ${walk_speed_cap} m/s linear, ${turn_rate_cap} rad/s angular (BotBrain g1-r1)"
 echo "Backend de caminhada: ${loco_backend}"
+echo "FSM solicitado (G1_LOCO_REQUEST_FSM): ${G1_LOCO_REQUEST_FSM:-none}"
 # Optional XR video plane (unset = historical 1.0 m at 1.0 m). Ex.: XR_VIDEO_PLANE_HEIGHT=auto
 video_plane_args=()
 [[ -n "${XR_VIDEO_PLANE_HEIGHT:-}" ]] && video_plane_args+=(--video-plane-height "$XR_VIDEO_PLANE_HEIGHT")
@@ -290,4 +291,5 @@ exec "$teleimager_python" -s teleop_hand_and_arm.py \
   --walk-speed-cap "$walk_speed_cap" \
   --turn-rate-cap "$turn_rate_cap" \
   --loco-backend "$loco_backend" \
+  --loco-request-fsm "${G1_LOCO_REQUEST_FSM:-none}" \
   ${video_plane_args[@]+"${video_plane_args[@]}"}

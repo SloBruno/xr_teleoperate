@@ -1,5 +1,6 @@
 """BotBrain-style Regular-mode (FSM 500/501) walking preflight, watchdog and
-latest-only Move sender.  Never sends SetFsmId; RUN (801) is not supported."""
+latest-only Move sender.  SetFsmId is sent ONLY when explicitly requested
+(--loco-request-fsm 500), once, in the preflight; RUN (801) is not supported."""
 import logging
 import threading
 import time
@@ -7,14 +8,66 @@ import time
 ACCEPTED_FSM_IDS = frozenset({500, 501})  # Regular mode (R1+X) only
 SPEED_MODE_ATTEMPTS = 3
 STICK_TIMEOUT_S = 0.2
+FSM_CONFIRM_TIMEOUT_S = 3.0
+FSM_POLL_INTERVAL_S = 0.1
 logger = logging.getLogger(__name__)
 
 
-def run_loco_preflight(wrapper, sleep=time.sleep, attempts=SPEED_MODE_ATTEMPTS):
+def parse_request_fsm(value):
+    """None/'none' -> None; only 500 is accepted (801/501/anything else -> ValueError)."""
+    if value is None or (isinstance(value, str) and value.strip().lower() == "none"):
+        return None
+    try:
+        v = int(str(value).strip())
+    except ValueError:
+        v = None
+    if v != 500:
+        raise ValueError(f"--loco-request-fsm só aceita 'none' ou 500 (recebido {value!r}); 801/501/outros são proibidos")
+    return v
+
+
+def _request_fsm_500(wrapper, res, fsm, sleep, clock):
+    """fsm is 500 or 501. Returns True when locomotion may proceed."""
+    res["fsm_requested"] = 500
+    if fsm == 500:
+        res.update(fsm_after=500, fsm_confirm_s=0.0, fsm_banner="FSM solicitado: 500 (já estava em 500, nada enviado)")
+        return True
+    t0 = clock()
+    rc = wrapper.set_fsm_id(500)   # exactly one SetFsmId, never retried
+    res["set_fsm_rc"] = rc
+    after = None
+    reason = None
+    if rc != 0:
+        after = wrapper.read_fsm_id(timeout=0.3)
+        reason = f"fsm_request_failed:rc={rc}"
+    else:
+        while True:
+            after = wrapper.read_fsm_id(timeout=0.3)
+            if after == 500:
+                break
+            if clock() - t0 >= FSM_CONFIRM_TIMEOUT_S:
+                reason = f"fsm_request_failed:timeout_fsm={after}"
+                break
+            sleep(FSM_POLL_INTERVAL_S)
+    res["fsm_after"] = after
+    res["fsm_confirm_s"] = round(clock() - t0, 3) if reason is None else None
+    if reason:
+        res["refusal_reason"] = reason
+        res["fsm_banner"] = f"FSM solicitado: {fsm} -> 500 FALHOU ({reason}); locomoção DESABILITADA"
+        res["message"] = res["fsm_banner"]
+        return False
+    res["fsm_banner"] = f"FSM solicitado: {fsm} -> 500 (confirmado)"
+    return True
+
+
+def run_loco_preflight(wrapper, sleep=time.sleep, attempts=SPEED_MODE_ATTEMPTS, request_fsm=None, clock=time.monotonic):
     """Read-only FSM check, then best-effort SetSpeedMode(0) w/ retries, best-effort ContinuousGait(false),
     checked zero Move.  Returns dict with loco_enabled and refusal_reason."""
     res = {"loco_enabled": False, "refusal_reason": None, "message": "", "fsm_id": None,
-           "set_speed_mode_rc": None, "set_speed_mode_ok": None, "preflight_ok": False}
+           "set_speed_mode_rc": None, "set_speed_mode_ok": None, "preflight_ok": False,
+           "fsm_before": None, "fsm_requested": None, "fsm_after": None, "set_fsm_rc": None,
+           "fsm_confirm_s": None, "fsm_banner": None}
+    request = parse_request_fsm(request_fsm)   # ValueError before anything is read/sent
     res["backend"] = getattr(wrapper, "backend", "setvelocity")
     berr = getattr(wrapper, "backend_error", None)
     if berr:   # fail-safe: no silent fallback to another backend
@@ -23,7 +76,7 @@ def run_loco_preflight(wrapper, sleep=time.sleep, attempts=SPEED_MODE_ATTEMPTS):
                           "Use G1_LOCO_BACKEND=setvelocity para forçar o backend antigo.")
         return res
     fsm = wrapper.read_fsm_id(timeout=0.3)
-    res["fsm_id"] = fsm
+    res["fsm_id"] = res["fsm_before"] = fsm
     if fsm is None:
         res["refusal_reason"] = "fsm_unreadable"
         res["message"] = "FSM unreadable; locomotion disabled. Put the robot in Regular mode (R1+X on the R3 remote)."
@@ -33,6 +86,10 @@ def run_loco_preflight(wrapper, sleep=time.sleep, attempts=SPEED_MODE_ATTEMPTS):
         res["message"] = (f"FSM id {fsm} is not Regular walk (500/501); locomotion disabled. "
                           "Enter Regular mode with R1+X on the R3 remote and restart.")
         return res
+    if request == 500 and not _request_fsm_500(wrapper, res, fsm, sleep, clock):
+        return res
+    if res["fsm_after"] is not None:
+        fsm = res["fsm_after"]
     rc = None
     if res["backend"] == "wirelesscontroller":
         # SetSpeedMode/ContinuousGait are RPCs of the SetVelocity path; the

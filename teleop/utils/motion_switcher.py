@@ -87,6 +87,15 @@ class LocoClientWrapper:
         code, _ = self._cfg()._Call(7107, _json.dumps({"data": mode}))
         return code
 
+    def set_fsm_id(self, fsm_id, timeout=0.5):
+        """SetFsmId (7101) on the config client, short BLOCKING timeout. Only 500
+        is allowed; called solely from the opt-in preflight, never the control loop."""
+        import json as _json
+        if fsm_id != 500:
+            raise ValueError(f"SetFsmId só permitido para 500 (recebido {fsm_id!r})")
+        code, _ = self._cfg(timeout)._Call(7101, _json.dumps({"data": fsm_id}))
+        return code
+
     def set_balance_mode(self, mode=0):
         # ContinuousGait(false) == SetBalanceMode(0); never enable it.
         return self._cfg().SetBalanceMode(mode)

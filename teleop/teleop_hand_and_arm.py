@@ -434,6 +434,7 @@ if __name__ == '__main__':
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
     parser.add_argument('--walk-speed-cap', type=float, default=None, help='Walk cap m/s (default 0.3, hard max 0.6; env G1_WALK_SPEED_CAP)')
+    parser.add_argument('--loco-request-fsm', type=str, default='none', choices=['none', '500'], help='Opt-in: in the preflight only, request FSM 500 (SetFsmId) when the robot is in 501 and confirm by polling; never 801; default none = send nothing')
     parser.add_argument('--loco-backend', type=str, default='wirelesscontroller', choices=['setvelocity', 'wirelesscontroller'], help='Walking transport: wirelesscontroller (default: continuous 20 Hz rt/wirelesscontroller joystick state; fail-safe, no silent fallback) or setvelocity (legacy RPC 7105, only when forced)')
     parser.add_argument('--turn-rate-cap', type=float, default=None, help='Turn cap rad/s (default 0.3, hard max 1.0; env G1_TURN_RATE_CAP)')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
@@ -544,9 +545,12 @@ if __name__ == '__main__':
         if args.motion:
             loco_wrapper = LocoClientWrapper(backend=args.loco_backend, walk_cap=walk_cap, turn_cap=turn_cap)
             logger_mp.warning(f"[loco] backend: {args.loco_backend}")
-            # BotBrain-style preflight, Regular mode only (FSM 500/501, R1+X). Never sends SetFsmId.
-            loco_preflight = run_loco_preflight(loco_wrapper)
+            # BotBrain-style preflight, Regular mode only (FSM 500/501, R1+X). SetFsmId(500) only if --loco-request-fsm 500.
+            loco_preflight = run_loco_preflight(loco_wrapper, request_fsm=args.loco_request_fsm)
             logger_mp.info(f"[loco] preflight: {loco_preflight}")
+            if loco_preflight.get("fsm_banner"):
+                logger_mp.warning(f"[loco] {loco_preflight['fsm_banner']}")
+                print(loco_preflight["fsm_banner"], flush=True)
             logger_mp.warning(speed_cap_banner(walk_cap, turn_cap))
             if loco_preflight["loco_enabled"]:
                 loco_wrapper.start_move_sender()
@@ -1023,6 +1027,8 @@ if __name__ == '__main__':
                 stick_log["turn_cap"] = turn_cap
                 stick_log["loco_enabled"] = bool(loco_preflight and loco_preflight.get("loco_enabled"))
                 stick_log["loco_disabled_reason"] = None if stick_log["loco_enabled"] else (loco_preflight or {}).get("refusal_reason")
+                for _k in ("fsm_before", "fsm_requested", "fsm_after", "set_fsm_rc", "fsm_confirm_s"):
+                    stick_log[_k] = (loco_preflight or {}).get(_k)
                 stick_log["loco_backend"] = getattr(loco_wrapper, "backend_telemetry", lambda: {"backend": args.loco_backend})()
                 stick_log["watchdog_stop_code"] = getattr(loco_wrapper, "watchdog_stop_code", None)
                 if getattr(loco_wrapper, "sender", None) is not None:
