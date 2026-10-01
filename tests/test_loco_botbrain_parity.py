@@ -92,11 +92,32 @@ def test_speed_mode_retries_then_ok():
     assert names(w).count("speed") == 3
 
 
-def test_speed_mode_exhausted_refuses():
-    w = FakeWrapper(speed_rc=(3104,))
+def test_speed_mode_rejected_is_best_effort_not_fatal(caplog):
+    w = FakeWrapper(fsm_seq=(501,), speed_rc=(3103,))
+    with caplog.at_level("WARNING"):
+        r = run(w)
+    assert r["loco_enabled"] and r["preflight_ok"] and r["refusal_reason"] is None
+    assert r["set_speed_mode_rc"] == 3103 and r["set_speed_mode_ok"] is False
+    assert names(w).count("speed") == lp.SPEED_MODE_ATTEMPTS
+    assert "zero" in names(w) and "balance" in names(w)
+    msgs = [m for m in caplog.messages if "SetSpeedMode não aceito pelo firmware (rc=3103)" in m]
+    assert len(msgs) == 1 and "perfil padrão do robô" in msgs[0]
+
+
+def test_speed_mode_ok_flag_true_on_success():
+    r = run(FakeWrapper())
+    assert r["set_speed_mode_ok"] is True and r["set_speed_mode_rc"] == 0
+
+
+def test_speed_mode_rejected_still_gated_by_zero_move():
+    r = run(FakeWrapper(speed_rc=(3103,), zero_rc=3104))
+    assert not r["loco_enabled"] and r["refusal_reason"] == "zero_move_failed:3104"
+
+
+def test_speed_mode_rejected_still_gated_by_fsm():
+    w = FakeWrapper(fsm_seq=(801,), speed_rc=(3103,))
     r = run(w)
-    assert not r["loco_enabled"] and r["refusal_reason"] == "set_speed_mode_failed:3104"
-    assert names(w).count("speed") == lp.SPEED_MODE_ATTEMPTS and "zero" not in names(w)
+    assert not r["loco_enabled"] and r["refusal_reason"] == "fsm_not_walk:801"
 
 
 def test_zero_move_failure_refuses():

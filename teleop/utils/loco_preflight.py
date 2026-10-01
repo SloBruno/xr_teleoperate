@@ -1,18 +1,20 @@
 """BotBrain-style Regular-mode (FSM 500/501) walking preflight, watchdog and
 latest-only Move sender.  Never sends SetFsmId; RUN (801) is not supported."""
+import logging
 import threading
 import time
 
 ACCEPTED_FSM_IDS = frozenset({500, 501})  # Regular mode (R1+X) only
 SPEED_MODE_ATTEMPTS = 3
 STICK_TIMEOUT_S = 0.2
+logger = logging.getLogger(__name__)
 
 
 def run_loco_preflight(wrapper, sleep=time.sleep, attempts=SPEED_MODE_ATTEMPTS):
-    """Read-only FSM check, then SetSpeedMode(0) w/ retries, ContinuousGait(false),
+    """Read-only FSM check, then best-effort SetSpeedMode(0) w/ retries, best-effort ContinuousGait(false),
     checked zero Move.  Returns dict with loco_enabled and refusal_reason."""
     res = {"loco_enabled": False, "refusal_reason": None, "message": "", "fsm_id": None,
-           "set_speed_mode_rc": None, "preflight_ok": False}
+           "set_speed_mode_rc": None, "set_speed_mode_ok": None, "preflight_ok": False}
     fsm = wrapper.read_fsm_id(timeout=0.3)
     res["fsm_id"] = fsm
     if fsm is None:
@@ -31,11 +33,13 @@ def run_loco_preflight(wrapper, sleep=time.sleep, attempts=SPEED_MODE_ATTEMPTS):
             break
         sleep(0.25 * (i + 1))
     res["set_speed_mode_rc"] = rc
-    if rc != 0:
-        res["refusal_reason"] = f"set_speed_mode_failed:{rc}"
-        res["message"] = f"SetSpeedMode(0) failed (rc={rc}); locomotion disabled."
-        return res
-    wrapper.set_balance_mode(0)  # ContinuousGait(false), as BotBrain; best effort
+    res["set_speed_mode_ok"] = rc == 0
+    if rc != 0:  # best effort: firmware may not accept RPC 7107; keep robot default profile
+        logger.warning("SetSpeedMode não aceito pelo firmware (rc=%s); seguindo com o perfil padrão do robô", rc)
+    try:
+        wrapper.set_balance_mode(0)  # ContinuousGait(false), as BotBrain; best effort
+    except Exception as e:
+        logger.warning("ContinuousGait(false) falhou (%s); seguindo", e)
     zrc = wrapper.checked_zero()
     if zrc != 0:
         res["refusal_reason"] = f"zero_move_failed:{zrc}"
