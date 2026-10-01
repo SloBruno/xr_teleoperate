@@ -55,7 +55,11 @@ DEX3_KP = 1.5
 # Long fingers (index/middle) raised 1.0 -> 1.4 N*m (= URDF rated effort) because
 # the closed pose now sits further than the old 0.67 rad error cap would allow
 # when blocked by an object. Thumb ceiling UNCHANGED (0.75): not the reported issue.
-CLOSE_TORQUE_CEILING_NM = (0.75, 0.75, 0.75, 1.4, 1.4, 1.4, 1.4)
+# 1.4 -> 1.8 (fix/dex3-grip-no-oscillation): URDF rated effort is 1.4 N*m; no
+# documented peak could be verified (third-party ~3.1 N*m for the thumb motor),
+# so 1.8 is a modest 29% step. CALIBRAR NO TESTE FISICO (watch temperature).
+FINGER_CLOSE_CEILING_NM = 1.8
+CLOSE_TORQUE_CEILING_NM = (0.75, 0.75, 0.75) + (FINGER_CLOSE_CEILING_NM,) * 4
 # Opening ceiling (toward rest pose). Higher so the hand can still open
 # quickly on trigger release, but still below the old 2.6 N*m implicit peak.
 # Calibrar no teste fisico.
@@ -75,12 +79,24 @@ STALL_TIME_S = 0.75
 # object push the finger back and the box slips). Time-limited, fades with the
 # thermal derate factor, never while faulted. Calibrar no teste fisico.
 # Thumb = 0.0: thumb keeps the old relax-on-stall behaviour (thermal history).
-GRIP_HOLD_TORQUE_NM = (0.0, 0.0, 0.0, 0.8, 0.8, 0.8, 0.8)
-GRIP_HOLD_MAX_S = 10.0
-# Once stalled (after the hold window, or without hold), hold relaxed (q_cmd = q_meas) until the trigger-driven target
-# backs off by this much toward open (rad). Calibrar.
-STALL_RELEASE_DELTA_RAD = 0.3
-
+# Hold torque raised 0.8 -> 1.2 N*m (calibrar no teste fisico).
+GRIP_HOLD_TORQUE_NM = (0.0, 0.0, 0.0, 1.2, 1.2, 1.2, 1.2)
+# Hold time limit 10 -> 30 s; the real defence is the thermal derate (hold torque
+# scales with the derate factor and is cut at DERATE_OPEN_C). Calibrar.
+GRIP_HOLD_MAX_S = 30.0
+# Hold may push the command PAST the trigger target (never past these |q| limits,
+# ~0.1 rad inside the URDF stops: joint0 +-1.571, joint1 +-1.745) because with a
+# box blocking the finger at q~0.72 the 1.15 rad pose only leaves 0.43 rad of
+# error = 0.65 N*m, whatever the ceiling. Per slot; thumb unused.
+GRIP_HOLD_CMD_LIMIT_RAD = (0.0, 0.0, 0.0, 1.47, 1.65, 1.47, 1.65)
+# Grip latch (hysteresis): once stalled, the grip is held until the TRIGGER target
+# magnitude falls by this fraction of its value at entry (0.3 -> 1.0 -> 0.7), and
+# only if that persists for STALL_RELEASE_DEBOUNCE_S (one-sample jitter or a
+# recoil of the finger never releases). Calibrar.
+STALL_RELEASE_FRACTION = 0.3
+STALL_RELEASE_DEBOUNCE_S = 0.4
+# Terminal warning at this finger temperature (before derate bites hard).
+TEMP_WARN_C = 70.0
 # --- (3) Thermal derate -----------------------------------------------------
 # motor_state.temperature is int16[2] in deg C. In the session temperature[1]
 # reacts fast to load (39 -> 55 C in ~1 s, 90 C peak) while temperature[0]
@@ -200,6 +216,8 @@ class Dex3HandProtector:
         self._stall = [False] * n
         self._stall_mag = [0.0] * n
         self._stall_start: list[float | None] = [None] * n
+        self._release_since: list[float | None] = [None] * n
+        self._stall_sign = [0.0] * n
         self._hot = [False] * n
         self._derate_prev = [1.0] * n
         self._last_temp: list[float | None] = [None] * n
@@ -298,6 +316,9 @@ class Dex3HandProtector:
             res.active[("derate", i)] = (
                 f"{JOINT_NAMES[i]} {t_now:.0f}C: derate {d:.2f}" + (" (aberto/relaxado)" if d <= 0.0 else ""))
         t_eff = open_q + d * (target - open_q)
+        if (t_now is not None and t_now >= TEMP_WARN_C and GRIP_HOLD_TORQUE_NM[i] > 0.0):
+            res.active[("temp_warn", i)] = (
+                f"{JOINT_NAMES[i]} {t_now:.0f}C >= {TEMP_WARN_C:.0f}C: aperto em derate, abre a {DERATE_OPEN_C:.0f}C")
 
         # --- direction ------------------------------------------------------
         sign = np.sign(t_eff - open_q)
@@ -306,10 +327,21 @@ class Dex3HandProtector:
 
         # --- (2) stall ------------------------------------------------------
         if self._stall[i]:
-            mag = abs(t_eff - open_q)
-            if (not closing) or mag <= self._stall_mag[i] - STALL_RELEASE_DELTA_RAD:
-                self._stall[i] = False
-                self._stall_since[i] = None
+            # Latch: leave only when the trigger itself clearly backs off (or the
+            # command is no longer a closing one), sustained for the debounce.
+            mag = abs(target - open_q)
+            # NOT tied to `closing`/t_eff: thermal derate shrinks t_eff and must
+            # not release the latch (that re-created a heat-driven open/close cycle).
+            leaving = mag <= self._stall_mag[i] * (1.0 - STALL_RELEASE_FRACTION)
+            if leaving:
+                if self._release_since[i] is None:
+                    self._release_since[i] = now
+                if now - self._release_since[i] >= STALL_RELEASE_DEBOUNCE_S:
+                    self._stall[i] = False
+                    self._stall_since[i] = None
+                    self._release_since[i] = None
+            else:
+                self._release_since[i] = None
         else:
             cond = (closing and abs(err) > STALL_ERR_RAD and dq is not None
                     and abs(dq) < STALL_DQ and (tau is None or abs(tau) >= STALL_TAU_RAW))
@@ -318,7 +350,9 @@ class Dex3HandProtector:
                     self._stall_since[i] = now
                 if now - self._stall_since[i] >= STALL_TIME_S:
                     self._stall[i] = True
-                    self._stall_mag[i] = abs(t_eff - open_q)
+                    self._stall_mag[i] = abs(target - open_q)
+                    self._stall_sign[i] = float(sign)
+                    self._release_since[i] = None
                     self._stall_start[i] = now
             else:
                 self._stall_since[i] = None
@@ -329,8 +363,18 @@ class Dex3HandProtector:
                     and now - self._stall_start[i] <= GRIP_HOLD_MAX_S and hold_err > 1e-9)
             if held:
                 # keep a reduced, thermally-faded squeeze toward the target
-                step = min(hold_err, abs(t_eff - q))
-                res.q_cmd[i] = q + sign * step
+                step = hold_err
+                hs = self._stall_sign[i]  # direction latched at entry (trigger dropout must not flip it)
+                q_hold = q + hs * step
+                lim = GRIP_HOLD_CMD_LIMIT_RAD[i]
+                if lim > 0.0:
+                    q_hold = float(np.clip(q_hold, open_q - lim, open_q + lim))
+                    if hs * (q_hold - q) < 0:  # already past the limit: never pull back
+                        q_hold = q
+                else:
+                    q_hold = q + hs * min(step, abs(t_eff - q))
+                step = abs(q_hold - q)
+                res.q_cmd[i] = q_hold
                 res.grip_hold[i] = True
                 res.active[("stall", i)] = (
                     f"{JOINT_NAMES[i]} travado (err {abs(err):.2f} rad): segurando pegada a "
