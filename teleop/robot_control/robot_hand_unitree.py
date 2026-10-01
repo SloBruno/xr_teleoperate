@@ -319,9 +319,11 @@ class Dex3_1_Controller:
     @staticmethod
     def _safe_to_retain(flags, enable):
         """Only cache an already protected output that remains thermally/fault safe."""
-        if flags is None or enable is None or any(flags.get("fault", [])):
+        if flags is None or any(flags.get("fault", [])):
             return False
-        return bool(all(enable) and all(v > 0.0 for v in flags.get("derate", [])))
+        derate = flags.get("derate", [])
+        return bool(derate and all(v > 0.0 for v in derate)
+                    and (enable is None or all(enable)))
 
     def _warn_state_grace(self, side, event, age_s):
         if event is None:

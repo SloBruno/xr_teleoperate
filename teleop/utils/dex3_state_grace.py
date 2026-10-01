@@ -55,14 +55,18 @@ class Dex3StateGrace:
             self._gap_started_at = None
             self._was_holding = False
             self._was_expired = False
-            if safe and q_cmd is not None and enable is not None:
-                cmd = np.asarray(q_cmd, dtype=float).reshape(7).copy()
-                if np.all(np.isfinite(cmd)):
-                    self._q_cmd = cmd
-                    self._enable = [bool(v) for v in enable]
-                    self._safe_at = now
-                else:
+            if safe and q_cmd is not None:
+                try:
+                    cmd = np.asarray(q_cmd, dtype=float).reshape(7).copy()
+                except (TypeError, ValueError):
                     self._clear_cache()
+                else:
+                    if np.all(np.isfinite(cmd)):
+                        self._q_cmd = cmd
+                        self._enable = None if enable is None else [bool(v) for v in enable]
+                        self._safe_at = now
+                    else:
+                        self._clear_cache()
             else:
                 self._clear_cache()
             if was_gap:
@@ -79,15 +83,16 @@ class Dex3StateGrace:
             self._gap_count += 1
         elapsed = max(0.0, now - self._gap_started_at)
         self._gap_max_s = max(self._gap_max_s, elapsed)
-        can_hold = (grip_active and self._q_cmd is not None and self._enable is not None
+        can_hold = (grip_active and self._q_cmd is not None
                     and self._safe_at is not None and now - self._safe_at <= self.grace_s
                     and elapsed <= self.grace_s)
         if can_hold:
             if not self._was_holding:
                 warning = "state_gap_started"
             self._was_holding, self._was_expired = True, False
+            assert self._q_cmd is not None
             return self._result("holding", "state_gap_short", warning,
-                                self._q_cmd.copy(), list(self._enable), elapsed)
+                                self._q_cmd.copy(), self._enable, elapsed)
 
         reason = "grip_not_active" if not grip_active else "state_grace_expired"
         if not self._was_expired:

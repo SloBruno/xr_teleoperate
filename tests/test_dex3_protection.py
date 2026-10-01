@@ -651,6 +651,34 @@ def test_stale_trigger_dropout_of_0p3s_does_not_release_latch():
 
 
 # ---- (10) state feedback grace (fix/dex3-state-stale-grip-hold) ------------
+def test_state_grace_holds_safe_none_enable_protected_command(module, monkeypatch):
+    """None means normal enabled gains, not an absent command-cache permission."""
+    clock = [100.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    c, _ = make_controller(module, 0)
+    protected = np.array([0.0, 0.0, 0.0, -0.31, -0.42, -0.31, -0.42])
+    flags = {"fault": [False] * 7, "derate": [1.0] * 7}
+    c._protection_state = {"left": {"timestamp": 100.0}, "right": {"timestamp": 100.0}}
+
+    def detail(side, now, target, **_):
+        if side in c._protection_state:
+            return protected.copy(), None, flags
+        return module.Dex3_Open_Pose.copy(), None, flags
+
+    c._apply_protection_detail = detail
+    assert c._safe_to_retain(flags, None)
+    first, _ = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(0.0))
+    np.testing.assert_allclose(first, protected)
+
+    clock[0] = 100.2
+    c._protection_state.pop("left")
+    held, _ = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(0.0))
+    np.testing.assert_allclose(held, protected)
+    assert c._trigger_path["left"]["state_grace_state"] == "holding"
+    assert c._trigger_path["left"]["held_command"] == protected.tolist()
+    assert c._state_graces["left"]._enable is None
+
+
 def test_control_step_holds_post_protection_output_for_short_state_gaps(module, monkeypatch):
     clock = [100.0]
     monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
