@@ -203,9 +203,11 @@ def test_dex3_publisher_receives_side_specific_seven_slot_commands(monkeypatch):
     np.testing.assert_allclose(published["left"][0], left_command)
     np.testing.assert_allclose(published["right"][0], right_command)
 
+    # Low-level publisher receives authorized q unchanged; only control_step may
+    # revoke authority, otherwise an output-time stale check reopens a latch.
     controller.ctrl_dual_hand(left_command, right_command, 0.0, 0.0)
-    np.testing.assert_allclose(published["left"][1], np.zeros(7))
-    np.testing.assert_allclose(published["right"][1], np.zeros(7))
+    np.testing.assert_allclose(published["left"][1], left_command)
+    np.testing.assert_allclose(published["right"][1], right_command)
 
 
 def test_control_step_uses_only_side_specific_triggers_when_hand_tracking_is_unavailable(monkeypatch):
@@ -312,16 +314,16 @@ def test_control_step_uses_only_side_specific_triggers_when_hand_tracking_is_una
 
     controller._telemetry_lock = __import__("threading").Lock()
     controller.control_step(left_input, right_input, left_ctrl_sample_in=left_sample, right_ctrl_sample_in=right_sample)
-    # Stale (0.3 s) sample: last valid trigger is held, trigger_path telemetry set.
+    # Observed 1.25 s controller gap remains latched; output must not re-open.
     n = len(published)
-    left_sample[:] = [0.0, time.monotonic() - 0.3]
-    right_sample[:] = [0.0, time.monotonic() - 0.3]
+    left_sample[:] = [0.0, time.monotonic() - 1.25]
+    right_sample[:] = [0.0, time.monotonic() - 1.25]
     controller.control_step(left_input, right_input,
                             left_ctrl_sample_in=left_sample, right_ctrl_sample_in=right_sample)
     np.testing.assert_allclose(
         published[n][1], trigger_to_dex3_targets(0.25, module.Dex3_Open_Pose, module.Dex3_Left_Closed_Pose))
     tp = controller._trigger_path["left"]
-    assert tp["trigger_state"] == "held" and tp["stale"] and tp["trigger_effective"] == 0.25
+    assert tp["trigger_state"] == "held_stale" and tp["stale"] and tp["trigger_effective"] == 0.25
     # A stalled producer (no valid timestamp) must fail open.
     left_sample[:] = [1.0, 0.0]
     right_sample[:] = [1.0, 0.0]

@@ -69,15 +69,20 @@ def analyze(records):
             while rs[i][0] < t - OPEN_WINDOW_S:
                 i += 1
             t0, q0, cmd0 = rs[i][0], rs[i][1], rs[i][2]
-            if cmd and cmd0 and all(abs(a) > 0.5 and abs(b) > 0.5 for a, b in zip(q0, cmd)):
-                const = all(abs(a - b) <= CMD_CONST_RAD for a, b in zip(cmd, cmd0))
+            if cmd and cmd0 and all(abs(a) > 0.5 for a in q0):
+                command_changed = not all(abs(a - b) <= CMD_CONST_RAD for a, b in zip(cmd, cmd0))
                 drop = [abs(a) - abs(b) for a, b in zip(q0, q)]
-                if const and all(d > OPEN_DROP_RAD for d in drop):
+                # A measured retreat is an opening event even if q_cmd moved at
+                # the same time: the old const-command guard hid the exact
+                # controller-caused openings this tool must report.
+                if all(d > OPEN_DROP_RAD for d in drop):
                     if not events or t - events[-1]["t"] > 2.0:
                         events.append({"t": round(t, 3), "drops": [round(d, 2) for d in drop],
-                                       "trigger_raw": tp.get("trigger_raw"), "age_ms": tp.get("age_ms"),
+                                       "command_changed": command_changed,
+                                       "trigger_raw": tp.get("trigger_raw"), "trigger_effective": tp.get("trigger_effective"),
+                                       "age_ms": tp.get("age_ms"), "grip_latch_state": tp.get("grip_latch_state"),
                                        "trigger_state": tp.get("trigger_state"),
-                                       "reasons": tp.get("open_reasons") or ["unknown (no trigger_path telemetry)"],
+                                       "reasons": tp.get("open_reasons") or [tp.get("exact_open_reason") or "unknown (no trigger-path telemetry)"],
                                        "pressure_peak": pmax})
         contact = [r for r in rs if (r[4] or 0) > 0]
         out[side] = {"records": len(rs), "open_events": events, "age_hist_ms": hist(ages),

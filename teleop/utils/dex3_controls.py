@@ -124,6 +124,116 @@ class TriggerHold:
         }
 
 
+# Active-grip latch: safety timeout is deliberately longer than observed 1.25 s
+# controller gaps. Fresh release is deliberately debounced, so one low frame
+# cannot open a closed grip. Controller loss beyond 2 s stops retained effort.
+GRIP_LATCH_EXPIRE_S = 2.0
+GRIP_RELEASE_LOW_S = 0.6
+
+
+class GripLatch:
+    """Per-side grip authority state machine; pure and clock-injected.
+
+    A fresh high trigger activates/refreshes the latch. A stale or repeated
+    sample holds its last effective value until two seconds from the last fresh
+    sample. Releasing requires consecutive fresh low samples for 0.6 s.
+    Invalid/future timestamps and explicit stop revoke authority immediately.
+    """
+
+    def __init__(self, close_threshold: float = TRIGGER_OPEN_THRESHOLD):
+        self.close_threshold = float(close_threshold)
+        self.active = False
+        self.entered_at = None
+        self.last_fresh_at = None
+        self.last_effective = 0.0
+        self.low_since = None
+        self.low_count = 0
+
+    @staticmethod
+    def _valid(now, ts, trigger):
+        return (isinstance(now, (int, float)) and _math.isfinite(now)
+                and isinstance(ts, (int, float)) and _math.isfinite(ts) and ts > 0.0
+                and isinstance(trigger, (int, float)) and _math.isfinite(trigger)
+                and 0.0 <= now - ts <= TRIGGER_FRESH_S)
+
+    def _info(self, now, raw, state, reason, age=None):
+        duration = 0.0 if self.low_since is None else max(0.0, now - self.low_since)
+        return {
+            "trigger_raw": raw if isinstance(raw, (int, float)) and _math.isfinite(raw) else None,
+            "trigger_effective": self.last_effective if self.active else 0.0,
+            "sample_ts": None if age is None else now - age,
+            "age_ms": None if age is None else round(age * 1000.0, 1),
+            "stale": state == "held_stale",
+            "trigger_state": state,
+            "grip_latch_state": state,
+            "latch_entered_at": self.entered_at,
+            "latch_age_s": None if self.entered_at is None else round(max(0.0, now - self.entered_at), 3),
+            "fresh_low_duration_s": round(duration, 3),
+            "fresh_low_count": self.low_count,
+            "held_reason": reason if state in ("held_stale", "active") else None,
+            "exact_open_reason": reason if state not in ("held_stale", "active") else None,
+        }
+
+    def update(self, trigger, sample_ts, now, *, stop=False):
+        age = None
+        if isinstance(sample_ts, (int, float)) and _math.isfinite(sample_ts):
+            age = now - sample_ts
+        if stop:
+            self.active = False; self.last_effective = 0.0; self.low_since = None; self.low_count = 0
+            return self._info(now, trigger, "stopped", "stop", age)
+        # A finite past timestamp outside the fresh window is a controller gap:
+        # retain an active grip without refreshing its loss timeout.
+        if (isinstance(sample_ts, (int, float)) and _math.isfinite(sample_ts) and sample_ts > 0.0
+                and isinstance(now, (int, float)) and _math.isfinite(now) and now >= sample_ts
+                and not self._valid(now, sample_ts, trigger)):
+            return self.hold_stale(trigger, sample_ts, now)
+        if not self._valid(now, sample_ts, trigger):
+            self.active = False; self.last_effective = 0.0; self.low_since = None; self.low_count = 0
+            return self._info(now, trigger, "invalid", "invalid_controller_sample", age)
+        raw = float(np.clip(trigger, 0.0, 1.0))
+        self.last_fresh_at = now
+        if raw > self.close_threshold:
+            if not self.active:
+                self.entered_at = now
+            self.active = True; self.last_effective = raw; self.low_since = None; self.low_count = 0
+            return self._info(now, raw, "active", "fresh_trigger_high", age)
+        if not self.active:
+            return self._info(now, raw, "released", "trigger_low", age)
+        if self.low_since is None:
+            self.low_since = now; self.low_count = 1
+        else:
+            self.low_count += 1
+        if now - self.low_since >= GRIP_RELEASE_LOW_S:
+            self.active = False; self.last_effective = 0.0
+            return self._info(now, raw, "released", "fresh_low_sustained", age)
+        return self._info(now, raw, "active", "awaiting_fresh_low_debounce", age)
+
+    def hold_stale(self, trigger, sample_ts, now):
+        """Retain a latch through a stale/repeated sample; never refreshes it."""
+        age = None
+        if isinstance(sample_ts, (int, float)) and _math.isfinite(sample_ts):
+            age = now - sample_ts
+        if not self.active:
+            return self._info(now, trigger, "released", "trigger_low", age)
+        if self.last_fresh_at is not None and 0.0 <= now - self.last_fresh_at <= GRIP_LATCH_EXPIRE_S:
+            self.low_since = None; self.low_count = 0
+            return self._info(now, trigger, "held_stale", "controller_gap", age)
+        self.active = False; self.last_effective = 0.0; self.low_since = None; self.low_count = 0
+        return self._info(now, trigger, "expired", "controller_loss_timeout", age)
+
+    def update_sample(self, trigger, sample_ts, now, *, stop=False):
+        """Dispatch fresh samples vs. stale/repeated samples without authority refresh."""
+        if stop:
+            return self.update(trigger, sample_ts, now, stop=True)
+        if self._valid(now, sample_ts, trigger):
+            return self.update(trigger, sample_ts, now)
+        # Invalid/future samples are invalid signals, not benign stale gaps.
+        if not (isinstance(sample_ts, (int, float)) and _math.isfinite(sample_ts) and sample_ts > 0.0
+                and isinstance(now, (int, float)) and _math.isfinite(now) and now >= sample_ts):
+            return self.update(trigger, sample_ts, now)
+        return self.hold_stale(trigger, sample_ts, now)
+
+
 def open_reasons(trigger_state: str, trigger_effective: float, flags: dict | None,
                  force_open: bool = False, protection_error: bool = False) -> list:
     """Why the commanded hand is open/opening (ordered, empty if none)."""

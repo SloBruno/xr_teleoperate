@@ -58,3 +58,41 @@ def test_open_reasons():
     assert "protection_relax" in open_reasons("fresh", 1.0, f)
     f["state_stale"] = True
     assert "state_stale" in open_reasons("fresh", 1.0, f)
+
+
+def test_grip_latch_holds_1_25_second_dropout_and_releases_only_after_fresh_low_debounce():
+    from teleop.utils.dex3_controls import GripLatch
+    h = GripLatch()
+    assert h.update(1.0, 100.0, 100.0)["grip_latch_state"] == "active"
+    held = h.update(0.0, 100.0, 101.25)
+    assert held["trigger_effective"] == 1.0 and held["grip_latch_state"] == "held_stale"
+    # Fresh low starts evidence; one frame cannot release a grip.
+    low = h.update(0.0, 101.26, 101.26)
+    assert low["trigger_effective"] == 1.0 and low["fresh_low_count"] == 1
+    released = h.update(0.0, 101.87, 101.87)
+    assert released["grip_latch_state"] == "released"
+    assert released["trigger_effective"] == 0.0
+    assert released["fresh_low_duration_s"] >= 0.6
+
+
+def test_grip_latch_expiry_is_two_seconds_and_rejects_future_or_invalid_timestamps():
+    from teleop.utils.dex3_controls import GripLatch
+    h = GripLatch()
+    h.update(1.0, 10.0, 10.0)
+    assert h.update(0.0, 10.0, 11.25)["trigger_effective"] == 1.0
+    expired = h.update(0.0, 10.0, 12.01)
+    assert expired["grip_latch_state"] == "expired" and expired["trigger_effective"] == 0.0
+    h.update(1.0, 20.0, 20.0)
+    invalid = h.update(1.0, 21.0, 20.1)
+    assert invalid["grip_latch_state"] == "invalid" and invalid["trigger_effective"] == 0.0
+
+
+def test_grip_latches_are_side_independent_and_explicit_stop_wins():
+    from teleop.utils.dex3_controls import GripLatch
+    left, right = GripLatch(), GripLatch()
+    left.update(1.0, 30.0, 30.0)
+    right.update(1.0, 30.0, 30.0)
+    assert left.update(0.0, 30.1, 30.1)["trigger_effective"] == 1.0
+    assert right.update(1.0, 30.1, 30.1)["trigger_effective"] == 1.0
+    stopped = right.update(1.0, 30.2, 30.2, stop=True)
+    assert stopped["grip_latch_state"] == "stopped" and stopped["trigger_effective"] == 0.0

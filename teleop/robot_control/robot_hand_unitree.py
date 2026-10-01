@@ -19,7 +19,7 @@ parent2_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 sys.path.append(parent2_dir)
 from teleop.utils.weighted_moving_filter import WeightedMovingFilter
 from teleop.utils.dex3_controls import (
-    trigger_to_dex3_targets, TriggerHold, trigger_sample_usable, open_reasons,
+    trigger_to_dex3_targets, GripLatch, open_reasons,
 )
 from teleop.utils.quest_safety import controller_sample_is_fresh
 from teleop.utils.haptics import extract_dex3_pressure
@@ -300,9 +300,28 @@ class Dex3_1_Controller:
         try:
             flags = self.__dict__.get("_protection_flags", {}).get(side)
             item = dict(info)
-            item["open_reasons"] = open_reasons(info["trigger_state"], info["trigger_effective"], flags)
+            item["open_reasons"] = open_reasons(
+                info["trigger_state"], info["trigger_effective"], flags,
+                force_open=(info.get("exact_open_reason") == "stop"),
+            )
+            if item.get("exact_open_reason") and item["exact_open_reason"] not in item["open_reasons"]:
+                item["open_reasons"].insert(0, item["exact_open_reason"])
             item["q_target"] = [round(float(v), 4) for v in q_target]
             item["q_cmd"] = [round(float(v), 4) for v in q_cmd]
+            state = self.__dict__.get("_extended_state", {}).get(side, {}).get("state", {})
+            measured = [j.get("q") for j in (state.get("joints") or [])[3:7]]
+            previous = self.__dict__.setdefault("_trigger_measured", {}).get(side)
+            item["measured_q"] = measured if len(measured) == 4 else None
+            item["measured_q_drop_event"] = None
+            if (previous and item["measured_q"] and info.get("trigger_effective", 0.0) > 0.05
+                    and all(v is not None for v in item["measured_q"])):
+                drops = [abs(a) - abs(b) for a, b in zip(previous, item["measured_q"])]
+                if all(d > 0.2 for d in drops):
+                    item["measured_q_drop_event"] = {"drops": [round(d, 3) for d in drops],
+                                                       "q_cmd": item["q_cmd"],
+                                                       "trigger_effective": info["trigger_effective"]}
+            if item["measured_q"] and all(v is not None for v in item["measured_q"]):
+                self.__dict__.setdefault("_trigger_measured", {})[side] = item["measured_q"]
             item["pressure_peak"] = (self.left_pressure if side == "left" else self.right_pressure).value \
                 if hasattr(self, "left_pressure") else None
             with self._telemetry_lock:
@@ -415,10 +434,7 @@ class Dex3_1_Controller:
     def ctrl_dual_hand(self, left_q_target, right_q_target,
                        left_sample_timestamp=0.0, right_sample_timestamp=0.0,
                        left_enable=None, right_enable=None):
-        """Publish both targets, rechecking freshness immediately before output."""
-        now_pub = time.monotonic()
-        if not trigger_sample_usable(left_sample_timestamp, now_pub):
-            left_q_target = Dex3_Open_Pose.copy()
+        """Publish already-authorized targets; authority is decided in control_step."""
         for idx, id in enumerate(Dex3_1_Left_JointIndex):
             self.left_msg.motor_cmd[id].q = left_q_target[idx]
             if left_enable is not None:
@@ -426,8 +442,6 @@ class Dex3_1_Controller:
         self.LeftHandCmb_publisher.Write(self.left_msg)
         self._record_published_command("left", self.left_msg, Dex3_1_Left_JointIndex)
 
-        if not trigger_sample_usable(right_sample_timestamp, now_pub):
-            right_q_target = Dex3_Open_Pose.copy()
         for idx, id in enumerate(Dex3_1_Right_JointIndex):
             self.right_msg.motor_cmd[id].q = right_q_target[idx]
             if right_enable is not None:
@@ -459,19 +473,22 @@ class Dex3_1_Controller:
                 right_trigger, right_sample_timestamp = right_ctrl_sample_in[:]
         else:
             right_trigger, right_sample_timestamp = 0.0, 0.0
-        # Stale samples hold the last valid trigger for TRIGGER_HOLD_MAX_AGE_S,
-        # then fail open (see dex3_controls.TriggerHold).
+        # Per-side latch owns grip authority. It bridges observed controller gaps
+        # up to 2 s and requires 0.6 s of fresh low samples to deliberately open.
         now_t = time.monotonic()
-        holds = self.__dict__.setdefault("_trigger_holds", {"left": TriggerHold(), "right": TriggerHold()})
-        left_info = holds["left"].update(left_trigger, left_sample_timestamp, now_t)
-        right_info = holds["right"].update(right_trigger, right_sample_timestamp, now_t)
+        latches = self.__dict__.setdefault("_grip_latches", {"left": GripLatch(), "right": GripLatch()})
+        stopping = bool(getattr(self, "_force_open", False))
+        left_info = latches["left"].update_sample(left_trigger, left_sample_timestamp, now_t, stop=stopping)
+        right_info = latches["right"].update_sample(right_trigger, right_sample_timestamp, now_t, stop=stopping)
         left_trigger = left_info["trigger_effective"]
         right_trigger = right_info["trigger_effective"]
-        if getattr(self, "_force_open", False):
-            # Graceful shutdown: triggers lose authority; command open pose.
+        if stopping:
+            # Explicit lifecycle stop wins over latches and publishes rest once.
             left_q_target = Dex3_Open_Pose.copy()
             right_q_target = Dex3_Open_Pose.copy()
-            self.ctrl_dual_hand(left_q_target, right_q_target, time.monotonic(), time.monotonic())
+            self._record_trigger_path("left", left_info, left_q_target, left_q_target)
+            self._record_trigger_path("right", right_info, right_q_target, right_q_target)
+            self.ctrl_dual_hand(left_q_target, right_q_target)
             return left_q_target, right_q_target
 
         # Dex3 finger targets are controller-only: released is the explicit
