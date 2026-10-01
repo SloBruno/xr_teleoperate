@@ -240,3 +240,14 @@ def test_stdin_markers(tmp_path):
     th = cc.stdin_marker_thread(c, stop, io.StringIO("\n\n\n"))
     th.join(2)
     assert [m["name"] for m in c.markers] == ["antes", "mexendo", "depois"]
+
+
+def test_string_topics_hash_only_for_webrtc(tmp_path):
+    c = cc.Capture(tmp_path)
+    assert cc.wanted_subscription("rt/xfk_webrtcreq", "std_msgs::msg::dds_::String_")[0] == "string"
+    c.on_string("rt/xfk_webrtcreq", NS(data="v=0 SECRET sdp"))
+    c.on_string("rt/gpt_state", NS(data='{"token": "zzz", "a": 1}'))
+    c.close()
+    ev = [json.loads(l) for l in open(tmp_path / "api_events.jsonl")]
+    assert "text" not in ev[0] and ev[0]["len"] == 14
+    assert "zzz" not in ev[1]["text"]

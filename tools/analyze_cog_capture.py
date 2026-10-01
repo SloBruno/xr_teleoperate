@@ -132,6 +132,15 @@ def build_report(d):
             t, aid, len(es), ",".join(sorted({x["phase"] for x in es})), (e.get("parameter") or "")[:300],
             r.get("code") if r else "?", ((r or {}).get("data") or "")[:200]))
     w("")
+    strs = [e for e in api if e["kind"] == "string"]
+    if strs:
+        w("### Mensagens std_msgs/String (canais auxiliares, so tamanho/hash para WebRTC)\n")
+        agg = {}
+        for e in strs:
+            agg.setdefault((e["topic"], e["phase"]), []).append(e)
+        for (t, ph), es in sorted(agg.items()):
+            w("- `%s` [%s] x%d ex: %s" % (t, ph, len(es), (es[0].get("text") or "len=%s sha=%s" % (es[0]["len"], es[0]["sha1"]))[:160]))
+        w("")
     w("### Linha do tempo de requests (exclui repeticoes de GET 7001/7002/7007 e lease)\n")
     n = 0
     for e in api:

@@ -296,6 +296,20 @@ class Capture:
         except Exception:
             self.err("on_state")
 
+    def on_string(self, topic, msg):
+        """std_msgs/String: so tamanho+hash (+ texto redigido curto, exceto canais WebRTC/sinalizacao)."""
+        try:
+            data = getattr(msg, "data", "") or ""
+            with self.lock:
+                self._count(topic, "std_msgs.String_", "string")
+            rec = {"t": self.clock(), "phase": self.phase, "topic": topic, "kind": "string",
+                   "len": len(data), "sha1": hashlib.sha1(data.encode("utf-8", "replace")).hexdigest()[:12]}
+            if not re.search(r"webrtc|xfk|sdp|ice|token|auth", topic, re.I):
+                rec["text"] = redact_text(data[:512])
+            self.api.append(rec)
+        except Exception:
+            self.err("on_string")
+
     # -- snapshots 1 Hz
     def snapshot(self):
         try:
@@ -607,6 +621,8 @@ def wanted_subscription(topic, type_name):
         return ("api_response", None, 0.0)
     if topic in STATE_TOPICS:
         return ("state",) + STATE_TOPICS[topic][1:]
+    if tn.endswith("std_msgs.msg.dds_.String_") and topic.startswith("rt/"):
+        return ("string", None, 0.0)
     if any(p.match(topic) for p in STATE_PATTERNS) and tn in KNOWN_STATE_TYPES:
         return ("state", None, 0.5)
     return None
@@ -655,6 +671,8 @@ class Subscriptions:
                     self.cap.on_api(topic, "request", m)
                 elif kind == "api_response":
                     self.cap.on_api(topic, "response", m)
+                elif kind == "string":
+                    self.cap.on_string(topic, m)
                 else:
                     self.cap.on_state(topic, m, tn, fields, interval)
         return n
@@ -692,17 +710,54 @@ def _dds_open_reader_factory(participant):
 
 
 def _dds_fetch_factory(participant):
-    from cyclonedds.builtin import BuiltinTopicDcpsPublication, BuiltinTopicDcpsSubscription
-    from cyclonedds.sub import DataReader
-    readers = {"pub": DataReader(participant, BuiltinTopicDcpsPublication),
-               "sub": DataReader(participant, BuiltinTopicDcpsSubscription)}
+    """Descoberta via builtin topics DCPSPublication/DCPSSubscription lidos por ctypes (libddsc).
+
+    O binding Python cyclonedds 0.10.2 da SEGFAULT ao ler builtin topics contra libddsc 0.10.5,
+    entao le-se a struct C dds_builtintopic_endpoint_t diretamente. Somente leitura.
+    """
+    import ctypes
+
+    class Info(ctypes.Structure):
+        _fields_ = [("sample_state", ctypes.c_int), ("view_state", ctypes.c_int),
+                    ("instance_state", ctypes.c_int), ("valid_data", ctypes.c_bool),
+                    ("source_timestamp", ctypes.c_int64), ("instance_handle", ctypes.c_uint64),
+                    ("publication_handle", ctypes.c_uint64), ("disposed_generation_count", ctypes.c_uint32),
+                    ("no_writers_generation_count", ctypes.c_uint32), ("sample_rank", ctypes.c_uint32),
+                    ("generation_rank", ctypes.c_uint32), ("absolute_generation_rank", ctypes.c_uint32)]
+
+    class EP(ctypes.Structure):
+        _fields_ = [("key", ctypes.c_ubyte * 16), ("participant_key", ctypes.c_ubyte * 16),
+                    ("participant_instance_handle", ctypes.c_uint64), ("topic_name", ctypes.c_char_p),
+                    ("type_name", ctypes.c_char_p), ("qos", ctypes.c_void_p)]
+
+    lib = ctypes.CDLL("libddsc.so.0")
+    lib.dds_create_reader.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p]
+    lib.dds_read.argtypes = [ctypes.c_int32, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(Info),
+                             ctypes.c_size_t, ctypes.c_uint32]
+    lib.dds_return_loan.argtypes = [ctypes.c_int32, ctypes.POINTER(ctypes.c_void_p), ctypes.c_int32]
+    part = participant._ref
+    # DDS_BUILTIN_TOPIC_DCPSPUBLICATION=0x7fff0003, DCPSSUBSCRIPTION=0x7fff0004
+    readers = {"pub": lib.dds_create_reader(part, 0x7FFF0003, None, None),
+               "sub": lib.dds_create_reader(part, 0x7FFF0004, None, None)}
+    if min(readers.values()) < 0:
+        raise RuntimeError("builtin reader indisponivel")
+    N = 1024
 
     def fetch():
         out = []
         for kind, rd in readers.items():
-            for s in rd.read(N=512):
-                out.append({"topic": s.topic_name, "type": s.type_name, "kind": kind,
-                            "participant": str(getattr(s, "participant_key", ""))})
+            buf = (ctypes.c_void_p * N)()
+            info = (Info * N)()
+            n = lib.dds_read(rd, buf, info, N, N)
+            for i in range(max(n, 0)):
+                if not info[i].valid_data:
+                    continue
+                e = ctypes.cast(buf[i], ctypes.POINTER(EP)).contents
+                out.append({"topic": (e.topic_name or b"").decode("utf-8", "replace"),
+                            "type": (e.type_name or b"").decode("utf-8", "replace"), "kind": kind,
+                            "participant": bytes(e.participant_key[:4]).hex()})
+            if n > 0:
+                lib.dds_return_loan(rd, buf, n)
         return out
     return fetch
 
