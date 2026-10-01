@@ -251,3 +251,22 @@ def test_string_topics_hash_only_for_webrtc(tmp_path):
     ev = [json.loads(l) for l in open(tmp_path / "api_events.jsonl")]
     assert "text" not in ev[0] and ev[0]["len"] == 14
     assert "zzz" not in ev[1]["text"]
+
+
+def test_missing_idl_type_is_unsupported_not_error(tmp_path):
+    c = cc.Capture(tmp_path)
+    def opener(t, tn):
+        raise AttributeError("no such type")
+    subs = cc.Subscriptions(c, opener)
+    subs.ensure("rt/lf/dex3/left/state", "unitree_hg::msg::dds_::HandState_")
+    assert c.unsupported and not c.errors and subs.poll_once() == 0
+
+
+def test_tcpdump_requires_passwordless_sudo(tmp_path):
+    calls = []
+    def run(cmd, **k):
+        calls.append(cmd)
+        return NS(stdout="", returncode=1)
+    nw = cc.NetWatcher(cap=cc.Capture(tmp_path), run=run, which=lambda n: "/usr/bin/tcpdump")
+    nw.start_tcpdump()
+    assert calls == [["sudo", "-n", "true"]] and nw.proc is None

@@ -100,6 +100,10 @@ def build_report(d):
         for t, e in sorted(topics.items()):
             w("| %s | %s | %s | %s |" % (t, e.get("type"), e.get("pubs"), e.get("subs")))
     w("")
+    uns = meta.get("unsupported_type_topics") or {}
+    if uns:
+        w("Topicos cujo tipo nao tem IDL local (NAO assinados, so listados): " +
+          ", ".join("`%s` (%s)" % kv for kv in sorted(uns.items())) + "\n")
     w("## Mensagens por topico e fase\n")
     w("| topico | total | " + " | ".join(PHASE_ORDER) + " |\n|---|---|" + "---|" * len(PHASE_ORDER))
     for t, c in sorted(counts.items()):
@@ -143,9 +147,14 @@ def build_report(d):
         w("")
     w("### Linha do tempo de requests (exclui repeticoes de GET 7001/7002/7007 e lease)\n")
     n = 0
+    last = {}
     for e in api:
         if e["kind"] != "request" or e.get("api_id") in (7001, 7002, 7007, 7109, 102):
             continue
+        key = (e["topic"], e["api_id"], e.get("parameter_sha1"), e["phase"])
+        last[key] = last.get(key, 0) + 1
+        if last[key] > 3:
+            continue  # repeticao periodica: mostra so as 3 primeiras por fase
         n += 1
         if n > 200:
             w("- ... (truncado, ver api_events.jsonl)")
@@ -154,6 +163,9 @@ def build_report(d):
         w("- +%.2fs [%s] `%s` api_id=%s (%s) param=`%s` -> code=%s" % (
             e["t"] - meta.get("t0", e["t"]), e["phase"], e["topic"], e["api_id"], e.get("api_name") or "DESCONHECIDO",
             (e.get("parameter") or "")[:200], r.get("code") if r else "?"))
+    for key, c in sorted(last.items(), key=lambda kv: str(kv[0])):
+        if c > 3:
+            w("- (x%d no total) `%s` api_id=%s fase=%s" % (c, key[0], key[1], key[3]))
     if n == 0:
         w("- nenhum request relevante registrado")
     w("")

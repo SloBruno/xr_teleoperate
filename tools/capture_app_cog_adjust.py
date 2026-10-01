@@ -207,6 +207,7 @@ class Capture:
         self.latest = {}   # topic -> (t, jsonable-lazy obj)
         self.latest_raw = {}
         self.extra = {}
+        self.unsupported = {}  # topic -> tipo sem IDL local (nao assinado)
 
     # -- util
     def err(self, key):
@@ -562,7 +563,7 @@ class NetWatcher:
             self.status = "tcpdump ausente"
             return
         try:
-            ok = self.run(["sudo", "-n", "-l", tcpdump], capture_output=True, text=True, timeout=5)
+            ok = self.run(["sudo", "-n", "true"], capture_output=True, text=True, timeout=5)
             if ok.returncode != 0:
                 self.status = "sudo sem senha indisponivel para tcpdump"
                 return
@@ -624,7 +625,11 @@ def wanted_subscription(topic, type_name):
     if tn.endswith("std_msgs.msg.dds_.String_") and topic.startswith("rt/"):
         return ("string", None, 0.0)
     if any(p.match(topic) for p in STATE_PATTERNS) and tn in KNOWN_STATE_TYPES:
-        return ("state", None, 0.5)
+        if tn.endswith("HandState_"):
+            return ("state", ("imu_state", "motor_state.q"), 1.0)
+        if tn.endswith("LowState_"):
+            return ("state", ("imu_state",), 1.0)
+        return ("state", None, 1.0)
     return None
 
 
@@ -648,6 +653,10 @@ class Subscriptions:
             return False
         try:
             reader = self.open_reader(topic, norm_type(type_name))
+        except (ImportError, AttributeError):
+            self.cap.unsupported[topic] = norm_type(type_name)
+            self.readers[topic] = None
+            return False
         except Exception:
             self.cap.err("subscribe_fail")
             return False
@@ -659,7 +668,10 @@ class Subscriptions:
 
     def poll_once(self, max_n=64):
         n = 0
-        for topic, (kind, fields, interval, reader, tn) in list(self.readers.items()):
+        for topic, ent in list(self.readers.items()):
+            if ent is None:
+                continue
+            kind, fields, interval, reader, tn = ent
             try:
                 msgs = reader(max_n)
             except Exception:
@@ -700,7 +712,11 @@ def _dds_open_reader_factory(participant):
 
     def open_reader(topic, type_name):
         mod, _, cls = type_name.rpartition(".")
-        klass = getattr(import_module("unitree_sdk2py.idl." + mod), cls)
+        try:
+            klass = getattr(import_module("unitree_sdk2py.idl." + mod), cls)
+        except AttributeError:
+            # ex.: unitree_hg SportModeState_ so existe em unitree_go no SDK
+            klass = getattr(import_module("unitree_sdk2py.idl." + mod.replace("unitree_hg", "unitree_go")), cls)
         rd = DataReader(participant, Topic(participant, topic, klass), qos=qos)
 
         def read(n):
@@ -802,8 +818,6 @@ def run_capture(args, fetch=None, open_reader=None, stdin=None, clock=time.time)
         nw.start()
     for t in KNOWN_API_TOPICS:
         subs.ensure(t, "unitree_api.msg.dds_." + ("Request_" if t.endswith("request") else "Response_"))
-    for t, (ty, _f, _i) in STATE_TOPICS.items():
-        subs.ensure(t, ty)
     print("Captura PASSIVA em %s" % outdir, flush=True)
     print("Enter = marcador (1o ANTES, 2o MEXENDO, 3o DEPOIS). Ctrl+C encerra.", flush=True)
     if not args.no_stdin:
@@ -838,7 +852,8 @@ def run_capture(args, fetch=None, open_reader=None, stdin=None, clock=time.time)
         nw.finish()
     if fw:
         fw.finish()
-    cap.extra["subscribed_topics"] = sorted(subs.readers)
+    cap.extra["subscribed_topics"] = sorted(t for t, e in subs.readers.items() if e)
+    cap.extra["unsupported_type_topics"] = cap.unsupported
     cap.close()
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
