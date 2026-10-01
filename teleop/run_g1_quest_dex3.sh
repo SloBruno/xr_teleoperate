@@ -12,6 +12,13 @@ export PYTHONPATH=$repo:$repo/teleop/televuer/src:$repo/teleop/teleimager/src:$r
 export XR_TELEOP_CERT=/home/unitree/.config/xr_teleoperate/cert.pem
 export XR_TELEOP_KEY=/home/unitree/.config/xr_teleoperate/key.pem
 
+# Walking cap, same as the BotBrain frontend G1 profile (g1-r1.ts:
+# linearSpeed 0.5 m/s, angularSpeed 0.3 rad/s). Passed explicitly to the
+# teleop; override with G1_WALK_SPEED_CAP / G1_TURN_RATE_CAP. The Python code
+# keeps its hard limits (0.6 m/s, 1.0 rad/s) and validation.
+walk_speed_cap=${G1_WALK_SPEED_CAP:-0.5}
+turn_rate_cap=${G1_TURN_RATE_CAP:-0.3}
+
 teleimager_dir="$repo/teleop/teleimager"
 teleimager_state_dir=${TELEIMAGER_STATE_DIR:-/home/unitree/.local/state/xr_teleoperate}
 teleimager_pid_file="$teleimager_state_dir/teleimager.pid"
@@ -258,9 +265,12 @@ if [[ "${G1_LAUNCHER_SKIP_TELEOP:-0}" == 1 ]]; then
     exit 0
 fi
 cd "$repo/teleop"
+echo "Teto de caminhada: ${walk_speed_cap} m/s linear, ${turn_rate_cap} rad/s angular (BotBrain g1-r1)"
 exec "$teleimager_python" -s teleop_hand_and_arm.py \
   --arm G1_29 \
   --ee dex3 \
   --input-mode hand \
   --motion \
-  --camera-layout "$teleop_camera_layout"
+  --camera-layout "$teleop_camera_layout" \
+  --walk-speed-cap "$walk_speed_cap" \
+  --turn-rate-cap "$turn_rate_cap"
