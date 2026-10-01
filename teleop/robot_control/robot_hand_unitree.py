@@ -318,12 +318,22 @@ class Dex3_1_Controller:
 
     @staticmethod
     def _safe_to_retain(flags, enable):
-        """Only cache an already protected output that remains thermally/fault safe."""
-        if flags is None or any(flags.get("fault", [])):
-            return False
-        derate = flags.get("derate", [])
-        return bool(derate and all(v > 0.0 for v in derate)
-                    and (enable is None or all(enable)))
+        """Legacy whole-hand predicate retained for callers/tests outside grace."""
+        return all(Dex3_1_Controller._safe_joints_to_retain(flags, enable))
+
+    @staticmethod
+    def _safe_joints_to_retain(flags, enable):
+        """Return per-joint cache eligibility from fresh protection output only."""
+        try:
+            fault = list(flags["fault"])
+            derate = [float(v) for v in flags["derate"]]
+            enabled = [True] * 7 if enable is None else [bool(v) for v in enable]
+        except (KeyError, TypeError, ValueError):
+            return [False] * 7
+        if len(fault) != 7 or len(derate) != 7 or len(enabled) != 7:
+            return [False] * 7
+        return [not bool(fault[i]) and enabled[i] and np.isfinite(derate[i]) and derate[i] > 0.0
+                for i in range(7)]
 
     def _warn_state_grace(self, side, event, age_s):
         if event is None:
@@ -568,12 +578,13 @@ class Dex3_1_Controller:
                 q_cmd, enable, flags = self._apply_protection_detail(side, now, target)
                 decision = graces[side].update(
                     now, fresh=True, grip_active=grip_active,
-                    safe=self._safe_to_retain(flags, enable), q_cmd=q_cmd, enable=enable,
+                    safe=self._safe_joints_to_retain(flags, enable), q_cmd=q_cmd, enable=enable,
+                    open_q=Dex3_Open_Pose,
                 )
             else:
                 decision = graces[side].update(
                     now, fresh=False, grip_active=grip_active, safe=False,
-                    gap_eligible=(age_s is None or age_s >= 0.0),
+                    gap_eligible=(age_s is None or age_s >= 0.0), open_q=Dex3_Open_Pose,
                 )
                 if decision["state"] == "holding":
                     q_cmd, enable = decision["q_cmd"], decision["enable"]
@@ -591,6 +602,8 @@ class Dex3_1_Controller:
                 "state_grace_reason": decision["reason"],
                 "state_gap_count": decision["gap_count"],
                 "state_gap_max_s": decision["gap_max_s"],
+                "state_grace_joint_hold": decision["state_grace_joint_hold"],
+                "state_grace_blocked_joints": decision["state_grace_blocked_joints"],
             })
             self._warn_state_grace(side, decision["warning"], age_s)
             return q_cmd, enable

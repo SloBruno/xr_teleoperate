@@ -744,3 +744,32 @@ def test_state_grace_is_side_independent_and_rejects_future_state_timestamp(modu
     np.testing.assert_allclose(next_right, right)
     assert c._trigger_path["left"]["state_grace_state"] == "expired"
     assert c._trigger_path["right"]["state_grace_state"] == "fresh"
+
+
+def test_state_grace_keeps_safe_long_fingers_when_thumb_faults_before_a_gap(module, monkeypatch):
+    """A thumb fault is joint-local: it cannot discard the long-finger cache."""
+    clock = [400.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    c, written = make_controller(module, 0)
+    protected = np.array([0.0, -0.2, -0.3, -0.41, -0.42, -0.43, -0.44])
+    flags = {"fault": [False, True, False, False, False, False, False],
+             "derate": [1.0] * 7}
+    c._protection_state = {"left": {"timestamp": 400.0}, "right": {"timestamp": 400.0}}
+
+    def detail(side, now, target, **_):
+        return protected.copy(), [True, False, True, True, True, True, True], flags
+
+    c._apply_protection_detail = detail
+    first, _ = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(0.0))
+    assert first[1] == protected[1]  # fresh protection owns the immediate safe state.
+
+    clock[0] = 400.2
+    c._protection_state.pop("left")
+    held, _ = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(0.0))
+
+    assert held[1] == module.Dex3_Open_Pose[1]
+    np.testing.assert_allclose(held[3:7], protected[3:7])
+    assert c._trigger_path["left"]["state_grace_state"] == "holding"
+    assert c._trigger_path["left"]["state_grace_joint_hold"] == [0, 2, 3, 4, 5, 6]
+    assert c._trigger_path["left"]["state_grace_blocked_joints"] == [1]
+    assert written["left"][-1][1][1:3] == (0.0, 0.0)

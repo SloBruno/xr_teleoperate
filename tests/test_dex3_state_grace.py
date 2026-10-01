@@ -63,3 +63,44 @@ def test_fresh_recovery_recomputes_and_emits_only_gap_transitions():
     assert recovered["state"] == "fresh"
     assert recovered["warning"] == "state_gap_recovered"
     np.testing.assert_allclose(recovered["q_cmd"], command(0.4))
+
+
+def test_short_gap_holds_only_joints_with_safe_fresh_feedback():
+    from teleop.utils.dex3_state_grace import Dex3StateGrace
+
+    grace = Dex3StateGrace(grace_s=1.5)
+    protected = np.array([0.0, -0.25, -0.35, -0.41, -0.42, -0.43, -0.44])
+    # Thumb1 faulted/disabled; long fingers have an active protected grip.
+    safe = [True, False, True, True, True, True, True]
+    enable = [True, False, True, True, True, True, True]
+    grace.update(10.0, fresh=True, grip_active=True, safe=safe,
+                 q_cmd=protected, enable=enable)
+
+    held = grace.update(10.2, fresh=False, grip_active=True, safe=False)
+
+    assert held["state"] == "holding"
+    assert held["q_cmd"][1] == 0.0
+    assert held["enable"][1] is False
+    np.testing.assert_allclose(held["q_cmd"][3:7], protected[3:7])
+    assert held["enable"][3:7] == [True] * 4
+    assert held["state_grace_joint_hold"] == [0, 2, 3, 4, 5, 6]
+    assert held["state_grace_blocked_joints"] == [1]
+
+
+def test_short_gap_opens_a_thermal_or_faulted_long_finger_instead_of_holding_it():
+    from teleop.utils.dex3_state_grace import Dex3StateGrace
+
+    grace = Dex3StateGrace(grace_s=1.5)
+    protected = command()
+    # Finger1 (joint 4) is thermally cut off; it must not inherit a hold.
+    safe = [True, True, True, True, False, True, True]
+    enable = [True, True, True, True, False, True, True]
+    grace.update(20.0, fresh=True, grip_active=True, safe=safe,
+                 q_cmd=protected, enable=enable)
+
+    held = grace.update(20.2, fresh=False, grip_active=True, safe=False)
+
+    assert held["q_cmd"][4] == 0.0
+    assert held["enable"][4] is False
+    np.testing.assert_allclose(held["q_cmd"][[3, 5, 6]], protected[[3, 5, 6]])
+    assert held["state_grace_blocked_joints"] == [4]
