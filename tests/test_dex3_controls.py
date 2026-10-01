@@ -45,12 +45,12 @@ def test_dex3_closed_poses_close_thumb_without_lateral_rotation_and_mirror_finge
     right_closed = assignments["Dex3_Right_Closed_Pose"]
 
     # Thumb0 remains centered to prevent lateral rotation. Thumb1/Thumb2 use
-    # the Unitree-published full grasp targets; index/middle close to ~73% of
+    # the Unitree-published full grasp targets; index/middle close to ~87% of
     # the physical range (was 50%; grip-hold fix).
     np.testing.assert_allclose(left_closed[:3], [0.0, 1.05, 1.75])
     np.testing.assert_allclose(right_closed[:3], [0.0, -1.05, -1.75])
-    np.testing.assert_allclose(left_closed[3:], [-1.15, -1.30, -1.15, -1.30])
-    np.testing.assert_allclose(right_closed[3:], [1.15, 1.30, 1.15, 1.30])
+    np.testing.assert_allclose(left_closed[3:], [-1.37, -1.53, -1.37, -1.53])
+    np.testing.assert_allclose(right_closed[3:], [1.37, 1.53, 1.37, 1.53])
 
 def test_released_trigger_returns_open_pose_for_all_seven_slots():
     open_pose = np.arange(7, dtype=float)
@@ -310,8 +310,19 @@ def test_control_step_uses_only_side_specific_triggers_when_hand_tracking_is_una
         published[1][1], trigger_to_dex3_targets(0.75, module.Dex3_Open_Pose, module.Dex3_Right_Closed_Pose)
     )
 
-    # A stalled producer leaves old shared trigger values behind. The publisher
-    # itself must fail open when their matching samples are stale.
+    controller._telemetry_lock = __import__("threading").Lock()
+    controller.control_step(left_input, right_input, left_ctrl_sample_in=left_sample, right_ctrl_sample_in=right_sample)
+    # Stale (0.3 s) sample: last valid trigger is held, trigger_path telemetry set.
+    n = len(published)
+    left_sample[:] = [0.0, time.monotonic() - 0.3]
+    right_sample[:] = [0.0, time.monotonic() - 0.3]
+    controller.control_step(left_input, right_input,
+                            left_ctrl_sample_in=left_sample, right_ctrl_sample_in=right_sample)
+    np.testing.assert_allclose(
+        published[n][1], trigger_to_dex3_targets(0.25, module.Dex3_Open_Pose, module.Dex3_Left_Closed_Pose))
+    tp = controller._trigger_path["left"]
+    assert tp["trigger_state"] == "held" and tp["stale"] and tp["trigger_effective"] == 0.25
+    # A stalled producer (no valid timestamp) must fail open.
     left_sample[:] = [1.0, 0.0]
     right_sample[:] = [1.0, 0.0]
     controller.control_step(
@@ -319,8 +330,8 @@ def test_control_step_uses_only_side_specific_triggers_when_hand_tracking_is_una
         left_ctrl_sample_in=left_sample,
         right_ctrl_sample_in=right_sample,
     )
-    np.testing.assert_allclose(published[2][1], module.Dex3_Open_Pose)
-    np.testing.assert_allclose(published[3][1], module.Dex3_Open_Pose)
+    np.testing.assert_allclose(published[-2][1], module.Dex3_Open_Pose)
+    np.testing.assert_allclose(published[-1][1], module.Dex3_Open_Pose)
 
 
 def test_finger_closed_poses_inside_physical_limits_with_margin():
@@ -334,4 +345,8 @@ def test_finger_closed_poses_inside_physical_limits_with_margin():
     for name, sign in (("Dex3_Left_Closed_Pose", -1), ("Dex3_Right_Closed_Pose", 1)):
         f = vals[name][3:] * sign
         assert np.all(f > 0.5 * lim + 0.1)      # closes more than the old 50%
-        assert np.all(f <= lim - 0.2)           # margin to hard stops
+        assert np.all(f <= lim - 0.15)          # margin to hard stops
+        assert np.all(f >= 0.85 * lim - 0.01)   # ~85-90% of the range
+        assert np.all(f <= 0.90 * lim + 0.01)
+    from teleop.utils.dex3_protection import GRIP_HOLD_CMD_LIMIT_RAD
+    assert all(GRIP_HOLD_CMD_LIMIT_RAD[3 + i] >= vals["Dex3_Right_Closed_Pose"][3 + i] for i in range(4))

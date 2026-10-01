@@ -18,7 +18,9 @@ from multiprocessing import Process, Array, Value, Lock
 parent2_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(parent2_dir)
 from teleop.utils.weighted_moving_filter import WeightedMovingFilter
-from teleop.utils.dex3_controls import trigger_to_dex3_targets
+from teleop.utils.dex3_controls import (
+    trigger_to_dex3_targets, TriggerHold, trigger_sample_usable, open_reasons,
+)
 from teleop.utils.quest_safety import controller_sample_is_fresh
 from teleop.utils.haptics import extract_dex3_pressure
 from teleop.utils.dex3_telemetry import (
@@ -42,20 +44,20 @@ kTopicDex3RightState = "rt/dex3/right/state"
 Dex3_Kp = 1.5
 Dex3_Kd = 0.2
 Dex3_Open_Pose = np.zeros(Dex3_Num_Motors)
-# Index/middle closed pose = ~73% of the URDF range (joint0 +-1.571, joint1
-# +-1.745) with ~0.4 rad margin to the stops. It was 50% (0.785/0.873): in the
-# 2026-10-01 session the fingers reached exactly that target (97-102%) with
-# protection active <2% of the time, so a box was only wrapped halfway.
+# Index/middle closed pose = ~87% of the URDF range (joint0 +-1.571, joint1
+# +-1.745) with ~0.2 rad margin to the stops (>=0.15 required). Was 73%
+# (1.15/1.30) and 50% before; the box was only wrapped partway. More closure =
+# more heating. GRIP_HOLD_CMD_LIMIT_RAD (1.47/1.65) stays above these targets.
 # Calibrar no teste fisico. Thumb0
 # stays neutral; Thumb1/Thumb2 use the Unitree full-grasp targets so the thumb
 # reaches full closure at trigger=1.0.
 Dex3_Left_Closed_Pose = np.array([
     0.0, 1.05, 1.75,
-    -1.15, -1.30, -1.15, -1.30,
+    -1.37, -1.53, -1.37, -1.53,
 ])
 Dex3_Right_Closed_Pose = np.array([
     0.0, -1.05, -1.75,
-    1.15, 1.30, 1.15, 1.30,
+    1.37, 1.53, 1.37, 1.53,
 ])
 
 
@@ -293,6 +295,21 @@ class Dex3_1_Controller:
             self._note_extended_failure()
             return Dex3_Open_Pose.copy(), None
 
+    def _record_trigger_path(self, side, info, q_target, q_cmd):
+        """Side-channel (in-memory, no I/O): trigger path of the latest cycle."""
+        try:
+            flags = self.__dict__.get("_protection_flags", {}).get(side)
+            item = dict(info)
+            item["open_reasons"] = open_reasons(info["trigger_state"], info["trigger_effective"], flags)
+            item["q_target"] = [round(float(v), 4) for v in q_target]
+            item["q_cmd"] = [round(float(v), 4) for v in q_cmd]
+            item["pressure_peak"] = (self.left_pressure if side == "left" else self.right_pressure).value \
+                if hasattr(self, "left_pressure") else None
+            with self._telemetry_lock:
+                self.__dict__.setdefault("_trigger_path", {})[side] = item
+        except Exception:
+            self._note_extended_failure()
+
     def _record_protection_flags(self, side, flags):
         try:
             with self._telemetry_lock:
@@ -320,6 +337,9 @@ class Dex3_1_Controller:
                 flags = self.__dict__.get("_protection_flags", {}).get(side)
                 if flags is not None:
                     item["protection"] = flags
+                tp = self.__dict__.get("_trigger_path", {}).get(side)
+                if tp is not None:
+                    item["trigger_path"] = tp
                 out[side] = item
         except Exception:
             self._note_extended_failure()
@@ -396,7 +416,8 @@ class Dex3_1_Controller:
                        left_sample_timestamp=0.0, right_sample_timestamp=0.0,
                        left_enable=None, right_enable=None):
         """Publish both targets, rechecking freshness immediately before output."""
-        if not controller_sample_is_fresh(left_sample_timestamp):
+        now_pub = time.monotonic()
+        if not trigger_sample_usable(left_sample_timestamp, now_pub):
             left_q_target = Dex3_Open_Pose.copy()
         for idx, id in enumerate(Dex3_1_Left_JointIndex):
             self.left_msg.motor_cmd[id].q = left_q_target[idx]
@@ -405,7 +426,7 @@ class Dex3_1_Controller:
         self.LeftHandCmb_publisher.Write(self.left_msg)
         self._record_published_command("left", self.left_msg, Dex3_1_Left_JointIndex)
 
-        if not controller_sample_is_fresh(right_sample_timestamp):
+        if not trigger_sample_usable(right_sample_timestamp, now_pub):
             right_q_target = Dex3_Open_Pose.copy()
         for idx, id in enumerate(Dex3_1_Right_JointIndex):
             self.right_msg.motor_cmd[id].q = right_q_target[idx]
@@ -438,10 +459,14 @@ class Dex3_1_Controller:
                 right_trigger, right_sample_timestamp = right_ctrl_sample_in[:]
         else:
             right_trigger, right_sample_timestamp = 0.0, 0.0
-        if not controller_sample_is_fresh(left_sample_timestamp):
-            left_trigger = 0.0
-        if not controller_sample_is_fresh(right_sample_timestamp):
-            right_trigger = 0.0
+        # Stale samples hold the last valid trigger for TRIGGER_HOLD_MAX_AGE_S,
+        # then fail open (see dex3_controls.TriggerHold).
+        now_t = time.monotonic()
+        holds = self.__dict__.setdefault("_trigger_holds", {"left": TriggerHold(), "right": TriggerHold()})
+        left_info = holds["left"].update(left_trigger, left_sample_timestamp, now_t)
+        right_info = holds["right"].update(right_trigger, right_sample_timestamp, now_t)
+        left_trigger = left_info["trigger_effective"]
+        right_trigger = right_info["trigger_effective"]
         if getattr(self, "_force_open", False):
             # Graceful shutdown: triggers lose authority; command open pose.
             left_q_target = Dex3_Open_Pose.copy()
@@ -461,8 +486,11 @@ class Dex3_1_Controller:
         # Torque/thermal protection only ever moves the command toward the
         # measured/open pose; it cannot add closure beyond the trigger target.
         now = time.monotonic()
+        left_pre, right_pre = left_q_target.copy(), right_q_target.copy()
         left_q_target, left_enable = self._apply_protection("left", now, left_q_target)
         right_q_target, right_enable = self._apply_protection("right", now, right_q_target)
+        self._record_trigger_path("left", left_info, left_pre, left_q_target)
+        self._record_trigger_path("right", right_info, right_pre, right_q_target)
 
         self.ctrl_dual_hand(
             left_q_target, right_q_target, left_sample_timestamp, right_sample_timestamp,

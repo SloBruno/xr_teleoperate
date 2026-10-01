@@ -158,6 +158,7 @@ def _extended_side(item: object, now: float) -> dict | None:
         "command_count": clean_number(item.get("command_count")),
         "failure_count": clean_number(item.get("failure_count")),
         "protection": sanitize(item.get("protection")),
+        "trigger_path": sanitize(item.get("trigger_path")),
     }
 
 
