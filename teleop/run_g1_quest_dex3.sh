@@ -258,9 +258,14 @@ if [[ "${G1_LAUNCHER_SKIP_TELEOP:-0}" == 1 ]]; then
     exit 0
 fi
 cd "$repo/teleop"
+# Optional XR video plane (unset = historical 1.0 m at 1.0 m). Ex.: XR_VIDEO_PLANE_HEIGHT=auto
+video_plane_args=()
+[[ -n "${XR_VIDEO_PLANE_HEIGHT:-}" ]] && video_plane_args+=(--video-plane-height "$XR_VIDEO_PLANE_HEIGHT")
+[[ -n "${XR_VIDEO_PLANE_DISTANCE:-}" ]] && video_plane_args+=(--video-plane-distance "$XR_VIDEO_PLANE_DISTANCE")
 exec "$teleimager_python" -s teleop_hand_and_arm.py \
   --arm G1_29 \
   --ee dex3 \
   --input-mode hand \
   --motion \
-  --camera-layout "$teleop_camera_layout"
+  --camera-layout "$teleop_camera_layout" \
+  ${video_plane_args[@]+"${video_plane_args[@]}"}

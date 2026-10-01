@@ -41,6 +41,10 @@ from teleop.utils.arm_tracking_orchestration import build_arm_recording_actions,
 from teleop.utils.ee_rate_limiter import DualEePoseRateLimiter, G1_29_EE_RATE_LIMITER_CONFIG
 from teleop.utils.arm_enable_ramp import ArmEnableRamp, DEFAULT_ENABLE_RAMP_S
 from teleop.utils.arm_graceful_shutdown import run_graceful_arm_shutdown
+from teleop.utils.xr_video_plane import (
+    describe_plane, plane_exceeds_headset, resolve_plane_height, validate_plane,
+    DEFAULT_DISTANCE_M,
+)
 from teleop.utils.robot_state_monitor import RobotStateMonitor, stop_locomotion_best_effort
 from teleop.utils.teleop_status import (
     AsyncStatusFileSink,
@@ -422,6 +426,8 @@ if __name__ == '__main__':
     parser.add_argument('--head-crop-bottom', type=float, default=0.89, help='Fraction of the head-camera height retained before the seam')
     parser.add_argument('--wrist-crop-top', type=float, default=0.11, help='Fraction removed from the top of the wrist camera before the seam')
     parser.add_argument('--camera-divider-px', type=int, default=4, help='Dark divider thickness between camera views')
+    parser.add_argument('--video-plane-height', type=str, default=None, help="XR video plane height in metres, or 'auto' to match the D435i RGB 69.4° HFOV 1:1 (default: 1.0 = historical)")
+    parser.add_argument('--video-plane-distance', type=float, default=None, help='XR video plane distance in metres (default: 1.0 = historical; angular size depends on height/distance only)')
     # network parameters
     parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='IP address of image server, used by teleimager and televuer')
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
@@ -508,6 +514,14 @@ if __name__ == '__main__':
             display_binocular = False
             logger_mp.info(f"XR vertical camera layout enabled: display shape {display_img_shape}")
 
+        _plane_aspect = display_img_shape[1] / display_img_shape[0]
+        _plane_distance = DEFAULT_DISTANCE_M if args.video_plane_distance is None else args.video_plane_distance
+        video_plane_height, video_plane_distance = validate_plane(
+            resolve_plane_height(args.video_plane_height, _plane_aspect, _plane_distance), _plane_distance)
+        logger_mp.info(describe_plane(video_plane_height, video_plane_distance, _plane_aspect))
+        if plane_exceeds_headset(video_plane_height, video_plane_distance, _plane_aspect):
+            logger_mp.warning("XR video plane exceeds ~90° of the headset FOV; edges may be cut off")
+
         # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
         tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand", 
                                      binocular=display_binocular,
@@ -519,7 +533,9 @@ if __name__ == '__main__':
                                      zmq=camera_config['head_camera']['enable_zmq'],
                                      webrtc=camera_config['head_camera']['enable_webrtc'],
                                      webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
-                                     arm_pose_source="controller"
+                                     arm_pose_source="controller",
+                                     video_plane_height=video_plane_height,
+                                     video_plane_distance=video_plane_distance
                                      )
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
