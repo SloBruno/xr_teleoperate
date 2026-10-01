@@ -41,7 +41,14 @@ def is_walk_fsm(fsm_id):
 
 
 class LocoClientWrapper:
-    def __init__(self):
+    def __init__(self, backend="setvelocity", walk_cap=0.3, turn_cap=0.3, wireless_writer=None):
+        if backend not in ("setvelocity", "wirelesscontroller"):
+            raise ValueError(f"unknown loco backend: {backend}")
+        self.backend = backend
+        self.wireless = None
+        self._wireless_writer = wireless_writer
+        self._walk_cap = walk_cap
+        self._turn_cap = turn_cap
         self.client = LocoClient()
         self.client.SetTimeout(0.0001)
         self.client.Init()
@@ -75,10 +82,27 @@ class LocoClientWrapper:
         # ContinuousGait(false) == SetBalanceMode(0); never enable it.
         return self._cfg().SetBalanceMode(mode)
 
+    def backend_telemetry(self):
+        if self.wireless is not None:
+            return self.wireless.telemetry()
+        return {"backend": self.backend}
+
+    def _ensure_wireless(self):
+        if self.wireless is None:
+            from teleop.utils.loco_wireless import WirelessControllerPublisher, make_dds_writer
+            writer = self._wireless_writer or make_dds_writer()
+            self.wireless = WirelessControllerPublisher(writer, self._walk_cap, self._turn_cap)
+        return self.wireless
+
     def checked_zero(self):
+        if self.backend == "wirelesscontroller":
+            return 0 if self._ensure_wireless().zero_now("preflight") else 3104
         return self._cfg().SetVelocity(0.0, 0.0, 0.0, 1.0)
 
     def start_move_sender(self, move_timeout=0.2):
+        if self.backend == "wirelesscontroller":
+            self._ensure_wireless().start()   # dedicated 20 Hz thread, zeros included
+            return
         from teleop.utils.loco_preflight import LatestMoveSender
         mc = LocoClient()
         mc.SetTimeout(move_timeout)
@@ -94,6 +118,8 @@ class LocoClientWrapper:
         self.sender.start()
 
     def stop_move_sender(self):
+        if self.wireless is not None:
+            self.wireless.stop()   # joins thread, final immediate zero
         if self.sender is not None:
             self.sender.stop()
 
@@ -136,6 +162,15 @@ class LocoClientWrapper:
         """
         self.stop_count += 1
         self.last_stop_reason = reason
+        if self.backend == "wirelesscontroller":
+            try:
+                ok = self._ensure_wireless().zero_now(reason or "stop")
+            except BaseException:
+                ok = False
+            if not ok:
+                self.stop_failures += 1
+            self.last_stop_code = 0 if ok else None
+            return self.last_stop_code
         code = None
         blocking = timeout is not None
         try:
@@ -163,6 +198,13 @@ class LocoClientWrapper:
         # timeout is 0.1 ms (non-blocking), so a reply is rarely in time and
         # code 3104 (timeout) is expected; use read_fsm_id / rt/sportmodestate
         # as the authoritative state, not this code.
+        if self.backend == "wirelesscontroller":
+            # Control loop only stores the target (pure, in-memory); the
+            # dedicated thread publishes at 20 Hz.  Fresh-or-zero is enforced
+            # by the publisher staleness check.
+            self._ensure_wireless().set_command(vx, vy, vyaw)
+            self.last_move_code = None
+            return None
         if self.sender is not None:
             self.sender.submit((vx, vy, vyaw))
             self.last_move_code = self.sender.last_rc  # rc of an earlier send

@@ -436,7 +436,7 @@ def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
         pass
 
     class FakeLocoWrapper:
-        def __init__(self):
+        def __init__(self, **kw):
             moves.append("initialized")
 
         def read_fsm_id(self, timeout=0.3):

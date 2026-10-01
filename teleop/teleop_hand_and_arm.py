@@ -434,6 +434,7 @@ if __name__ == '__main__':
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
     parser.add_argument('--walk-speed-cap', type=float, default=None, help='Walk cap m/s (default 0.3, hard max 0.6; env G1_WALK_SPEED_CAP)')
+    parser.add_argument('--loco-backend', type=str, default='setvelocity', choices=['setvelocity', 'wirelesscontroller'], help='Walking transport: setvelocity (default, RPC 7105) or wirelesscontroller (opt-in: continuous 20 Hz rt/wirelesscontroller joystick state)')
     parser.add_argument('--turn-rate-cap', type=float, default=None, help='Turn cap rad/s (default 0.3, hard max 1.0; env G1_TURN_RATE_CAP)')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
@@ -541,7 +542,8 @@ if __name__ == '__main__':
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
         if args.motion:
-            loco_wrapper = LocoClientWrapper()
+            loco_wrapper = LocoClientWrapper(backend=args.loco_backend, walk_cap=walk_cap, turn_cap=turn_cap)
+            logger_mp.warning(f"[loco] backend: {args.loco_backend}")
             # BotBrain-style preflight, Regular mode only (FSM 500/501, R1+X). Never sends SetFsmId.
             loco_preflight = run_loco_preflight(loco_wrapper)
             logger_mp.info(f"[loco] preflight: {loco_preflight}")
@@ -1019,6 +1021,7 @@ if __name__ == '__main__':
                 stick_log["loco_preflight"] = loco_preflight
                 stick_log["walk_cap"] = walk_cap
                 stick_log["turn_cap"] = turn_cap
+                stick_log["loco_backend"] = getattr(loco_wrapper, "backend_telemetry", lambda: {"backend": args.loco_backend})()
                 stick_log["watchdog_stop_code"] = getattr(loco_wrapper, "watchdog_stop_code", None)
                 if getattr(loco_wrapper, "sender", None) is not None:
                     stick_log["watchdog_trips"] = loco_wrapper.sender.watchdog.trips
