@@ -318,18 +318,15 @@ class Dex3_1_Controller:
 
     @staticmethod
     def _safe_to_retain(flags, enable):
-        """Only cache an already protected output that remains thermally/fault safe."""
-        if flags is None or enable is None or any(flags.get("fault", [])):
-            return False
-        return bool(all(enable) and all(v > 0.0 for v in flags.get("derate", [])))
+        """Cache the exact fresh protected output, including disabled joints."""
+        return flags is not None and enable is not None and len(enable) == Dex3_Num_Motors
 
     def _warn_state_grace(self, side, event, age_s):
         if event is None:
             return
         detail = "?" if age_s is None else f"{age_s * 1000.0:.0f} ms"
         messages = {
-            "state_gap_started": f"[Dex3 protecao {side}] estado DDS antigo/ausente ({detail}): retendo ultimo comando protegido por ate 1.5 s",
-            "state_gap_expired": f"[Dex3 protecao {side}] estado DDS ainda ausente ({detail}): graca expirou, comando aberto fail-safe",
+            "state_gap_started": f"[Dex3 protecao {side}] estado DDS antigo/ausente ({detail}): retendo comando protegido sem abrir automaticamente",
             "state_gap_recovered": f"[Dex3 protecao {side}] estado DDS recuperado ({detail}): protecao recalculada",
         }
         try:
@@ -569,15 +566,17 @@ class Dex3_1_Controller:
                     safe=self._safe_to_retain(flags, enable), q_cmd=q_cmd, enable=enable,
                 )
             else:
+                # Missing/stale DDS is not a command to open.  Keep the per-joint
+                # protected cache while the latch is active; before the first
+                # fresh sample use only the current bounded trigger target.
                 decision = graces[side].update(
                     now, fresh=False, grip_active=grip_active, safe=False,
-                    gap_eligible=(age_s is None or age_s >= 0.0),
+                    fallback_q_cmd=target if grip_active else None,
                 )
-                if decision["state"] == "holding":
+                if decision["q_cmd"] is not None:
                     q_cmd, enable = decision["q_cmd"], decision["enable"]
                 else:
-                    # Existing fail-safe semantics after grace: open pose; keep
-                    # known motor-fault disables, but never retain squeeze torque.
+                    # Deliberate trigger release still takes the normal open path.
                     q_cmd, enable, _ = self._apply_protection_detail(
                         side, now, target, warn_state_stale=False)
             info.update({
