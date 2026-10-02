@@ -266,6 +266,7 @@ def build_pose_record(
     locomotion: Mapping[str, object] | None = None,
     loop_timing: Mapping[str, object] | None = None,
     loop_diag: Mapping[str, object] | None = None,
+    balance: Mapping[str, object] | None = None,
 ) -> dict:
     """Build a serializable snapshot without doing JSON or filesystem I/O."""
     monotonic_timestamp = _finite_timestamp(timestamp_monotonic)
@@ -415,6 +416,9 @@ def build_pose_record(
         record["loop_timing"] = dict(loop_timing)
     if isinstance(loop_diag, Mapping):
         record["loop_diag"] = _thaw_payload(_freeze_payload(loop_diag))
+    # balance: passive IMU/locomotion side channel (teleop.utils.balance_telemetry).
+    if isinstance(balance, Mapping):
+        record["balance"] = _thaw_payload(_freeze_payload(balance))
     return record
 
 

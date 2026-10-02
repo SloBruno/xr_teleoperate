@@ -284,6 +284,13 @@ class G1_29_ArmController(_ArmPublicationMixin):
                     lowstate.motor_state[id].q  = msg.motor_state[id].q
                     lowstate.motor_state[id].dq = msg.motor_state[id].dq
                 self.lowstate_buffer.SetData(lowstate)
+                # Optional passive tap (balance telemetry): store-only, never raises.
+                observer = getattr(self, "lowstate_observer", None)
+                if observer is not None:
+                    try:
+                        observer(msg)
+                    except Exception:
+                        pass
             time.sleep(0.002)
 
     def clip_arm_q_target(self, target_q, velocity_limit):

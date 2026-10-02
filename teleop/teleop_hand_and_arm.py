@@ -47,6 +47,7 @@ from teleop.utils.xr_video_plane import (
     DEFAULT_DISTANCE_M,
 )
 from teleop.utils.robot_state_monitor import RobotStateMonitor, stop_locomotion_best_effort
+from teleop.utils import balance_telemetry
 from teleop.utils.teleop_status import (
     AsyncStatusFileSink,
     TeleopStatusMonitor,
@@ -469,6 +470,8 @@ if __name__ == '__main__':
     loco_wrapper = None
     loco_preflight = None
     robot_monitor = None
+    balance_monitor = None
+    com_status = None
 
     try:
         # setup dds communication domains id
@@ -588,6 +591,13 @@ if __name__ == '__main__':
         elif args.arm == "H2":
             arm_ik = H2_ArmIK()
             arm_ctrl = H2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+
+        # Opt-in passive balance/IMU side channel (G1_BALANCE_TELEMETRY=1):
+        # DDS readers only, lowstate reused from the arm reader thread.
+        balance_monitor = balance_telemetry.create_from_env(os.environ, warn=logger_mp.warning)
+        if balance_monitor is not None:
+            balance_telemetry.attach_lowstate_tap(balance_monitor, arm_ctrl)
+            logger_mp.info(f"[balance_telemetry] enabled at {balance_monitor.rate_hz:.0f} Hz")
 
         # end-effector
         xr_motion_data_ready = Value('b', False, lock=True)        # [input] whether XR hand/controller motion data has arrived
@@ -808,6 +818,12 @@ if __name__ == '__main__':
                 if get_ready_arm_q is not None
                 else np.zeros(sum(ready_arm_joint_split))
             )
+            ready_balance = balance_telemetry.balance_snapshot_best_effort(
+                balance_monitor,
+                loco_backend=(getattr(loco_wrapper, "backend_telemetry", lambda: None)()
+                              if loco_wrapper is not None else None),
+                warn=logger_mp.warning,
+            ) if balance_monitor is not None else None
             ready_wall_clock = time.time()
             emit_pose_record_best_effort(
                 pose_telemetry_sink.emit,
@@ -829,6 +845,7 @@ if __name__ == '__main__':
                 dex3_extended=ready_dex3_extended,
                 drop_count=pose_telemetry_sink.drop_count,
                 now=time.monotonic(),
+                balance=ready_balance,
             )
             # Dex3 has controller/trigger authority only. Start its command
             # process after a post-r controller sample, independently of hand
@@ -1064,7 +1081,7 @@ if __name__ == '__main__':
             controller_pose_is_fresh = controller_sample_is_fresh(tele_data.controller_sample_timestamp)
 
             if com_monitor is not None:
-                com_monitor.update(current_lr_arm_q)  # warn-only; never publishes
+                com_status = com_monitor.update(current_lr_arm_q)  # warn-only; never publishes
             if _diag is not None: _diag.mark("state_read")
             candidate_targets = None
             calibration = arm_calibration if args.arm == "G1_29" else None
@@ -1113,6 +1130,16 @@ if __name__ == '__main__':
             )
             if _diag is not None: _diag.mark("hand")
             _loop_timing, _loop_diag = (_diag.pose_fields(arm_rate_limiter, arm_calibration) if _diag is not None else (None, None))
+            tracking_balance = balance_telemetry.balance_snapshot_best_effort(
+                balance_monitor,
+                loco_backend=stick_log.get("loco_backend"),
+                dispatched=locomotion,
+                loco_raw={"left": tele_data.left_ctrl_thumbstickValue,
+                          "right": tele_data.right_ctrl_thumbstickValue},
+                com_status=com_status,
+                arm_commanded_q=cycle.selected_q,
+                warn=logger_mp.warning,
+            ) if balance_monitor is not None else None
             tracking_wall_clock = time.time()
             emit_pose_record_best_effort(
                 lambda record: arm_publication_telemetry.emit_cycle(record, arm_ctrl),
@@ -1150,6 +1177,7 @@ if __name__ == '__main__':
                 locomotion=stick_log,
                 loop_timing=_loop_timing,
                 loop_diag=_loop_diag,
+                balance=tracking_balance,
             )
             if _diag is not None: _diag.mark("telemetry")
 
@@ -1374,6 +1402,11 @@ if __name__ == '__main__':
                 robot_monitor.close()
         except BaseException as e:
             _log_best_effort("error", f"Failed to close robot state monitor: {e}")
+        try:
+            if balance_monitor is not None:
+                balance_monitor.close()
+        except BaseException as e:
+            _log_best_effort("error", f"Failed to close balance telemetry: {e}")
 
         # Normal control-path telemetry preserves KeyboardInterrupt/SystemExit
         # for the outer shutdown handler. Cleanup telemetry is different: it is
