@@ -584,14 +584,14 @@ def test_long_finger_single_contact_like_sample_cannot_enter_hold():
     assert not any(res.stall[3:]) and not any(res.grip_hold[3:])
 
 
-def test_grip_hold_is_time_limited_then_relaxes_until_release():
+def test_grip_hold_remains_active_past_30_seconds_until_trigger_release():
     p = Dex3HandProtector(OPEN)
     tgt = np.array([0, 0, 0, 1.15, 1.3, 1.15, 1.3]) * -1
     run(p, 0.0, dp.STALL_TIME_S + 0.3, tgt, fblocked)
-    t_late = dp.STALL_TIME_S + 0.3 + dp.GRIP_HOLD_MAX_S + 0.5
+    t_late = dp.STALL_TIME_S + 0.3 + 30.5
     res = p.update(t_late, tgt, fblocked(t_late))
-    assert res.stall[3] and not res.grip_hold[3]
-    assert res.q_cmd[3] == pytest.approx(FQ[3])
+    assert res.stall[3] and res.grip_hold[3]
+    assert res.q_cmd[3] < FQ[3]
     p.update(t_late + 0.01, tgt * 0.4, fblocked(t_late + 0.01))
     res = p.update(t_late + 0.5, tgt * 0.4, fblocked(t_late + 0.5))
     assert not res.stall[3]
@@ -635,12 +635,12 @@ def _engage(p):
     return run(p, 0.0, dp.STALL_TIME_S + 0.3, FT, fblocked)
 
 
-def test_hold_torque_stable_without_drop_for_whole_hold():
+def test_hold_torque_stable_without_drop_for_sustained_hold():
     p = Dex3HandProtector(OPEN)
     _engage(p)
     t = dp.STALL_TIME_S + 0.3
     vals = []
-    while t < dp.STALL_TIME_S + 0.3 + dp.GRIP_HOLD_MAX_S - 1.0:
+    while t < 29.0:
         res = p.update(t, FT, fblocked(t))
         assert res.stall[3] and res.grip_hold[3]
         vals.append(dp.DEX3_KP * abs(res.q_cmd[3] - FQ[3]))

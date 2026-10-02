@@ -80,14 +80,12 @@ STALL_TAU_RAW = 100_000.0  # raw units of tau_est (uncalibrated)
 STALL_TIME_S = 0.75
 # Grip hold: while stalled, keep pushing toward the trigger target with a
 # reduced implicit torque instead of relaxing to q_meas (relaxing lets a held
-# object push the finger back and the box slips). Time-limited, fades with the
-# thermal derate factor, never while faulted. Calibrar no teste fisico.
+# object push the finger back and the box slips). It remains active until a
+# deliberate trigger release or a mandatory thermal/fault protection; it never
+# adds torque beyond the fixed hold ceiling. Calibrar no teste fisico.
 # Thumb = 0.0: thumb keeps the old relax-on-stall behaviour (thermal history).
 # Hold torque raised 0.8 -> 1.2 N*m (calibrar no teste fisico).
 GRIP_HOLD_TORQUE_NM = (0.0, 0.0, 0.0, 1.2, 1.2, 1.2, 1.2)
-# Hold time limit 10 -> 30 s; the real defence is the thermal derate (hold torque
-# scales with the derate factor and is cut at DERATE_OPEN_C). Calibrar.
-GRIP_HOLD_MAX_S = 30.0
 # Hold may push the command PAST the trigger target (never past these |q| limits,
 # ~0.1 rad inside the URDF stops: joint0 +-1.571, joint1 +-1.745) because with a
 # box blocking the finger at q~0.72 the 1.15 rad pose only leaves 0.43 rad of
@@ -379,8 +377,7 @@ class Dex3HandProtector:
         if self._stall[i]:
             res.stall[i] = True
             hold_err = GRIP_HOLD_TORQUE_NM[i] / self.kp * d
-            held = (self._stall_start[i] is not None
-                    and now - self._stall_start[i] <= GRIP_HOLD_MAX_S and hold_err > 1e-9)
+            held = hold_err > 1e-9
             if held:
                 # keep a reduced, thermally-faded squeeze toward the target
                 step = hold_err
@@ -398,7 +395,7 @@ class Dex3HandProtector:
                 res.grip_hold[i] = True
                 res.active[("stall", i)] = (
                     f"{JOINT_NAMES[i]} travado (err {abs(err):.2f} rad): segurando pegada a "
-                    f"{step * self.kp:.2f} N*m implicitos (max {GRIP_HOLD_MAX_S:.0f} s)")
+                    f"{step * self.kp:.2f} N*m implicitos (ate reduzir o trigger ou protecao)")
             else:
                 res.q_cmd[i] = q  # relax: zero implicit torque
                 res.active[("stall", i)] = (
