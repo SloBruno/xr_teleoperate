@@ -22,7 +22,7 @@ class G1QuestDex3LauncherTest(unittest.TestCase):
         self.assertIn('repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)', source)
         self.assertIn('teleimager_dir="$repo/teleop/teleimager"', source)
         self.assertNotIn("/home/unitree/xr_teleoperate_slo", source)
-        self.assertLess(source.index("ensure_teleimager\nexec 9>&-"), source.index('exec "$teleimager_python"'))
+        self.assertLess(source.index("if ! ensure_teleimager; then"), source.index('exec "$teleimager_python"'))
 
     def test_teleimager_start_is_persistent_and_uses_state_files(self):
         source = LAUNCHER.read_text(encoding="utf-8")
@@ -53,7 +53,7 @@ class G1QuestDex3LauncherTest(unittest.TestCase):
         source = LAUNCHER.read_text(encoding="utf-8")
         self.assertIn("TELEIMAGER_TIMEOUT_S", source)
         self.assertIn("teleimager did not become healthy", source)
-        self.assertLess(source.index("ensure_teleimager\nexec 9>&-"), source.index('exec "$teleimager_python"'))
+        self.assertLess(source.index("if ! ensure_teleimager; then"), source.index('exec "$teleimager_python"'))
 
 
 class HeadOnlyModeLauncherTest(unittest.TestCase):
@@ -146,3 +146,17 @@ class LauncherWalkCapTest(unittest.TestCase):
         quest = (LAUNCHER.parents[1] / "teleop" / "utils" / "quest_controls.py").read_text(encoding="utf-8")
         self.assertIn("0.6", quest)
         self.assertIn("1.0", quest)
+
+
+class RealSenseUsb2ProfileLauncherTest(unittest.TestCase):
+    source = LAUNCHER.read_text(encoding="utf-8")
+
+    def test_profile_is_opt_in_and_tracks_running_profile(self):
+        self.assertIn('XR_REALSENSE_PROFILE=${XR_REALSENSE_PROFILE:-normal}', self.source)
+        self.assertIn("normal|usb2", self.source)
+        self.assertIn("low-bandwidth", self.source)
+        self.assertIn("teleimager.realsense_profile", self.source)
+        self.assertIn("perfil RealSense mudou", self.source)
+
+    def test_usb2_health_probe_expects_the_low_bandwidth_shape(self):
+        self.assertIn('expected_shape = (480, 640, 3) if profile == "usb2" else (720, 1280, 3)', self.source)
