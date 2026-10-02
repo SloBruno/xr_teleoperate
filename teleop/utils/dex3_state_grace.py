@@ -7,7 +7,7 @@ Every other joint is commanded to the caller-provided open pose.
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 
@@ -18,7 +18,7 @@ STATE_TIMESTAMP_SKEW_S = 0.05
 _NUM_JOINTS = 7
 
 
-def state_is_fresh(now: float, state: dict | None, stale_s: float = 0.5) -> bool:
+def state_is_fresh(now: float, state: Mapping | None, stale_s: float = 0.5) -> bool:
     """Accept only finite, non-future monotonic receive timestamps."""
     try:
         ts = state.get("timestamp") if state is not None else None

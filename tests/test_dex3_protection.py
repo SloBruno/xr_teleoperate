@@ -161,6 +161,21 @@ def test_hot_joint_reduces_target_and_torque_ceiling():
     assert dp.DEX3_KP * abs(hot.q_cmd[2]) <= dp.CLOSE_TORQUE_CEILING_NM[2] * 0.5 + 1e-9
 
 
+def test_derate_limits_closing_error_from_measured_position_without_opening_grip():
+    p = Dex3HandProtector(OPEN)
+    q = np.full(7, 0.8)
+    target = np.full(7, 1.37)
+    res = p.update(0.0, target, state(0.0, q=q, dq=np.ones(7), temp=[73.0] * 7))
+    d = derate_factor(73.0)
+    expected = q[3] + d * (target[3] - q[3])
+    assert 0.0 < d < 1.0
+    assert res.q_cmd[3] == pytest.approx(expected)
+    assert q[3] <= res.q_cmd[3] <= target[3]
+    assert res.q_cmd[3] >= q[3]  # a thermal derate must not pull a closing grip toward open
+    assert ("derate", 3) in res.active
+    assert not any(kind == "state_stale" for kind, _ in res.active)
+
+
 def test_open_at_80_with_hysteresis_until_60():
     p = Dex3HandProtector(OPEN)
     t = 0.0
@@ -232,6 +247,14 @@ def test_missing_or_stale_state_commands_open_pose():
     np.testing.assert_allclose(res.q_cmd, OPEN)
     res = p.update(10.0, CLOSED, state(float("nan")))
     np.testing.assert_allclose(res.q_cmd, OPEN)
+
+
+def test_small_future_callback_timestamp_is_fresh_for_protector():
+    p = Dex3HandProtector(OPEN)
+    res = p.update(10.0, np.full(7, 1.0), state(10.03, q=np.full(7, 0.2), dq=np.ones(7)))
+    assert not res.state_stale
+    assert not any(kind == "state_stale" for kind, _ in res.active)
+    assert np.all(res.q_cmd > OPEN)
 
 
 def test_garbage_target_and_state_do_not_raise_and_fail_open():
@@ -376,6 +399,21 @@ def test_control_step_without_state_publishes_open(module):
     np.testing.assert_allclose(l, np.zeros(7))
     np.testing.assert_allclose(r, np.zeros(7))
     assert any("ausente" in w for w in module._test_warnings)
+
+
+def test_control_step_accepts_small_future_callback_timestamp_without_opening(module, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    c, written = make_controller(module, 0)
+    zeros = [0.0] * 7
+    feed_state(c, module, "left", zeros, dq=1.0, tau=0)
+    feed_state(c, module, "right", zeros, dq=1.0, tau=0)
+    c._protection_state["left"]["timestamp"] = 100.03
+    left, _ = c.control_step(None, None, left_ctrl_sample_in=Sample(1.0), right_ctrl_sample_in=Sample(0.0))
+    assert np.any(np.abs(left) > 0.0)
+    assert c._trigger_path["left"]["state_grace_state"] == "fresh"
+    assert not any("estado do Dex3 ausente/antigo" in warning for warning in module._test_warnings)
+    assert any(abs(q) > 0.0 for q, *_ in written["left"][-1])
 
 
 def test_control_step_faulted_motor_gets_zero_gain_and_warning_and_flags(module):

@@ -37,6 +37,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from teleop.utils.dex3_telemetry import clean_number
+from teleop.utils.dex3_state_grace import state_is_fresh
 
 NUM_JOINTS = 7
 # Slot order: Thumb0, Thumb1, Thumb2, then four finger joints (same on both sides).
@@ -242,9 +243,9 @@ class Dex3HandProtector:
         dt = 0.0 if self._last_now is None else max(0.0, now - self._last_now)
         self._last_now = now
 
-        ts = None if state is None else state.get("timestamp")
-        fresh = (isinstance(ts, (int, float)) and math.isfinite(ts)
-                 and 0.0 <= now - ts <= STATE_STALE_S)
+        # Use the controller's bounded callback-vs-loop timestamp policy too.
+        # A small negative age is scheduling skew, not stale feedback.
+        fresh = state_is_fresh(now, state, STATE_STALE_S)
         if not fresh:
             # Fail-safe: no trustworthy feedback -> command the open rest pose.
             res.state_stale = True
@@ -318,7 +319,18 @@ class Dex3HandProtector:
         if d < 1.0:
             res.active[("derate", i)] = (
                 f"{JOINT_NAMES[i]} {t_now:.0f}C: derate {d:.2f}" + (" (aberto/relaxado)" if d <= 0.0 else ""))
-        t_eff = open_q + d * (target - open_q)
+        # Thermal derate limits *new closing error* from measured q; it must
+        # not interpolate a held target toward open and loosen a grip. Opening
+        # commands keep their normal path. At the hard thermal cutoff, retain
+        # the existing mandatory open/relax command and hot latch.
+        target_sign = np.sign(target - open_q)
+        target_closing = bool(target_sign != 0 and target_sign * (target - q) > 0)
+        if d <= 0.0:
+            t_eff = open_q
+        elif target_closing:
+            t_eff = q + d * (target - q)
+        else:
+            t_eff = target
         if (t_now is not None and t_now >= TEMP_WARN_C and GRIP_HOLD_TORQUE_NM[i] > 0.0):
             res.active[("temp_warn", i)] = (
                 f"{JOINT_NAMES[i]} {t_now:.0f}C >= {TEMP_WARN_C:.0f}C: aperto em derate, abre a {DERATE_OPEN_C:.0f}C")
