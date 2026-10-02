@@ -10,7 +10,7 @@ def command(v=0.6):
     return np.array([0.0, 0.0, 0.0, v, v, v, v])
 
 
-def test_active_grip_holds_last_protected_command_for_short_state_gaps_then_expires():
+def test_active_grip_holds_last_protected_command_across_long_state_gaps():
     from teleop.utils.dex3_state_grace import Dex3StateGrace
 
     grace = Dex3StateGrace(grace_s=1.5)
@@ -21,24 +21,31 @@ def test_active_grip_holds_last_protected_command_for_short_state_gaps_then_expi
 
     for now in (10.2, 10.7, 11.25):
         held = grace.update(now, fresh=False, grip_active=True, safe=False)
-        assert held["state"] == "holding"
+        assert held["state"] == "holding_no_feedback"
         np.testing.assert_allclose(held["q_cmd"], protected)
         assert held["enable"] == [True] * 7
         assert held["held_command"] == protected.tolist()
 
-    expired = grace.update(12.01, fresh=False, grip_active=True, safe=False)
-    assert expired["state"] == "expired"
-    assert expired["q_cmd"] is None
-    assert expired["reason"] == "state_grace_expired"
-    assert expired["gap_count"] == 1
-    assert expired["gap_max_s"] >= 1.8
+    # A quiet state topic is not a command to open a latched grip.
+    held = grace.update(12.01, fresh=False, grip_active=True, safe=False)
+    assert held["state"] == "holding_no_feedback"
+    np.testing.assert_allclose(held["q_cmd"], protected)
+    assert held["enable"] == [True] * 7
+    assert held["reason"] == "cached_protected_command"
+    assert held["gap_count"] == 1
+    assert held["gap_max_s"] >= 1.8
 
 
 def test_grace_never_holds_without_safe_fresh_feedback_or_active_grip():
     from teleop.utils.dex3_state_grace import Dex3StateGrace
 
     grace = Dex3StateGrace(grace_s=1.5)
-    assert grace.update(1.0, fresh=False, grip_active=True, safe=False)["state"] == "expired"
+    fallback = command(0.4)
+    no_cache = grace.update(1.0, fresh=False, grip_active=True, safe=False,
+                            fallback_q=fallback)
+    assert no_cache["state"] == "holding_no_feedback"
+    assert no_cache["reason"] == "no_cached_protected_command"
+    np.testing.assert_allclose(no_cache["q_cmd"], fallback)
     grace.update(2.0, fresh=True, grip_active=True, safe=False,
                  q_cmd=command(), enable=[True] * 7)
     assert grace.update(2.2, fresh=False, grip_active=True, safe=False)["state"] == "expired"
@@ -78,7 +85,7 @@ def test_short_gap_holds_only_joints_with_safe_fresh_feedback():
 
     held = grace.update(10.2, fresh=False, grip_active=True, safe=False)
 
-    assert held["state"] == "holding"
+    assert held["state"] == "holding_no_feedback"
     assert held["q_cmd"][1] == 0.0
     assert held["enable"][1] is False
     np.testing.assert_allclose(held["q_cmd"][3:7], protected[3:7])

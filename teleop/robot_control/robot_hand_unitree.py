@@ -340,7 +340,7 @@ class Dex3_1_Controller:
             return
         detail = "?" if age_s is None else f"{age_s * 1000.0:.0f} ms"
         messages = {
-            "state_gap_started": f"[Dex3 protecao {side}] estado DDS antigo/ausente ({detail}): retendo ultimo comando protegido por ate 1.5 s",
+            "state_gap_started": f"[Dex3 protecao {side}] estado DDS antigo/ausente ({detail}): retendo comando protegido sem abrir automaticamente",
             "state_gap_expired": f"[Dex3 protecao {side}] estado DDS ainda ausente ({detail}): graca expirou, comando aberto fail-safe",
             "state_gap_recovered": f"[Dex3 protecao {side}] estado DDS recuperado ({detail}): protecao recalculada",
         }
@@ -585,14 +585,13 @@ class Dex3_1_Controller:
                 decision = graces[side].update(
                     now, fresh=False, grip_active=grip_active, safe=False,
                     gap_eligible=(age_s is None or age_s >= 0.0), open_q=Dex3_Open_Pose,
+                    fallback_q=target,
                 )
-                if decision["state"] == "holding":
+                if decision["q_cmd"] is not None:
                     q_cmd, enable = decision["q_cmd"], decision["enable"]
                 else:
-                    # Existing fail-safe semantics after grace: open pose; keep
-                    # known motor-fault disables, but never retain squeeze torque.
-                    q_cmd, enable, _ = self._apply_protection_detail(
-                        side, now, target, warn_state_stale=False)
+                    # Deliberate trigger release still owns the open command.
+                    q_cmd, enable = Dex3_Open_Pose.copy(), None
             info.update({
                 "state_age_ms": None if age_s is None else round(age_s * 1000.0, 1),
                 "state_valid": bool(fresh),

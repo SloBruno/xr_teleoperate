@@ -63,7 +63,8 @@ class Dex3StateGrace:
     def update(self, now: float, *, fresh: bool, grip_active: bool, safe: bool | Sequence[bool],
                q_cmd: Sequence[float] | None = None,
                enable: Sequence[bool] | None = None, gap_eligible: bool = True,
-               open_q: Sequence[float] | None = None) -> dict:
+               open_q: Sequence[float] | None = None,
+               fallback_q: Sequence[float] | None = None) -> dict:
         """Return fresh/holding/expired metadata and an optional hybrid command.
 
         ``safe`` may be the legacy hand-wide bool or seven per-joint eligibility
@@ -94,7 +95,10 @@ class Dex3StateGrace:
             self._gap_count += 1
         elapsed = max(0.0, now - self._gap_started_at)
         self._gap_max_s = max(self._gap_max_s, elapsed)
-        held_joints = self._held_joints(now) if grip_active and elapsed <= self.grace_s else []
+        # A quiet state topic is not an actuator safety command.  Retain only
+        # outputs already approved by fresh protection while the operator keeps
+        # the grip latch active; fresh feedback still supersedes this cache.
+        held_joints = self._held_joints() if grip_active else []
         if held_joints:
             if not self._was_holding:
                 warning = "state_gap_started"
@@ -106,13 +110,19 @@ class Dex3StateGrace:
                 q_out[i] = q
             blocked = [i for i in range(_NUM_JOINTS) if i not in held_joints]
             enable_out = None if self._all_normal_enable and len(held_joints) == _NUM_JOINTS else [i in held_joints for i in range(_NUM_JOINTS)]
-            return self._result("holding", "state_gap_short", warning, q_out, enable_out, elapsed, held_joints, blocked)
+            return self._result("holding_no_feedback", "cached_protected_command", warning, q_out, enable_out, elapsed, held_joints, blocked)
 
-        reason = "grip_not_active" if not grip_active else "state_grace_expired"
-        if not self._was_expired:
-            warning = "state_gap_expired"
+        if grip_active and fallback_q is not None:
+            fallback = np.asarray(fallback_q, dtype=float).reshape(_NUM_JOINTS)
+            if np.all(np.isfinite(fallback)):
+                if not self._was_holding:
+                    warning = "state_gap_started"
+                self._was_holding, self._was_expired = True, False
+                return self._result("holding_no_feedback", "no_cached_protected_command", warning,
+                                    fallback, None, elapsed, [], [])
+
         self._was_holding, self._was_expired = False, True
-        return self._result("expired", reason, warning, None, None, elapsed, [], list(range(_NUM_JOINTS)))
+        return self._result("expired", "grip_not_active" if not grip_active else "no_cached_protected_command", None, None, None, elapsed, [], list(range(_NUM_JOINTS)))
 
     def _cache_fresh(self, now, safe, q_cmd, enable):
         try:
@@ -139,11 +149,10 @@ class Dex3StateGrace:
         self._safe_at = now if any(self._joint_enable) else None
         self._all_normal_enable = enable is None and all(self._joint_enable)
 
-    def _held_joints(self, now: float) -> list[int]:
+    def _held_joints(self) -> list[int]:
         return [i for i in range(_NUM_JOINTS)
                 if self._joint_enable[i] and self._joint_q[i] is not None
-                and self._joint_safe_at[i] is not None
-                and now - self._joint_safe_at[i] <= self.grace_s]
+                and self._joint_safe_at[i] is not None]
 
     def _clear_cache(self):
         self._q_cmd = None
