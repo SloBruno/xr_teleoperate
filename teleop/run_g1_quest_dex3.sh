@@ -42,6 +42,19 @@ TELEIMAGER_CAMERA_MODE=${TELEIMAGER_CAMERA_MODE:-auto}
 TELEIMAGER_DETECT_TIMEOUT_S=${TELEIMAGER_DETECT_TIMEOUT_S:-15}
 teleimager_mode_file="$teleimager_state_dir/teleimager.mode"
 teleimager_source_file="$teleimager_state_dir/teleimager.source"
+# Explicit RealSense bandwidth profile. The normal two-camera setup remains
+# the default; usb2 makes both RealSense streams 640x480@6 (no crop/FOV trick).
+XR_REALSENSE_PROFILE=${XR_REALSENSE_PROFILE:-normal}
+[[ "$XR_REALSENSE_PROFILE" == low-bandwidth || "$XR_REALSENSE_PROFILE" == low_bandwidth ]] && XR_REALSENSE_PROFILE=usb2
+case "$XR_REALSENSE_PROFILE" in
+    normal|usb2) ;;
+    *)
+        echo "unsupported XR_REALSENSE_PROFILE='$XR_REALSENSE_PROFILE' (use normal|usb2|low-bandwidth)" >&2
+        exit 2
+        ;;
+esac
+export XR_REALSENSE_PROFILE
+teleimager_profile_file="$teleimager_state_dir/teleimager.realsense_profile"
 # Derived head-only server config lives in state, never inside the submodule.
 export TELEIMAGER_HEAD_ONLY_CONFIG="$teleimager_state_dir/cam_config_server.head_only.yaml"
 [[ "$TELEIMAGER_CAMERA_MODE" == single ]] && TELEIMAGER_CAMERA_MODE=any
@@ -143,7 +156,7 @@ stop_teleimager_for_restart() {
         echo "Teleimager PID $pid não encerrou após SIGTERM; recusando prosseguir." >&2
         return 1
     fi
-    rm -f "$teleimager_mode_file" "$teleimager_source_file" "$teleimager_pid_file"
+    rm -f "$teleimager_mode_file" "$teleimager_source_file" "$teleimager_profile_file" "$teleimager_pid_file"
 }
 
 teleimager_is_healthy() {
@@ -152,7 +165,7 @@ teleimager_is_healthy() {
     # process group, so an orphan can never hold the lock and freeze the next
     # launcher.
     local probe_pid rc=2 deadline=$((SECONDS + 9))
-    setsid "$teleimager_python" -s - "$teleimager_host" "$TELEIMAGER_CAMERA_MODE" 9>&- <<'PY' &
+    setsid "$teleimager_python" -s - "$teleimager_host" "$TELEIMAGER_CAMERA_MODE" "$XR_REALSENSE_PROFILE" 9>&- <<'PY' &
 import os
 import socket
 import sys
@@ -162,8 +175,10 @@ from teleimager.image_client import ImageClient
 
 host = sys.argv[1]
 mode = sys.argv[2]
+profile = sys.argv[3]
 head_only = mode == "head" or mode == "any"
 ports = (60000, 55555) if head_only else (60000, 55555, 55556)
+expected_shape = (480, 640, 3) if profile == "usb2" else (720, 1280, 3)
 for port in ports:
     with socket.create_connection((host, port), timeout=1):
         pass
@@ -178,7 +193,7 @@ while time.monotonic() < deadline:
     frames = (head,) if head_only else (head, left_wrist)
     if all(
         (bgr := getattr(frame, "bgr", None)) is not None
-        and getattr(bgr, "shape", None) == (720, 1280, 3)
+        and getattr(bgr, "shape", None) == expected_shape
         and bgr.nbytes > 0
         for frame in frames
     ):
@@ -211,13 +226,16 @@ ensure_teleimager() {
         return 1
     fi
 
-    local running_mode=both running_source="" running_pid="" restart_reason=""
+    local running_mode=both running_source="" running_profile=normal running_pid="" restart_reason=""
     [[ -s "$teleimager_mode_file" ]] && running_mode=$(<"$teleimager_mode_file")
     [[ -s "$teleimager_source_file" ]] && running_source=$(<"$teleimager_source_file")
+    [[ -s "$teleimager_profile_file" ]] && running_profile=$(<"$teleimager_profile_file")
     [[ -s "$teleimager_pid_file" ]] && running_pid=$(<"$teleimager_pid_file")
     if [[ -n "$running_pid" ]] && kill -0 "$running_pid" 2>/dev/null; then
         if [[ "$running_mode" != "$TELEIMAGER_CAMERA_MODE" ]]; then
             restart_reason="running in mode $running_mode, câmeras agora pedem $TELEIMAGER_CAMERA_MODE"
+        elif [[ "$running_profile" != "$XR_REALSENSE_PROFILE" ]]; then
+            restart_reason="perfil RealSense mudou de $running_profile para $XR_REALSENSE_PROFILE"
         elif [[ -n "$teleimager_source" && -n "$running_source" && "$running_source" != "$teleimager_source" ]]; then
             restart_reason="câmera mudou de '$running_source' para '$teleimager_source'"
         fi
@@ -235,12 +253,13 @@ ensure_teleimager() {
         return 0
     fi
 
-    echo "Starting Teleimager from $teleimager_dir (mode $TELEIMAGER_CAMERA_MODE)."
+    echo "Starting Teleimager from $teleimager_dir (mode $TELEIMAGER_CAMERA_MODE, RealSense profile $XR_REALSENSE_PROFILE)."
     local server_module=teleimager.image_server
     if [[ "$TELEIMAGER_CAMERA_MODE" == head || "$TELEIMAGER_CAMERA_MODE" == any ]]; then
         server_module=teleop.utils.teleimager_head_only_server
     fi
     echo "$TELEIMAGER_CAMERA_MODE" >"$teleimager_mode_file"
+    echo "$XR_REALSENSE_PROFILE" >"$teleimager_profile_file"
     if [[ -n "$teleimager_source" ]]; then echo "$teleimager_source" >"$teleimager_source_file"; else rm -f "$teleimager_source_file"; fi
     (
         cd "$teleimager_dir"
