@@ -119,3 +119,16 @@ def test_small_callback_race_future_timestamp_is_fresh_but_real_future_is_not():
     # The subscriber can stamp after the control loop captured `now`.
     assert state_is_fresh(10.0, {"timestamp": 10.035}) is True
     assert state_is_fresh(10.0, {"timestamp": 10.100}) is False
+
+
+def test_future_state_timestamp_never_clears_an_active_protected_grip():
+    from teleop.utils.dex3_state_grace import Dex3StateGrace
+
+    protected = command(0.6)
+    grace = Dex3StateGrace()
+    grace.update(10.0, fresh=True, grip_active=True, safe=True,
+                 q_cmd=protected, enable=[True] * 7)
+    held = grace.update(10.1, fresh=False, grip_active=True, safe=False,
+                        gap_eligible=False)
+    assert held["state"] == "holding_no_feedback"
+    np.testing.assert_allclose(held["q_cmd"], protected)

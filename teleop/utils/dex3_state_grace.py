@@ -89,10 +89,9 @@ class Dex3StateGrace:
                 warning = "state_gap_recovered"
             return self._result("fresh", "fresh_state", warning, q_cmd, enable, 0.0, [], [])
 
-        if not gap_eligible:
-            self._clear_cache()
-            self._was_holding, self._was_expired = False, True
-            return self._result("expired", "invalid_state_timestamp", "state_gap_expired", None, None, 0.0, [], list(range(_NUM_JOINTS)))
+        # Invalid/future feedback is not accepted as fresh state, but it is not
+        # an output command. Continue through the same no-feedback hold path.
+        # `gap_eligible` is retained in the signature for compatibility.
 
         if self._gap_started_at is None:
             self._gap_started_at = now
