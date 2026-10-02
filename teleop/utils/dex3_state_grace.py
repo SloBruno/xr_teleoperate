@@ -12,6 +12,9 @@ from typing import Sequence
 import numpy as np
 
 STATE_GRACE_S = 1.5
+# Callback and control threads can sample monotonic time in the opposite order.
+# Accept only this bounded scheduling skew; a genuinely future timestamp remains invalid.
+STATE_TIMESTAMP_SKEW_S = 0.05
 _NUM_JOINTS = 7
 
 
@@ -19,7 +22,8 @@ def state_is_fresh(now: float, state: dict | None, stale_s: float = 0.5) -> bool
     """Accept only finite, non-future monotonic receive timestamps."""
     try:
         ts = state.get("timestamp") if state is not None else None
-        return math.isfinite(float(now)) and math.isfinite(float(ts)) and 0.0 <= now - ts <= stale_s
+        age_s = float(now) - float(ts)
+        return math.isfinite(float(now)) and math.isfinite(float(ts)) and -STATE_TIMESTAMP_SKEW_S <= age_s <= stale_s
     except (TypeError, ValueError):
         return False
 

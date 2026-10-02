@@ -111,3 +111,11 @@ def test_short_gap_opens_a_thermal_or_faulted_long_finger_instead_of_holding_it(
     assert held["enable"][4] is False
     np.testing.assert_allclose(held["q_cmd"][[3, 5, 6]], protected[[3, 5, 6]])
     assert held["state_grace_blocked_joints"] == [4]
+
+
+def test_small_callback_race_future_timestamp_is_fresh_but_real_future_is_not():
+    from teleop.utils.dex3_state_grace import state_is_fresh
+
+    # The subscriber can stamp after the control loop captured `now`.
+    assert state_is_fresh(10.0, {"timestamp": 10.035}) is True
+    assert state_is_fresh(10.0, {"timestamp": 10.100}) is False
