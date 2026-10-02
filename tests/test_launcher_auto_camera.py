@@ -53,7 +53,7 @@ class AutoCameraTest(unittest.TestCase):
                 pass
         subprocess.run(["pkill", "-f", str(self.tmp)], check=False)
 
-    def old_server(self, mode, source=None):
+    def old_server(self, mode, source=None, profile="usb2"):
         p = subprocess.Popen(["bash", "-c", "sleep 30; :", "teleimager_fake"], start_new_session=True)
         self.procs.append(p)
         threading.Thread(target=p.wait, daemon=True).start()  # reap so kill -0 sees it die
@@ -61,6 +61,8 @@ class AutoCameraTest(unittest.TestCase):
         (self.state / "teleimager.mode").write_text(mode + "\n")
         if source:
             (self.state / "teleimager.source").write_text(source + "\n")
+        if profile:
+            (self.state / "teleimager.realsense_profile").write_text(profile + "\n")
         return p
 
     def run_launcher(self, detect=None, rc=0, skip=True, **extra):
@@ -148,6 +150,31 @@ class AutoCameraTest(unittest.TestCase):
         r, _ = self.run_launcher("left_wrist 233622070789 single")
         self.assertIn("Reusing healthy", r.stdout)
         self.assertIsNone(p.poll())
+
+    def test_restarts_pre_usb2_server_into_default_usb2_profile(self):
+        # A server started before the profile existed has no profile file = normal.
+        p = self.old_server("both", profile=None)
+        r, log = self.run_launcher("head 243122072230 both")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("perfil RealSense mudou de normal para usb2", r.stdout)
+        p.wait(timeout=5)
+        self.assertEqual((self.state / "teleimager.realsense_profile").read_text().strip(), "usb2")
+        self.assertIn("PROBE -s - 127.0.0.1 both usb2", log)
+
+    def test_pre_usb2_server_is_not_restarted_under_running_teleop(self):
+        p = self.old_server("both", profile=None)
+        r, _ = self.run_launcher("head 243122072230 both", FAKE_TELEOP="1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("recusando", r.stderr)
+        self.assertIsNone(p.poll())
+
+    def test_normal_profile_override_keeps_legacy_server(self):
+        p = self.old_server("both", profile=None)
+        r, log = self.run_launcher("head 243122072230 both", XR_REALSENSE_PROFILE="normal")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Reusing healthy", r.stdout)
+        self.assertIsNone(p.poll())
+        self.assertIn("PROBE -s - 127.0.0.1 both normal", log)
 
     def test_restarts_when_camera_count_changed_and_no_teleop(self):
         p = self.old_server("any", "left_wrist 233622070789")

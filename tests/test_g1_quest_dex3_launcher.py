@@ -151,8 +151,10 @@ class LauncherWalkCapTest(unittest.TestCase):
 class RealSenseUsb2ProfileLauncherTest(unittest.TestCase):
     source = LAUNCHER.read_text(encoding="utf-8")
 
-    def test_profile_is_opt_in_and_tracks_running_profile(self):
-        self.assertIn('XR_REALSENSE_PROFILE=${XR_REALSENSE_PROFILE:-normal}', self.source)
+    def test_profile_defaults_to_usb2_and_tracks_running_profile(self):
+        # The robot has no USB 3.0: usb2 is the normal default, `normal` is an override.
+        self.assertIn('XR_REALSENSE_PROFILE=${XR_REALSENSE_PROFILE:-usb2}', self.source)
+        self.assertNotIn('XR_REALSENSE_PROFILE=${XR_REALSENSE_PROFILE:-normal}', self.source)
         self.assertIn("normal|usb2", self.source)
         self.assertIn("low-bandwidth", self.source)
         self.assertIn("teleimager.realsense_profile", self.source)
@@ -160,3 +162,21 @@ class RealSenseUsb2ProfileLauncherTest(unittest.TestCase):
 
     def test_usb2_health_probe_expects_the_low_bandwidth_shape(self):
         self.assertIn('expected_shape = (480, 640, 3) if profile == "usb2" else (720, 1280, 3)', self.source)
+
+
+class VideoPlaneDefaultLauncherTest(unittest.TestCase):
+    source = LAUNCHER.read_text(encoding="utf-8")
+
+    def test_wide_fov_plane_is_default_and_still_overridable(self):
+        # Default = auto (1:1 with D435i 69.4 deg HFOV); XR_VIDEO_PLANE_HEIGHT=1.0 restores the old plane.
+        self.assertIn('XR_VIDEO_PLANE_HEIGHT=${XR_VIDEO_PLANE_HEIGHT:-auto}', self.source)
+        self.assertIn('video_plane_args=(--video-plane-height "$XR_VIDEO_PLANE_HEIGHT")', self.source)
+        self.assertNotIn('[[ -n "${XR_VIDEO_PLANE_HEIGHT:-}" ]] && video_plane_args+=', self.source)
+
+    def test_default_plane_expansion_in_bash(self):
+        import subprocess
+        snippet = 'XR_VIDEO_PLANE_HEIGHT=${XR_VIDEO_PLANE_HEIGHT:-auto}; printf %s "$XR_VIDEO_PLANE_HEIGHT"'
+        env = {"PATH": "/usr/bin:/bin"}
+        self.assertEqual(subprocess.run(["bash", "-c", snippet], env=env, capture_output=True, text=True).stdout, "auto")
+        env["XR_VIDEO_PLANE_HEIGHT"] = "1.0"
+        self.assertEqual(subprocess.run(["bash", "-c", snippet], env=env, capture_output=True, text=True).stdout, "1.0")

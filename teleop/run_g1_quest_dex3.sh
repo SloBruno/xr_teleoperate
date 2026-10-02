@@ -42,9 +42,10 @@ TELEIMAGER_CAMERA_MODE=${TELEIMAGER_CAMERA_MODE:-auto}
 TELEIMAGER_DETECT_TIMEOUT_S=${TELEIMAGER_DETECT_TIMEOUT_S:-15}
 teleimager_mode_file="$teleimager_state_dir/teleimager.mode"
 teleimager_source_file="$teleimager_state_dir/teleimager.source"
-# Explicit RealSense bandwidth profile. The normal two-camera setup remains
-# the default; usb2 makes both RealSense streams 640x480@6 (no crop/FOV trick).
-XR_REALSENSE_PROFILE=${XR_REALSENSE_PROFILE:-normal}
+# RealSense bandwidth profile. This robot has no USB 3.0, so usb2 is the
+# default: both RealSense streams 640x480@6 (no crop/FOV trick), last valid
+# frame kept frozen on a glitch. XR_REALSENSE_PROFILE=normal restores 1280x720.
+XR_REALSENSE_PROFILE=${XR_REALSENSE_PROFILE:-usb2}
 [[ "$XR_REALSENSE_PROFILE" == low-bandwidth || "$XR_REALSENSE_PROFILE" == low_bandwidth ]] && XR_REALSENSE_PROFILE=usb2
 case "$XR_REALSENSE_PROFILE" in
     normal|usb2) ;;
@@ -297,9 +298,12 @@ cd "$repo/teleop"
 echo "Teto de caminhada: ${walk_speed_cap} m/s linear, ${turn_rate_cap} rad/s angular (BotBrain g1-r1)"
 echo "Backend de caminhada: ${loco_backend}"
 echo "FSM solicitado (G1_LOCO_REQUEST_FSM): ${G1_LOCO_REQUEST_FSM:-none}"
-# Optional XR video plane (unset = historical 1.0 m at 1.0 m). Ex.: XR_VIDEO_PLANE_HEIGHT=auto
-video_plane_args=()
-[[ -n "${XR_VIDEO_PLANE_HEIGHT:-}" ]] && video_plane_args+=(--video-plane-height "$XR_VIDEO_PLANE_HEIGHT")
+# XR video plane: default auto = plane sized 1:1 to the D435i 69.4 deg HFOV
+# (wider view, no crop/upscale). XR_VIDEO_PLANE_HEIGHT=1.0 restores the
+# historical 1.0 m plane at 1.0 m.
+XR_VIDEO_PLANE_HEIGHT=${XR_VIDEO_PLANE_HEIGHT:-auto}
+echo "Plano de vídeo XR: altura ${XR_VIDEO_PLANE_HEIGHT} (XR_VIDEO_PLANE_HEIGHT=1.0 = antigo); perfil RealSense ${XR_REALSENSE_PROFILE}"
+video_plane_args=(--video-plane-height "$XR_VIDEO_PLANE_HEIGHT")
 [[ -n "${XR_VIDEO_PLANE_DISTANCE:-}" ]] && video_plane_args+=(--video-plane-distance "$XR_VIDEO_PLANE_DISTANCE")
 exec "$teleimager_python" -s teleop_hand_and_arm.py \
   --arm G1_29 \
