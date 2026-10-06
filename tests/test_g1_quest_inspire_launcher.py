@@ -51,7 +51,7 @@ class InspireLauncherTest(unittest.TestCase):
         (bindir / "pgrep").chmod(0o755)
         env = dict(os.environ, TELEIMAGER_STATE_DIR=str(state), TELEIMAGER_PYTHON=str(fake),
                    G1_LAUNCHER_SKIP_NET="1", FAKE_LOG=str(log), PATH=f"{bindir}:{os.environ['PATH']}",
-                   TELEIMAGER_TIMEOUT_S="5", TELEIMAGER_LOCK_TIMEOUT_S="2")
+                   TELEIMAGER_TIMEOUT_S="5", TELEIMAGER_LOCK_TIMEOUT_S="2", INSPIRE_DRIVER="skip")
         env.update(extra)
         r = subprocess.run(["bash", str(LAUNCHER)], env=env, capture_output=True, text=True, timeout=60)
         subprocess.run(["pkill", "-f", str(tmp)], check=False)
