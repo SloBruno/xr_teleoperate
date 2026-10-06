@@ -23,6 +23,14 @@ from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from sshkeyboard import listen_keyboard, stop_listening
 import cv2
+from teleop.utils.xr_frame import compose_xr_frame, display_shape_for, resolve_layout
+from teleop.utils.xr_video_plane import (
+    describe_plane, plane_exceeds_headset, resolve_plane_height, validate_plane,
+)
+
+# Historical dev-branch XR plane (TeleVuer 41e9182 defaults used on this line).
+DEV_VIDEO_PLANE_HEIGHT_M = 3.0
+DEV_VIDEO_PLANE_DISTANCE_M = 4.0
 
 # for simulation
 from unitree_sdk2py.core.channel import ChannelPublisher
@@ -81,6 +89,9 @@ if __name__ == '__main__':
     parser.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1', 'H2'], default='G1_29', help='Select arm controller')
     parser.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco'], help='Select end effector controller')
     parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='IP address of image server, used by teleimager and televuer')
+    parser.add_argument('--camera-layout', type=str, choices=['auto', 'head', 'vertical'], default='auto', help='XR camera layout: auto (vertical if the left-wrist stream is enabled, else head), head only, or head above left wrist')
+    parser.add_argument('--video-plane-height', type=str, default=None, help="XR video plane height in metres, or 'auto' to match the D435i RGB 69.4 deg HFOV 1:1 (default: 3.0 = previous dev value)")
+    parser.add_argument('--video-plane-distance', type=float, default=None, help='XR video plane distance in metres (default: 4.0 = previous dev value)')
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
@@ -123,14 +134,22 @@ if __name__ == '__main__':
         logger_mp.debug(f"Camera config: {camera_config}")
         xr_need_local_img = not (args.display_mode == 'pass-through' or camera_config['head_camera']['enable_webrtc'])
 
-        # Calculate combined image shape for side-by-side display
-        head_shape = camera_config['head_camera']['image_shape']  # [height, width]
-        wrist_shape = camera_config['left_wrist_camera']['image_shape']  # [height, width]
-        # Combined image will be head_height x (head_width + wrist_width)
-        GAP_HEIGHT = 30
-        DISPLAY_SCALE = 0.5
-        combined_img_shape = [int((head_shape[0] + GAP_HEIGHT + wrist_shape[0]) * DISPLAY_SCALE),
-                              int(head_shape[1] * DISPLAY_SCALE)]
+        # XR display layout. The buffer shape is fixed for the whole session, so every
+        # rendered frame is composed to exactly this shape (see utils/xr_frame.py).
+        camera_layout = resolve_layout(args.camera_layout, bool(camera_config['left_wrist_camera']['enable_zmq']))
+        combined_img_shape = display_shape_for(camera_layout, camera_config['head_camera']['image_shape'],
+                                               camera_config['left_wrist_camera']['image_shape'])
+        logger_mp.info(f"XR camera layout: {camera_layout}, display shape {combined_img_shape}")
+
+        # XR video plane (mono ZMQ immersive view). Angular size depends on height/distance only.
+        _plane_distance = DEV_VIDEO_PLANE_DISTANCE_M if args.video_plane_distance is None else args.video_plane_distance
+        _plane_aspect = combined_img_shape[1] / combined_img_shape[0]
+        _plane_height_arg = DEV_VIDEO_PLANE_HEIGHT_M if args.video_plane_height is None else args.video_plane_height
+        video_plane_height, video_plane_distance = validate_plane(
+            resolve_plane_height(_plane_height_arg, _plane_aspect, _plane_distance), _plane_distance)
+        logger_mp.info(describe_plane(video_plane_height, video_plane_distance, _plane_aspect))
+        if plane_exceeds_headset(video_plane_height, video_plane_distance, _plane_aspect):
+            logger_mp.warning("XR video plane exceeds ~90 deg of the headset FOV; edges may be cut off")
 
         # televuer_wrapper: obtain hand pose data from the XR device and transmit the combined camera image to the XR device.
         tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand", 
@@ -142,8 +161,8 @@ if __name__ == '__main__':
                                      webrtc=camera_config['head_camera']['enable_webrtc'],
                                      webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
                                       arm_reference_mode="head_yaw",
-                                      distance_to_camera=4.0,
-                                      image_height=3
+                                      distance_to_camera=video_plane_distance,
+                                      image_height=video_plane_height
                                      )
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
@@ -269,15 +288,11 @@ if __name__ == '__main__':
             left_wrist_img = None
             if camera_config['head_camera']['enable_zmq'] and xr_need_local_img:
                 head_img = img_client.get_head_frame()
-                if camera_config['left_wrist_camera']['enable_zmq']:
+                if camera_layout == 'vertical':
                     left_wrist_img = img_client.get_left_wrist_frame()
-                if head_img is not None and head_img.bgr is not None:
-                    if left_wrist_img is not None and left_wrist_img.bgr is not None:
-                        gap = np.zeros((GAP_HEIGHT, head_img.bgr.shape[1], 3), dtype=np.uint8)
-                        combined_img = np.vstack((head_img.bgr, gap, left_wrist_img.bgr))
-                        tv_wrapper.render_to_xr(cv2.resize(combined_img, None, fx=DISPLAY_SCALE, fy=DISPLAY_SCALE))
-                    else:
-                        tv_wrapper.render_to_xr(head_img.bgr)
+                xr_frame = compose_xr_frame(camera_layout, head_img, left_wrist_img, combined_img_shape)
+                if xr_frame is not None:
+                    tv_wrapper.render_to_xr(xr_frame)
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
@@ -301,22 +316,14 @@ if __name__ == '__main__':
             if camera_config['left_wrist_camera']['enable_zmq']:
                 if args.record:
                     left_wrist_img = img_client.get_left_wrist_frame()
-                elif xr_need_local_img and head_img is not None and head_img.bgr is not None:
+                elif xr_need_local_img and camera_layout == 'vertical' and head_img is not None and head_img.bgr is not None:
                     # For display, we always want the latest wrist image when head image is available
                     left_wrist_img = img_client.get_left_wrist_frame()
             
-            # Create combined image for XR display (side-by-side)
-            if xr_need_local_img and head_img is not None and head_img.bgr is not None:
-                if left_wrist_img is not None and left_wrist_img.bgr is not None:
-                    # Combine head and wrist images side by side
-                    gap = np.zeros((GAP_HEIGHT, head_img.bgr.shape[1], 3), dtype=np.uint8)
-                    combined_img = np.vstack((head_img.bgr, gap, left_wrist_img.bgr))
-                else:
-                    # If no wrist image, just use head image (should not happen in normal operation)
-                    combined_img = head_img.bgr
-                    
+            # XR display: fixed-shape frame; None keeps the last frame on screen.
+            if xr_need_local_img and head_img is not None:
+                combined_img = compose_xr_frame(camera_layout, head_img, left_wrist_img, combined_img_shape)
                 if combined_img is not None:
-                    combined_img = cv2.resize(combined_img, None, fx=0.5, fy=0.5)
                     tv_wrapper.render_to_xr(combined_img)
 
             # record mode
