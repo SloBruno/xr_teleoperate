@@ -19,8 +19,9 @@
 #               driver started here is stopped (SIGINT, 8 s, SIGTERM).
 #     external: no start/stop; only the passive health check.
 #     skip:     nothing (default for G1_EE=inspire_ftp).
-#   INSPIRE_LEFT_PORT=/dev/ttyUSB1  INSPIRE_RIGHT_PORT=/dev/ttyUSB2 (prefer
-#     /dev/serial/by-id/...; discover with the wrapper's --probe; see
+#   INSPIRE_LEFT_PORT=/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAYH4GK-if01-port0
+#   INSPIRE_RIGHT_PORT=/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAYH4GK-if02-port0
+#     (this robot's FT4232H; other adapters: set by-id/by-path; discover with the wrapper's --probe; see
 #     docs/inspire_dfq_485.md)  INSPIRE_BAUDRATE=115200  INSPIRE_LEFT_ID=1
 #     INSPIRE_RIGHT_ID=1  INSPIRE_DDS_IFACE=enP8p1s0  INSPIRE_DRIVER_TIMEOUT_S=15
 #     INSPIRE_STATE_DIR=~/.local/state/xr_teleoperate_inspire
@@ -109,8 +110,10 @@ case "$INSPIRE_DRIVER" in
     auto|skip|external) ;;
     *) echo "unsupported INSPIRE_DRIVER='$INSPIRE_DRIVER' (use auto|skip|external)" >&2; exit 2 ;;
 esac
-INSPIRE_LEFT_PORT=${INSPIRE_LEFT_PORT:-/dev/ttyUSB1}
-INSPIRE_RIGHT_PORT=${INSPIRE_RIGHT_PORT:-/dev/ttyUSB2}
+# Defaults: this robot's FTDI FT4232H (serial FTAYH4GK); if01 = LEFT, if02 = RIGHT
+# (side confirmed on hardware). Override for another adapter.
+INSPIRE_LEFT_PORT=${INSPIRE_LEFT_PORT:-/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAYH4GK-if01-port0}
+INSPIRE_RIGHT_PORT=${INSPIRE_RIGHT_PORT:-/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAYH4GK-if02-port0}
 INSPIRE_BAUDRATE=${INSPIRE_BAUDRATE:-115200}
 INSPIRE_LEFT_ID=${INSPIRE_LEFT_ID:-1}
 INSPIRE_RIGHT_ID=${INSPIRE_RIGHT_ID:-1}

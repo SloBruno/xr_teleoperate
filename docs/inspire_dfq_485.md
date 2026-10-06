@@ -9,8 +9,8 @@ Driver versionado: `teleop/robot_control/inspire_dfq_485_driver.py` (equivalente
 | Variável | Padrão | Uso |
 |---|---|---|
 | `INSPIRE_DRIVER` | `auto` (`skip` se `G1_EE=inspire_ftp`) | `auto` / `external` (só health check) / `skip` |
-| `INSPIRE_LEFT_PORT` | `/dev/ttyUSB1` | porta da mão esquerda (aceita by-id/by-path/symlink) |
-| `INSPIRE_RIGHT_PORT` | `/dev/ttyUSB2` | porta da mão direita |
+| `INSPIRE_LEFT_PORT` | `/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAYH4GK-if01-port0` | porta da mão esquerda (aceita by-id/by-path/symlink) |
+| `INSPIRE_RIGHT_PORT` | `/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAYH4GK-if02-port0` | porta da mão direita |
 | `INSPIRE_BAUDRATE` | `115200` | |
 | `INSPIRE_LEFT_ID` / `INSPIRE_RIGHT_ID` | `1` / `1` | Modbus device id |
 | `INSPIRE_DDS_IFACE` | `enP8p1s0` | `ChannelFactoryInitialize(0, iface)`; vazio = automático |
@@ -19,8 +19,12 @@ Driver versionado: `teleop/robot_control/inspire_dfq_485_driver.py` (equivalente
 | `INSPIRE_STATE_DIR` | `~/.local/state/xr_teleoperate_inspire` | `inspire_driver.{log,pid,lock}` |
 | `INSPIRE_SDK_DIR`, `INSPIRE_UNITREE_SDK`, `INSPIRE_PYTHON` | caminhos do robô | ambiente do driver |
 
-`/dev/ttyUSB1`/`ttyUSB2` são o padrão do SDK, mas a numeração muda com a ordem de
-conexão; o launcher avisa enquanto as portas não forem by-id/`/dev/inspire_*`.
+O padrão é o adaptador FTDI FT4232H deste robô (serial `FTAYH4GK`, 4 portas):
+`if01` = mão ESQUERDA (hoje `/dev/ttyUSB1`), `if02` = mão DIREITA (`/dev/ttyUSB2`),
+lado confirmado no hardware; `if00`/`if03` não respondem. O SDK usa
+`/dev/ttyUSB1`/`ttyUSB2`, mas a numeração muda com a ordem de conexão; o launcher
+avisa se as portas configuradas não forem by-id/`/dev/inspire_*`. Outro adaptador:
+sobrescreva as duas variáveis.
 
 ## Checagem sem iniciar nada
 

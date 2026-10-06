@@ -61,7 +61,7 @@ class RecordingClient:
 
 
 class WrapperArgsTest(unittest.TestCase):
-    def test_defaults_match_sdk_example(self):
+    def test_defaults_are_robot_by_id_ports(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith("INSPIRE_")}
         old = os.environ.copy()
         try:
@@ -70,7 +70,8 @@ class WrapperArgsTest(unittest.TestCase):
         finally:
             os.environ.clear(); os.environ.update(old)
         self.assertEqual((a.left_port, a.right_port, a.baudrate, a.left_id, a.right_id, a.iface),
-                         ("/dev/ttyUSB1", "/dev/ttyUSB2", 115200, 1, 1, "enP8p1s0"))
+                         ("/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAYH4GK-if01-port0",
+                          "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAYH4GK-if02-port0", 115200, 1, 1, "enP8p1s0"))
 
     def test_env_and_args(self):
         old = os.environ.copy()
@@ -321,3 +322,12 @@ class LauncherDriverTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LauncherDefaultPortsTest(unittest.TestCase):
+    def test_launcher_defaults_match_wrapper_by_id_ports(self):
+        src = (Path(__file__).resolve().parents[1] / "teleop" / "run_g1_quest_inspire.sh").read_text()
+        self.assertIn("INSPIRE_LEFT_PORT=${INSPIRE_LEFT_PORT:-%s}" % drv.DEFAULT_LEFT_PORT, src)
+        self.assertIn("INSPIRE_RIGHT_PORT=${INSPIRE_RIGHT_PORT:-%s}" % drv.DEFAULT_RIGHT_PORT, src)
+        self.assertIn("if01", drv.DEFAULT_LEFT_PORT)
+        self.assertIn("if02", drv.DEFAULT_RIGHT_PORT)

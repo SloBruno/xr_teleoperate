@@ -41,8 +41,10 @@ import time
 ANGLE_ACT_ADDR = 1546
 ANGLE_ACT_COUNT = 6
 STATES_STRUCTURE = [("angle_act", ANGLE_ACT_ADDR, ANGLE_ACT_COUNT, "short")]
-DEFAULT_LEFT_PORT = "/dev/ttyUSB1"   # same as the SDK example (fragile: set by-id)
-DEFAULT_RIGHT_PORT = "/dev/ttyUSB2"
+# This robot's FTDI FT4232H (serial FTAYH4GK): if01 = LEFT hand, if02 = RIGHT hand
+# (ttyUSB1/ttyUSB2 in the SDK example, but numbering changes with plug order).
+DEFAULT_LEFT_PORT = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAYH4GK-if01-port0"
+DEFAULT_RIGHT_PORT = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAYH4GK-if02-port0"
 DEFAULT_IFACE = "enP8p1s0"
 STATE_TOPIC = "rt/inspire_hand/state/"
 
