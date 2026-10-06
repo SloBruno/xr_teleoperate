@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G1 · Calibração de caminhada</title>
+<style>
+:root{--bg:#0f1115;--card:#181b22;--fg:#e7e9ee;--mut:#8b93a5;--ok:#2ecc71;--warn:#f1c40f;--bad:#e74c3c;--acc:#3b82f6;--line:#2a2f3a}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.35 system-ui,sans-serif}
+header{position:sticky;top:0;z-index:5;background:#0b0d11;border-bottom:1px solid var(--line);padding:8px 12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+header b{font-size:18px}.pill{padding:3px 9px;border-radius:99px;font-size:13px;background:#262b36}
+.pill.ok{background:#14532d}.pill.warn{background:#713f12}.pill.bad{background:#7f1d1d}
+main{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px;padding:12px}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+h2{margin:0 0 10px;font-size:17px;color:#cbd5e1}
+button{font:inherit;color:var(--fg);background:#2a3140;border:1px solid #3a4252;border-radius:10px;padding:12px 10px;min-height:52px;cursor:pointer;touch-action:manipulation}
+button:active{transform:scale(.98)}button:disabled{opacity:.4}
+.big{font-size:20px;font-weight:600;min-height:72px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.sel{background:var(--acc);border-color:var(--acc)}.reta{background:#1e3a8a}.esq{background:#065f46}.dir{background:#7c2d12}.fim{background:#4b5563}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}.mut{color:var(--mut);font-size:13px}
+.open{font-size:22px;font-weight:700;padding:8px;border-radius:8px;background:#111827;text-align:center;margin:8px 0}
+table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:4px 6px;border-bottom:1px solid var(--line);text-align:left}
+.ck{display:inline-block;min-width:22px;text-align:center}.y{color:var(--ok)}.n{color:#4b5563}
+.val{font-family:ui-monospace,monospace;font-size:18px}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+input{font:inherit;background:#0b0d11;color:var(--fg);border:1px solid #3a4252;border-radius:8px;padding:10px;width:90px}
+.axis{display:grid;grid-template-columns:70px 1fr;gap:6px;align-items:center;margin:6px 0}
+.axis .btns{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.banner{padding:8px;border-radius:8px;margin:6px 0;font-weight:600}.banner.warn{background:#713f12}.banner.bad{background:#7f1d1d}.banner.ok{background:#14532d}
+dialog{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:12px;max-width:520px;width:92vw}
+dialog::backdrop{background:#000a}
+#toast{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);background:#111827;border:1px solid var(--line);padding:10px 14px;border-radius:10px;display:none;z-index:9;max-width:92vw}
+</style>
+</head>
+<body>
+<header><b>G1 · Calibração</b><span id="hMode" class="pill">…</span><span id="hTeleop" class="pill">teleop ?</span><span id="hConn" class="pill">conectando</span><span id="hFile" class="mut"></span></header>
+<main>
+<section id="secSess">
+  <h2>Sessão / marcadores</h2>
+  <div class="grid2"><button id="bSem" class="big" onclick="mk('condition',{condition:'sem_caixa'})">Sem caixa</button>
+  <button id="bCom" class="big" onclick="mk('condition',{condition:'com_caixa'})">Com caixa</button></div>
+  <div class="row">Tentativa <button onclick="att(-1)">−</button><span id="att" class="val">?</span><button onclick="att(1)">+</button>
+   <span class="mut">(auto-incrementa ao iniciar nova reta)</span></div>
+  <div id="open" class="open">nenhum trecho aberto</div>
+  <div class="grid3"><button class="big reta" onclick="mk('segment',{kind:'reta'})">Reta</button>
+  <button class="big esq" onclick="mk('segment',{kind:'giro_esquerda'})">Giro Esq.</button>
+  <button class="big dir" onclick="mk('segment',{kind:'giro_direita'})">Giro Dir.</button></div>
+  <div class="grid3" style="margin-top:8px"><button class="big fim" onclick="mk('end')">Fim</button>
+  <button onclick="if(confirm('Desfazer último marcador?'))mk('undo')">Desfazer</button>
+  <button onclick="note()">Nota</button></div>
+  <p class="mut">A parada após soltar o joystick é detectada automaticamente pelo analisador. Abrir um trecho fecha o anterior. O offset vigente é gravado em cada marcador.</p>
+  <h2>Checklist</h2><div id="check"></div>
+  <h2>Últimos marcadores</h2><table id="recent"></table>
+</section>
+<section id="secLive">
+  <h2>Status ao vivo (passivo)</h2>
+  <div id="liveWarn"></div>
+  <table id="live"></table>
+  <h2>Fontes DDS</h2><table id="sources"></table>
+</section>
+<section id="secOff">
+  <h2>Offset da IMU</h2>
+  <div id="offBanner"></div>
+  <div id="offTbl"></div>
+  <h3 style="margin:10px 0 4px">Pelve (imu_offset_json)</h3>
+  <div id="axImu"></div>
+  <div class="row"><input id="exR" placeholder="roll" inputmode="decimal"><input id="exP" placeholder="pitch" inputmode="decimal">
+   <button onclick="exact('imu')">Aplicar valor exato</button></div>
+  <div class="row"><button onclick="restore('imu')">Restaurar base (passo a passo)</button><button onclick="reread('imu')">Reler (GET)</button></div>
+  <details><summary class="mut">Confirmar valor manual / base (se não lido do DDS)</summary>
+   <div class="row"><input id="mR" placeholder="roll"><input id="mP" placeholder="pitch"><input id="mY" placeholder="yaw"></div>
+   <div class="row"><button onclick="manual('imu',false)">Confirmar valor atual</button><button onclick="manual('imu',true)">Definir como base</button></div>
+   <p class="mut">Use exatamente o valor mostrado no app Unitree Explorer. Nunca chute.</p></details>
+  <details id="adv"><summary class="mut">Avançado: IMU do torso (secondaryimu_offset_json)</summary>
+   <div id="axTorso"></div>
+   <div class="row"><button onclick="restore('secondaryimu')">Restaurar base torso</button><button onclick="reread('secondaryimu')">Reler torso</button></div>
+   <div class="row"><input id="tR" placeholder="roll"><input id="tP" placeholder="pitch"><input id="tY" placeholder="yaw">
+    <button onclick="manualT(false)">Confirmar torso</button><button onclick="manualT(true)">Base torso</button></div>
+  </details>
+  <h2 style="margin-top:12px">Histórico de alterações</h2><table id="hist"></table>
+  <p class="mut" id="policy"></p>
+</section>
+</main>
+<dialog id="dlg"><h3 id="dTitle"></h3><div id="dBody"></div>
+<div class="grid2" style="margin-top:12px"><button id="dNo">Cancelar</button><button id="dYes" class="sel">Aplicar</button></div></dialog>
+<div id="toast"></div>
+<script>
+const TOKEN=new URLSearchParams(location.search).get('token')||'';
+let S=null, busy=false;
+const $=id=>document.getElementById(id);
+const f=(v,n=2)=>v==null||!isFinite(v)?'–':(v>=0?'+':'')+Number(v).toFixed(n);
+const age=a=>a==null?'<span class="bad">sem dado</span>':(a<1?'<span class="ok">'+a.toFixed(1)+'s</span>':a<5?'<span class="warn">'+a.toFixed(1)+'s</span>':'<span class="bad">'+a.toFixed(0)+'s</span>');
+const vec=v=>v?v.map(x=>f(x,2)).join(' / '):'<span class="bad">desconhecido</span>';
+function toast(m,ms=3500){const t=$('toast');t.innerHTML=m;t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',ms)}
+async function api(path,body){const h={'Content-Type':'application/json'};if(TOKEN)h['X-Calib-Token']=TOKEN;
+ const r=await fetch(path+(TOKEN&&!body?'?token='+encodeURIComponent(TOKEN):''),body?{method:'POST',headers:h,body:JSON.stringify(body)}:{headers:h});return r.json()}
+async function mk(action,extra={}){const r=await api('/api/marker',Object.assign({action},extra));if(!r.ok)toast('⚠ '+r.error);else{toast('✓ marcado');if(navigator.vibrate)navigator.vibrate(40)}refresh()}
+function att(d){const cur=(S&&S.session.attempt)||0;const n=Math.max(1,cur+d);mk('attempt',{attempt:n})}
+function note(){const t=prompt('Nota:');if(t)mk('note',{note:t})}
+function ask(title,html,yes='Aplicar'){return new Promise(res=>{$('dTitle').textContent=title;$('dBody').innerHTML=html;$('dYes').textContent=yes;
+ const d=$('dlg');$('dYes').onclick=()=>{d.close();res(true)};$('dNo').onclick=()=>{d.close();res(false)};d.showModal()})}
+async function change(key,target){
+ if(busy)return;busy=true;try{
+ const adv=key==='secondaryimu';
+ const pv=await api('/api/offset/preview',{key,target,advanced:adv});
+ if(!pv.ok){toast('✗ '+pv.errors.join('<br>'),6000);return}
+ let html=`<p class="val">${vec(pv.before)} → <b>${vec(pv.after)}</b></p><p class="mut">base ${vec(pv.base)} · payload <code>${pv.parameter}</code></p>`;
+ if(pv.warnings.length)html+=`<div class="banner warn">⚠ ${pv.warnings.join('<br>⚠ ')}</div>`;
+ html+='<p>Robô parado e apoiado, R3 à mão?</p>';
+ if(!await ask(`Aplicar ${pv.key==='imu'?'pelve':'torso'} ${vec(pv.before)} → ${vec(pv.after)}?`,html))return;
+ let ack=false;
+ if(pv.warnings.length){ack=await ask('SEGUNDA CONFIRMAÇÃO',`<div class="banner bad">O robô pode estar se movendo:<br>${pv.warnings.join('<br>')}</div><p>Aplicar mesmo assim?</p>`,'Sim, aplicar');if(!ack)return}
+ toast('enviando…',2500);
+ const r=await api('/api/offset/apply',{key,target:pv.after,expect_current:pv.before,confirm:true,ack_motion:ack,advanced:adv});
+ if(r.needs_motion_ack){toast('⚠ movimento detectado agora; tente de novo',5000);return}
+ if(!r.ok){toast('✗ '+(r.errors||[]).join('<br>'),7000)}
+ else toast(`✓ code=${r.code} (${r.code_text}) · ${r.verified?'<span class="ok">verificado</span>':'<span class="warn">não verificado</span>'}`,6000);
+ }finally{busy=false;refresh()}}
+function delta(key,i,d){const o=S.offsets[key];if(!o.value){toast('valor atual desconhecido');return}const t=o.value.slice();t[i]=Math.round((t[i]+d)*1000)/1000;change(key,t)}
+function num(id){const v=$(id).value.replace(',','.').trim();return v===''?null:Number(v)}
+function exact(key){const o=S.offsets[key];if(!o.value){toast('valor atual desconhecido');return}const t=o.value.slice();const r=num('exR'),p=num('exP');if(r!=null)t[0]=r;if(p!=null)t[1]=p;change(key,t)}
+async function restore(key){const r=await api('/api/offset/restore_step',{key});if(!r.ok){toast(r.errors.join(' '));return}
+ toast(`restaurar: ${r.steps_remaining} passo(s) até a base`);change(key,r.target)}
+async function reread(key){const r=await api('/api/offset/read',{key});toast(r.ok?'GET ok: '+vec(r.value):'GET falhou: '+(r.error||('code='+r.code+' '+r.code_text)),5000);refresh()}
+async function manual(key,base){const v=[num('mR'),num('mP'),num('mY')];if(v.some(x=>x==null||!isFinite(x))){toast('preencha roll, pitch, yaw');return}
+ if(!await ask(base?'Definir base?':'Confirmar valor atual?',`<p class="val">${vec(v)}</p><p>Somente registro local; nada é enviado ao robô.</p>`,'Confirmar'))return;
+ const r=await api('/api/offset/manual',{key,value:v,set_base:base});toast(r.ok?'✓ registrado':'✗ '+r.error);refresh()}
+async function manualT(base){const v=[num('tR'),num('tP'),num('tY')];if(v.some(x=>x==null||!isFinite(x))){toast('preencha 3 valores');return}
+ const r=await api('/api/offset/manual',{key:'secondaryimu',value:v,set_base:base});toast(r.ok?'✓':'✗ '+r.error);refresh()}
+function axisRows(key){const can=S.writes_enabled;const o=S.offsets[key];let h='';
+ ['roll','pitch'].forEach((ax,i)=>{h+=`<div class="axis"><b>${ax}</b><div class="btns">`+[-0.5,-0.1,0.1,0.5].map(d=>`<button ${can&&o.value?'':'disabled'} onclick="delta('${key}',${i},${d})">${d>0?'+':''}${d.toFixed(1)}°</button>`).join('')+`</div></div>`});
+ h+=`<div class="axis"><b>yaw</b><span class="mut">${f(o.value&&o.value[2])} (somente leitura${S.policy.allow_yaw?'; liberado por --allow-yaw — use o valor exato':''})</span></div>`;return h}
+function render(){
+ $('hMode').textContent='modo '+S.mode+(S.writes_enabled?'':' (sem escrita)');$('hMode').className='pill '+(S.mode==='normal'?'warn':'ok');
+ const tp=S.live.teleop_pids;$('hTeleop').textContent=tp==null?'teleop ?':(tp.length?'teleop ATIVA':'teleop parada');$('hTeleop').className='pill '+(tp&&tp.length?'ok':'');
+ $('hFile').textContent=S.markers_file;
+ const ss=S.session;$('bSem').className='big'+(ss.condition==='sem_caixa'?' sel':'');$('bCom').className='big'+(ss.condition==='com_caixa'?' sel':'');
+ $('att').textContent=ss.attempt??'?';
+ const os_=ss.open_segment;$('open').innerHTML=os_?`▶ ${os_.kind.replace('_',' ')} · ${(os_.elapsed_s||0).toFixed(1)} s`:'nenhum trecho aberto';
+ let ck='<table><tr><th></th><th>t</th><th>reta</th><th>esq</th><th>dir</th></tr>';
+ for(const c of ['sem_caixa','com_caixa'])for(const r of S.checklist[c])ck+=`<tr><td>${c.replace('_',' ')}</td><td>${r.attempt}</td>`+['reta','giro_esquerda','giro_direita'].map(k=>`<td><span class="ck ${r[k]?'y':'n'}">${r[k]?'✔':'·'}</span></td>`).join('')+'</tr>';
+ $('check').innerHTML=ck+'</table>';
+ $('recent').innerHTML=S.recent.map(e=>`<tr><td>#${e.seq}</td><td>${(e.timestamp_utc||'').slice(11,19)}</td><td>${e.type}${e.kind?' '+e.kind:''}${e.note?' “'+e.note.replace(/</g,'&lt;')+'”':''}</td><td>${e.condition||''} t${e.attempt??'?'}</td><td class="mut">${e.imu_offset?vec(e.imu_offset):''}</td></tr>`).join('');
+ const L=S.live,w=L.wireless||{},o=L.odom||{};
+ $('liveWarn').innerHTML=S.motion_warnings.length?`<div class="banner warn">⚠ ${S.motion_warnings.join('<br>⚠ ')}</div>`:'<div class="banner ok">joystick ~0 e robô parado</div>';
+ $('live').innerHTML=`<tr><td>Locomoção (lx, ly, rx)</td><td class="val">${f(w.lx)} ${f(w.ly)} ${f(w.rx)}</td><td>${w.zero?'<span class="ok">~0</span>':'<span class="warn">ativa</span>'} ${age(w.age)}</td></tr>
+ <tr><td>Velocidade corpo</td><td class="val">${f(o.speed,3)} m/s</td><td>${age(o.age)}</td></tr>
+ <tr><td>Yaw rate</td><td class="val">${f(o.yaw_rate,3)} rad/s</td><td></td></tr>
+ <tr><td>IMU pelve roll/pitch</td><td class="val">${L.pelvis_rpy_deg?f(L.pelvis_rpy_deg[0])+'° '+f(L.pelvis_rpy_deg[1])+'°':'–'}</td><td>${age(L.pelvis_age)}</td></tr>
+ <tr><td>IMU torso roll/pitch</td><td class="val">${L.torso_rpy_deg?f(L.torso_rpy_deg[0])+'° '+f(L.torso_rpy_deg[1])+'°':'–'}</td><td>${age(L.torso_age)}</td></tr>`;
+ $('sources').innerHTML=Object.entries(L.sources||{}).map(([k,v])=>`<tr><td>${k}</td><td>${age(v.age)}</td><td class="mut">${v.count}</td></tr>`).join('')||'<tr><td class="mut">nenhuma amostra</td></tr>';
+ const im=S.offsets.imu;let b='';
+ if(!S.writes_enabled)b='<div class="banner ok">Somente leitura: escrita desabilitada.</div>';
+ else if(S.mode==='dry-run')b='<div class="banner warn">DRY-RUN: nada é enviado ao robô.</div>';
+ if(im.uncertain)b+='<div class="banner bad">Offset INCERTO (SET sem resposta). Releia ou confirme manualmente antes de continuar.</div>';
+ if(!im.base&&S.writes_enabled)b+='<div class="banner bad">Base desconhecida: incrementos bloqueados. Use “Reler” ou confirme o valor do app.</div>';
+ if(im.differs_from_base)b+='<div class="banner warn">Offset da pelve difere da base. Restaure ao final.</div>';
+ $('offBanner').innerHTML=b;
+ $('offTbl').innerHTML='<table><tr><th></th><th>atual (r/p/y °)</th><th>origem · idade</th><th>base</th></tr>'+Object.values(S.offsets).map(x=>`<tr><td>${x.label}</td><td class="val">${vec(x.value)}</td><td>${x.source||'–'}${x.uncertain?' <span class="bad">incerto</span>':''} · ${x.age_s==null?'–':x.age_s.toFixed(0)+'s'}</td><td class="val">${vec(x.base)} <span class="mut">${x.base_source||''}</span></td></tr>`).join('')+'</table>'+
+  `<p class="mut">GET (api 1002): ${S.get_available===null?'não tentado':S.get_available?'disponível':'indisponível'}${S.write_interval_left_s?` · próxima escrita em ${S.write_interval_left_s.toFixed(1)} s`:''}</p>`;
+ $('axImu').innerHTML=axisRows('imu');if($('adv').open)$('axTorso').innerHTML=axisRows('secondaryimu');
+ $('hist').innerHTML=S.history.map(h=>`<tr><td>${h.timestamp_utc.slice(11,19)}</td><td>${h.key}</td><td class="val">${vec(h.before)}→${vec(h.after)}</td><td>code ${h.code}${h.dry_run?' (sim)':''}</td><td>${h.verified?'<span class="ok">verificado</span>':'<span class="warn">não verif.</span>'}</td></tr>`).join('')||'<tr><td class="mut">nenhuma</td></tr>';
+ const p=S.policy;$('policy').textContent=`Limites: base ±${p.window_deg}°, |x|≤${p.hard_abs_deg}°, passo ≤${p.max_step_deg}°, intervalo ≥${p.min_interval_s}s. Arquivo: ${S.offset_log_file}`;
+}
+async function refresh(){try{S=await api('/api/state');$('hConn').textContent='online';$('hConn').className='pill ok';render()}catch(e){$('hConn').textContent='sem conexão';$('hConn').className='pill bad'}}
+$('adv').addEventListener('toggle',()=>S&&render());
+setInterval(()=>{if(!document.querySelector('dialog[open]'))refresh()},400);refresh();
+</script>
+</body>
+</html>

@@ -77,6 +77,12 @@ def effective_markers(events):
     return alive
 
 
+def _is_pelvis_offset_set(ev):
+    """Successful pelvis-IMU offset write recorded by tools/calib_web.py."""
+    return (ev.get("type") == "offset_set" and ev.get("ok") is True and not ev.get("dry_run")
+            and ev.get("offset_key", "imu") == "imu" and ev.get("imu_offset") is not None)
+
+
 def segments_from_markers(events):
     """Markers -> [{kind, condition, attempt, start, end, next_boundary, notes}].
 
@@ -87,17 +93,21 @@ def segments_from_markers(events):
     segs, cur, offset = [], None, None
     for ev in alive:
         typ, t = ev.get("type"), float(ev["timestamp"])
-        if typ == "imu_offset":
+        if typ == "imu_offset" or _is_pelvis_offset_set(ev):
             offset = ev.get("imu_offset")
         if typ in ("segment_start", "segment_end", "session_end") and cur is not None:
             cur["end"] = t
             segs.append(cur)
             cur = None
         if typ == "segment_start":
+            auto = ev.get("imu_offset_source") is not None and ev.get("imu_offset") is not None
             cur = {"kind": ev.get("kind"), "condition": ev.get("condition"),
                    "attempt": ev.get("attempt"), "start": t, "end": None,
                    "start_seq": ev.get("seq"), "notes": [],
-                   "imu_offset": offset if offset is not None else ev.get("imu_offset")}
+                   # web UI writes the live offset (+ its source) on every marker
+                   "imu_offset": ev.get("imu_offset") if auto else (
+                       offset if offset is not None else ev.get("imu_offset")),
+                   "imu_offset_source": ev.get("imu_offset_source") if auto else None}
         elif typ == "note" and cur is not None:
             cur["notes"].append(ev.get("note"))
     if cur is not None:
@@ -110,8 +120,12 @@ def segments_from_markers(events):
 
 
 class MarkerSession:
-    def __init__(self, path, wall_clock=time.time, monotonic_clock=time.monotonic):
+    def __init__(self, path, wall_clock=time.time, monotonic_clock=time.monotonic,
+                 offset_provider=None):
+        """``offset_provider`` (optional, web UI): callable -> (pelvis offset
+        [r,p,y] deg or None, source str) recorded automatically on every event."""
         self._wall, self._mono = wall_clock, monotonic_clock
+        self._offset_provider = offset_provider
         self._fh = None
         self.path = None if path is None else Path(path)
         if self.path is not None:
@@ -132,7 +146,7 @@ class MarkerSession:
                 cond = ev["condition"]
             elif typ == "attempt":
                 att = ev["attempt"]
-            elif typ == "imu_offset":
+            elif typ == "imu_offset" or _is_pelvis_offset_set(ev):
                 offset = ev["imu_offset"]
             elif typ == "segment_start":
                 open_seg = {"kind": ev["kind"], "since_utc": ev["timestamp_utc"], "seq": ev["seq"]}
@@ -159,6 +173,13 @@ class MarkerSession:
               "clock_domain": {"timestamp": "wall_clock_utc", "timestamp_monotonic": "monotonic"},
               "condition": st["condition"], "attempt": st["attempt"], "imu_offset": st["imu_offset"],
               "kind": None, "note": None}
+        if self._offset_provider is not None:
+            try:
+                off, src = self._offset_provider()
+            except Exception:
+                off, src = None, "erro"
+            ev["imu_offset"] = None if off is None else [float(v) for v in off]
+            ev["imu_offset_source"] = src or "desconhecido"
         ev.update(fields)
         self._events.append(ev)
         if self._fh is not None:
@@ -169,6 +190,15 @@ class MarkerSession:
             except OSError:
                 pass
         return ev
+
+    def record(self, typ, **fields):
+        """Public append (web UI): same schema, fsync'd like key presses."""
+        if self.closed:
+            raise RuntimeError("sessao encerrada")
+        return self._write(typ, **fields)
+
+    def events(self):
+        return list(self._events)
 
     def handle(self, line):
         line = (line or "").strip()

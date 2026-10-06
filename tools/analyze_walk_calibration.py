@@ -9,7 +9,9 @@ Uso:
 Alinha por relogio de parede (campo ``timestamp`` = time.time(), ou
 ``timestamp_utc``) a telemetria (``full_pose_telemetry`` com bloco ``balance``,
 G1_BALANCE_TELEMETRY=1) com os marcadores de tools/mark_calibration_segments.py.
-Agrupa por condicao e por offset da IMU da pelve (marcador ``o`` ou
+Agrupa por condicao e por offset da IMU da pelve (marcador ``o`` do terminal,
+offset automatico gravado pela UI web em cada marcador [imu_offset_source =
+dds_get/dds_passive/manual], eventos ``offset_set`` bem-sucedidos da UI, ou
 config_change_status imu_offset_json; conflito gera aviso, marcador vence).
 ``--fit-offset``: regressao linear roll->trim vy e pitch->deriva frente na
 parada / erro vx, com offset que zera (-b/a).  Yaw so reportado.
@@ -115,11 +117,13 @@ def _unwrap(seq):
 # ------------------------------------------------------------------ loading
 def parse_imu_offset(item):
     """config_change_status item {name, content} -> [roll, pitch, yaw] deg or None.
-    Accepts content as JSON list, or JSON object with imu_offset_json/imu_offset
-    (value list or JSON string of a list)."""
+    Accepts content as JSON list, or JSON object with imu/imu_offset_json/imu_offset
+    (value list or JSON string of a list).  secondaryimu_* is ignored."""
     if not isinstance(item, dict):
         return None
     name, content = str(item.get("name") or ""), item.get("content")
+    if "secondary" in name:          # torso IMU: never the pelvis offset
+        return None
     val = content
     if isinstance(val, str):
         try:
@@ -127,7 +131,8 @@ def parse_imu_offset(item):
         except (json.JSONDecodeError, ValueError):
             return None
     if isinstance(val, dict):
-        val = next((val[k] for k in ("imu_offset_json", "imu_offset") if k in val), None)
+        # real G1 format (Unitree Explorer / config service): {"imu":[r,p,y]}
+        val = next((val[k] for k in ("imu_offset_json", "imu_offset", "imu") if k in val), None)
         if isinstance(val, str):
             try:
                 val = json.loads(val)
@@ -546,7 +551,10 @@ def analyze(telemetry_paths, markers_path, trim_start=1.0, trim_end=0.5, release
         cfg = [x["offset_cfg"] for x in samples if x["t"] <= a and x.get("offset_cfg") is not None]
         tel_off = cfg[-1] if cfg else None
         off = m.get("imu_offset")
-        off_src = "marcador" if off is not None else None
+        off_src = None
+        if off is not None:
+            src = m.get("imu_offset_source")
+            off_src = f"marcador:{src}" if src else "marcador"
         if off is None and tel_off is not None:
             off, off_src = tel_off, "config_change_status"
         elif off is not None and tel_off is not None and any(abs(u - v) > 1e-6 for u, v in zip(off, tel_off)):
