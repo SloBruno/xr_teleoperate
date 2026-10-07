@@ -118,11 +118,45 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(s["tr"], 0)
 
 
+def fake_skel(q):
+    q = np.asarray(q, float)
+    if not np.all(np.isfinite(q)):
+        return None
+    arm = lambda sgn: [[0.0, sgn * 0.1, 0.3]] + [[0.01 * i, sgn * 0.15, 0.3 - 0.03 * i] for i in range(1, 8)]
+    return {"l": arm(1), "r": arm(-1), "b": [[0, 0, 0], [0, 0, 0.04]]}
+
+
+class SkeletonHubTest(unittest.TestCase):
+    def test_decimated_and_absent(self):
+        clock = Clock()
+        hub = web.PoseHub(fk=fake_fk, clock=clock, skeleton=fake_skel, skeleton_hz=20.0)
+        for i in range(100):  # 2 s @ 50 Hz
+            clock.t += 0.02
+            hub.ingest(_pkt(i, clock.t))
+        smp = hub.samples_since(0)
+        sk = [s for s in smp if "sk" in s]
+        self.assertTrue(38 <= len(sk) <= 51, len(sk))
+        self.assertEqual(len(sk[0]["sk"]["l"]), 8)
+        self.assertEqual(sk[0]["sk"]["r"][0], [0.0, -0.1, 0.3])
+        st = hub.status()
+        self.assertTrue(st["skeleton"])
+        self.assertEqual(st["n_skel"], len(sk))
+        # no skeleton (e.g. --no-fk): field absent, status says so
+        hub2 = web.PoseHub(fk=None, clock=clock)
+        hub2.ingest(_pkt(0, clock.t))
+        self.assertNotIn("sk", hub2.samples_since(0)[0])
+        self.assertFalse(hub2.status()["skeleton"])
+        # skeleton errors do not break ingest
+        hub3 = web.PoseHub(fk=fake_fk, clock=clock, skeleton=lambda q: 1 / 0)
+        self.assertIsNotNone(hub3.ingest(_pkt(0, clock.t)))
+        self.assertEqual(hub3.status()["fk_errors"], 1)
+
+
 class HttpTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.rec = web.Recorder(self.dir)
-        self.hub = web.PoseHub(fk=fake_fk, recorder=self.rec)
+        self.hub = web.PoseHub(fk=fake_fk, recorder=self.rec, skeleton=fake_skel)
         self.udp_port = self.hub.bind("127.0.0.1", 0)
         threading.Thread(target=self.hub.run_udp, daemon=True).start()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), web.make_handler(self.hub, self.rec, self.dir,
@@ -158,6 +192,9 @@ class HttpTest(unittest.TestCase):
         self.assertIn("Salvar tarefa", html)
         self.assertNotIn("cdn", html.lower())
         self.assertNotIn("<script src", html.lower())
+        self.assertIn('id="c3d"', html)       # 3D panel
+        for v in ("Frente", "Lado", "Topo", "Isométrica", "Recentrar"):
+            self.assertIn(v, html)
         time.sleep(0.6)
         st = json.loads(self.get("/api/status")[2])
         self.assertGreater(st["stream"]["n_rx"], 5)
@@ -165,6 +202,9 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(st["frame"], "f")
         smp = json.loads(self.get("/api/samples?since=0")[2])["samples"]
         self.assertTrue(smp and all(len(s["ml"]) == 3 for s in smp))
+        sks = [s["sk"] for s in smp if "sk" in s]
+        self.assertTrue(sks and len(sks) < len(smp))  # decimated skeleton in the stream
+        self.assertEqual(len(sks[-1]["l"]), 8)
         last = smp[-1]["id"]
         newer = json.loads(self.get(f"/api/samples?since={last}")[2])["samples"]
         self.assertTrue(all(s["id"] > last for s in newer))
@@ -197,6 +237,26 @@ class MainSmokeTest(unittest.TestCase):
         rc = web.main(["--host", "127.0.0.1", "--port", str(port), "--udp-port", "0", "--no-fk",
                        "--fake-source", "--run-seconds", "0.5", "--task-dir", d])
         self.assertEqual(rc, 0)
+
+    def test_main_no_fk_http_has_no_skeleton(self):
+        s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+        d = tempfile.mkdtemp()
+        out = {}
+
+        def probe():
+            time.sleep(0.6)
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/samples?since=0", timeout=3) as r:
+                out["j"] = json.loads(r.read())
+
+        th = threading.Thread(target=probe); th.start()
+        rc = web.main(["--host", "127.0.0.1", "--port", str(port), "--udp-port", "0", "--no-fk",
+                       "--fake-source", "--run-seconds", "1.0", "--task-dir", d])
+        th.join()
+        self.assertEqual(rc, 0)
+        j = out["j"]
+        self.assertFalse(j["stream"]["skeleton"])
+        self.assertTrue(j["samples"])
+        self.assertTrue(all("sk" not in s and s["ml"] == [None, None, None] for s in j["samples"]))
 
 
 if __name__ == "__main__":

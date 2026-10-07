@@ -71,6 +71,52 @@ class WristFKTest(unittest.TestCase):
         q[3] = np.nan
         self.assertEqual(self.fk.wrist_xyz(q), (None, None))
 
+    def test_skeleton_points(self):
+        from teleop.utils import arm_fk
+        rng = np.random.default_rng(1)
+        lo, hi = self.fk.model.lowerPositionLimit, self.fk.model.upperPositionLimit
+        for q in (np.zeros(14), np.clip(rng.normal(0, 0.4, 14), lo, hi)):
+            sk = self.fk.skeleton(q)
+            self.assertEqual(set(sk), {"l", "r", "b"})
+            self.assertEqual(len(sk["b"]), len(arm_fk.SKELETON_BASE_FRAMES))
+            wl, wr = self.fk.wrist_xyz(q)
+            for key, side, w in (("l", "left", wl), ("r", "right", wr)):
+                pts = np.array(sk[key])
+                self.assertEqual(pts.shape, (len(arm_fk.SKELETON_JOINTS) + 1, 3))
+                self.assertTrue(np.all(np.isfinite(pts)))
+                # first point = shoulder (pitch joint origin, does not move with arm q)
+                jid = self.fk.model.getJointId(f"{side}_shoulder_pitch_joint")
+                import pinocchio as pin
+                d = self.fk.model.createData()
+                pin.forwardKinematics(self.fk.model, d, q)
+                np.testing.assert_allclose(pts[0], d.oMi[jid].translation, atol=1e-9)
+                self.assertGreater(pts[0][2], 0.2)              # shoulder above the waist
+                self.assertGreater(pts[0][1] * (1 if key == "l" else -1), 0.05)
+                # last point == wrist point of arm_fk (same frame as IK target)
+                np.testing.assert_allclose(pts[-1], w, atol=1e-6)
+                # wrist_yaw joint origin is 5 cm from the ee point
+                self.assertAlmostEqual(float(np.linalg.norm(pts[-1] - pts[-2])), 0.05, places=6)
+        self.assertIsNone(self.fk.skeleton(np.zeros(13)))
+        q = np.zeros(14); q[0] = np.inf
+        self.assertIsNone(self.fk.skeleton(q))
+
+    def test_pose_web_hub_with_real_fk_sends_skeleton(self):
+        sys.path.insert(0, str(REPO / "tools"))
+        import pose_compare_web as web
+        from teleop.utils import pose_stream as ps
+        t = [10.0]
+        hub = web.PoseHub(fk=self.fk.wrist_xyz, skeleton=self.fk.skeleton, skeleton_hz=20.0, clock=lambda: t[0])
+        q = np.zeros(14)
+        for i in range(50):  # 1 s at 50 Hz -> ~20 skeletons
+            t[0] += 0.02
+            hub.ingest(ps.pack_sample(i, t[0], 1.7e9, True, True, (0.3, 0.2, 0.1), (0.3, -0.2, 0.1), q, q))
+        smp = hub.samples_since(0)
+        sk = [s["sk"] for s in smp if "sk" in s]
+        self.assertTrue(19 <= len(sk) <= 26, len(sk))
+        self.assertEqual(len(sk[-1]["l"]), 8)
+        np.testing.assert_allclose(sk[-1]["r"][-1], smp[-1]["mr"], atol=1e-4)
+        self.assertTrue(hub.status()["skeleton"])
+
     @unittest.skipUnless(HAVE_CASADI, "pinocchio.casadi indisponível")
     def test_same_model_and_fk_matches_ik_target(self):
         import pinocchio as pin
