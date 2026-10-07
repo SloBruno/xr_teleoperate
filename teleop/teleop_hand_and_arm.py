@@ -27,6 +27,7 @@ from teleop.utils.xr_frame import compose_xr_frame, display_shape_for, resolve_l
 from teleop.utils.xr_video_plane import (
     describe_plane, plane_exceeds_headset, resolve_plane_height, validate_plane,
 )
+from teleop.utils.session_shutdown import install_shutdown_signal_handlers, run_session_shutdown
 
 # Historical dev-branch XR plane (TeleVuer 41e9182 defaults used on this line).
 DEV_VIDEO_PLANE_HEIGHT_M = 3.0
@@ -61,6 +62,8 @@ RECORD_TOGGLE  = False  # Toggle recording state
 def on_press(key):
     global STOP, START, RECORD_TOGGLE
     if key == 'r':
+        if STOP:
+            return  # stop is terminal: a late r during shutdown is ignored
         START = True
     elif key == 'q':
         START = False
@@ -109,6 +112,18 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     logger_mp.debug(f"args: {args}")
+
+    # Graceful shutdown state (see teleop/utils/session_shutdown.py): every
+    # resource starts as None so q / Ctrl+C / SIGTERM / an exception at any
+    # point can tear down exactly what exists.
+    arm_ctrl = None
+    arm_ik = None
+    hand_ctrl = None
+    tv_wrapper = None
+    img_client = None
+    listen_keyboard_thread = None
+    ipc_server = None
+    install_shutdown_signal_handlers()
 
     try:
         # setup dds communication domains id
@@ -383,6 +398,8 @@ if __name__ == '__main__':
             sol_q, sol_tauff  = arm_ik.solve_ik(tele_data.left_wrist_pose, tele_data.right_wrist_pose, current_lr_arm_q, current_lr_arm_dq)
             time_ik_end = time.time()
             logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
+            if STOP:
+                break  # q arrived during IK: no new target; graceful shutdown owns the arms
             arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
 
             # record data
@@ -538,17 +555,28 @@ if __name__ == '__main__':
         import traceback
         logger_mp.error(traceback.format_exc())
     finally:
+        START = False
+        STOP = True
+        # Graceful shutdown (q / Ctrl+C / SIGTERM / SIGHUP / exception), bounded
+        # and idempotent: stop the Inspire command process (no hand motion,
+        # hand keeps its last position) -> G1_29 velocity-limited return to the
+        # zero pose + rt/arm_sdk weight ramp 1->0 + writer deactivated ->
+        # TeleVuer closed without orphan -> remaining children reaped. The
+        # RS-485 driver is stopped by the launcher after this process exits.
         try:
-            arm_ctrl.ctrl_dual_arm_go_home()
-        except Exception as e:
-            logger_mp.error(f"Failed to ctrl_dual_arm_go_home: {e}")
-        
+            run_session_shutdown(arm_kind=args.arm, arm_ctrl=arm_ctrl, arm_ik=arm_ik,
+                                 hand_ctrl=hand_ctrl, tv_wrapper=None, log=logger_mp, reap=False)
+        except BaseException as e:
+            logger_mp.error(f"Graceful shutdown failed: {e!r}")
+
         try:
             if args.ipc:
-                ipc_server.stop()
+                if ipc_server is not None:
+                    ipc_server.stop()
             else:
                 stop_listening()
-                listen_keyboard_thread.join()
+                if listen_keyboard_thread is not None:
+                    listen_keyboard_thread.join(timeout=1.0)
         except Exception as e:
             logger_mp.error(f"Failed to stop keyboard listener or ipc server: {e}")
         
@@ -559,9 +587,9 @@ if __name__ == '__main__':
             logger_mp.error(f"Failed to close image client: {e}")
 
         try:
-            tv_wrapper.close()
-        except Exception as e:
-            logger_mp.error(f"Failed to close televuer wrapper: {e}")
+            run_session_shutdown(arm_kind=args.arm, tv_wrapper=tv_wrapper, log=logger_mp, reap=False)
+        except BaseException as e:
+            logger_mp.error(f"Failed to close televuer wrapper: {e!r}")
 
         try:
             if not args.motion:
@@ -582,5 +610,9 @@ if __name__ == '__main__':
                 recorder.close()
         except Exception as e:
             logger_mp.error(f"Failed to close recorder: {e}")
+        try:
+            run_session_shutdown(arm_kind=args.arm, log=logger_mp, reap=True)
+        except BaseException as e:
+            logger_mp.error(f"Failed to reap child processes: {e!r}")
         logger_mp.info("✅ Finally, exiting program.")
         exit(0)

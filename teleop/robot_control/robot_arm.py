@@ -54,17 +54,25 @@ class H2_LowState:
 class DataBuffer:
     def __init__(self):
         self.data = None
+        self.timestamp = 0.0
         self.lock = threading.Lock()
 
     def GetData(self):
         with self.lock:
             return self.data
 
+    def GetSnapshot(self):
+        with self.lock:
+            return self.data, self.timestamp
+
     def SetData(self, data):
         with self.lock:
             self.data = data
+            self.timestamp = time.monotonic()
 
 class G1_29_ArmController:
+    arm_joint_split = (7, 7)  # left, right (graceful shutdown contract)
+
     def __init__(self, motion_mode = False, simulation_mode = False):
         logger_mp.info("Initialize G1_29_ArmController...")
         self.q_target = np.zeros(14)
@@ -139,6 +147,16 @@ class G1_29_ArmController:
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
         self.ctrl_lock = threading.Lock()
+        # Graceful shutdown (ported from the main line, edfd901): the writer
+        # publishes _motion_authority_weight into kNotUsedJoint0.q EVERY frame
+        # (1.0 = teleop owns rt/arm_sdk, 0.0 = Unitree motion controller owns
+        # the arms) and stops when output_enabled is cleared. Pre-r behaviour is
+        # unchanged: weight 1.0 from construction, as before.
+        self._motion_authority_weight = 1.0
+        self._last_publish_monotonic = None
+        self._last_published_weight = None
+        self.output_enabled = threading.Event()
+        self.output_enabled.set()
         self.publish_thread.daemon = True
         self.publish_thread.start()
 
@@ -163,15 +181,15 @@ class G1_29_ArmController:
         return cliped_arm_q_target
 
     def _ctrl_motor_state(self):
-        if self.motion_mode:
-            self.msg.motor_cmd[G1_29_JointIndex.kNotUsedJoint0].q = 1.0;
-
-        while True:
+        while self.output_enabled.is_set():
             start_time = time.time()
 
             with self.ctrl_lock:
                 arm_q_target     = self.q_target
                 arm_tauff_target = self.tauff_target
+                motion_weight    = self._motion_authority_weight
+            if self.motion_mode:
+                self.msg.motor_cmd[G1_29_JointIndex.kNotUsedJoint0].q = motion_weight
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -183,8 +201,13 @@ class G1_29_ArmController:
                 self.msg.motor_cmd[id].dq = 0
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]   
 
+            if not self.output_enabled.is_set():
+                break  # deactivated while building the frame: write nothing
             self.msg.crc = self.crc.Crc(self.msg)
             self.lowcmd_publisher.Write(self.msg)
+            with self.ctrl_lock:
+                self._last_publish_monotonic = time.monotonic()
+                self._last_published_weight = motion_weight if self.motion_mode else None
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -202,6 +225,50 @@ class G1_29_ArmController:
         with self.ctrl_lock:
             self.q_target = q_target
             self.tauff_target = tauff_target
+
+    def set_motion_authority_weight(self, weight):
+        '''Set the rt/arm_sdk authority weight written by the arm writer (0..1).'''
+        weight = float(weight)
+        if not np.isfinite(weight):
+            raise ValueError("motion authority weight must be finite")
+        with self.ctrl_lock:
+            self._motion_authority_weight = min(1.0, max(0.0, weight))
+
+    def get_arm_command(self):
+        '''Return copies of the current arm q/tau command.'''
+        with self.ctrl_lock:
+            return np.array(self.q_target, dtype=float).copy(), np.array(self.tauff_target, dtype=float).copy()
+
+    def get_dual_arm_q_snapshot(self):
+        '''Return (measured arm q, sample age in seconds) from one atomic read.'''
+        lowstate, timestamp = self.lowstate_buffer.GetSnapshot()
+        if lowstate is None:
+            return None, float("inf")
+        q = np.array([lowstate.motor_state[id].q for id in G1_29_JointArmIndex], dtype=float)
+        return q, time.monotonic() - timestamp
+
+    def get_publication_status(self):
+        '''Nonblocking writer liveness snapshot used by graceful shutdown.'''
+        with self.ctrl_lock:
+            return {
+                "active": self.output_enabled.is_set() and self.publish_thread.is_alive(),
+                "last_publish_monotonic": self._last_publish_monotonic,
+                "last_published_weight": self._last_published_weight,
+                "commanded_weight": self._motion_authority_weight,
+            }
+
+    def deactivate(self, join_timeout=1.0):
+        '''Stop the rt/arm_sdk (or rt/lowcmd) writer; bounded join, idempotent.'''
+        self.output_enabled.clear()
+        thread = getattr(self, "publish_thread", None)
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=max(0.0, float(join_timeout)))
+        alive = thread is not None and thread.is_alive()
+        if alive:
+            logger_mp.error("[G1_29_ArmController] arm writer did not stop within %.1fs" % join_timeout)
+        else:
+            logger_mp.info("[G1_29_ArmController] Arm DDS output deactivated.")
+        return not alive
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
@@ -233,7 +300,7 @@ class G1_29_ArmController:
             if np.all(np.abs(current_q) < tolerance):
                 if self.motion_mode:
                     for weight in np.linspace(1, 0, num=101):
-                        self.msg.motor_cmd[G1_29_JointIndex.kNotUsedJoint0].q = weight;
+                        self.set_motion_authority_weight(weight)
                         time.sleep(0.02)
                 logger_mp.info("[G1_29_ArmController] both arms have reached the home position.")
                 break

@@ -250,6 +250,14 @@ class G1_29_ArmIK:
         robot_right_pose[:3, 3] *= scale_factor
         return robot_left_pose, robot_right_pose
 
+    def gravity_tauff(self, current_lr_arm_motor_q):
+        """Static gravity feed-forward (rnea with zero velocity/acceleration)."""
+        q = np.asarray(current_lr_arm_motor_q, dtype=float)
+        if q.shape != (14,) or not np.all(np.isfinite(q)):
+            raise ValueError("G1_29 gravity feed-forward requires 14 finite arm joints")
+        zeros = np.zeros(self.reduced_robot.model.nv)
+        return np.asarray(pin.rnea(self.reduced_robot.model, self.reduced_robot.data, q, zeros, zeros)).copy()
+
     def solve_ik(self, left_wrist, right_wrist, current_lr_arm_motor_q = None, current_lr_arm_motor_dq = None):
         if current_lr_arm_motor_q is not None:
             self.init_data = current_lr_arm_motor_q

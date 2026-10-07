@@ -4,7 +4,7 @@ import numpy as np
 from enum import IntEnum
 import threading
 import time
-from multiprocessing import Process, Array
+from multiprocessing import Process, Array, Event
 from dataclasses import dataclass
 import cyclonedds.idl as idl
 import cyclonedds.idl.annotations as annotate
@@ -40,6 +40,37 @@ class inspire_hand_state(idl.IdlStruct, typename="inspire.inspire_hand_state"):
     err: types.sequence[types.uint8, 6]
     status: types.sequence[types.uint8, 6]
     temperature: types.sequence[types.uint8, 6]
+
+def stop_hand_process(process, stop_event, join_timeout=1.0, kill_timeout=0.5):
+    """Stop an Inspire command process: event -> join -> terminate -> kill.
+
+    Bounded (<= join_timeout + 2*kill_timeout), never raises, idempotent.
+    Sends NO hand command: the hand keeps its last commanded position (no
+    automatic open/close at session edges, operator preference).
+    Returns True when the process is gone.
+    """
+    try:
+        if stop_event is not None:
+            stop_event.set()
+    except Exception:
+        pass
+    if process is None:
+        return True
+    try:
+        if process.is_alive():
+            process.join(timeout=max(0.0, float(join_timeout)))
+        if process.is_alive():
+            logger_mp.warning("[Inspire] command process did not stop in time; terminating.")
+            process.terminate()
+            process.join(timeout=kill_timeout)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=kill_timeout)
+        return not process.is_alive()
+    except Exception as error:
+        logger_mp.error(f"[Inspire] failed to stop command process: {error}")
+        return False
+
 
 class Inspire_Controller_DFX:
     def __init__(self, left_hand_array, right_hand_array, dual_hand_data_lock = None, dual_hand_state_array = None,
@@ -87,12 +118,24 @@ class Inspire_Controller_DFX:
                 break
         logger_mp.info("[Inspire_Controller_DFX] Subscribe dds ok.")
 
+        # Stop flag shared with the forked command process (self.running set in
+        # the parent never reaches the child).
+        self._stop_event = Event()
         hand_control_process = Process(target=self.control_process, args=(left_hand_array, right_hand_array,  self.left_hand_state_array, self.right_hand_state_array,
                                                                           dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array))
         hand_control_process.daemon = True
         hand_control_process.start()
+        self.hand_control_process = hand_control_process
 
         logger_mp.info("Initialize Inspire_Controller_DFX OK!")
+
+    def deactivate(self, join_timeout=1.0):
+        """Shutdown: stop rt/inspire_hand/ctrl/{l,r} publication (no motion)."""
+        self.running = False
+        stopped = stop_hand_process(getattr(self, "hand_control_process", None),
+                                    getattr(self, "_stop_event", None), join_timeout=join_timeout)
+        logger_mp.info(f"[Inspire] hand command output stopped={stopped}; hand keeps its last commanded position.")
+        return stopped
 
     def _subscribe_hand_state(self):
         while True:
@@ -137,12 +180,13 @@ class Inspire_Controller_DFX:
     def control_process(self, left_hand_array, right_hand_array, left_hand_state_array, right_hand_state_array,
                               dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None):
         self.running = True
+        stop_event = getattr(self, "_stop_event", None)
 
         left_q_target  = np.full(Inspire_Num_Motors, 1.0)
         right_q_target = np.full(Inspire_Num_Motors, 1.0)
 
         try:
-            while self.running:
+            while self.running and not (stop_event is not None and stop_event.is_set()):
                 start_time = time.time()
                 # get dual hand state
                 with left_hand_array.get_lock():
@@ -191,6 +235,8 @@ class Inspire_Controller_DFX:
                         dual_hand_state_array[:] = state_data
                         dual_hand_action_array[:] = action_data
 
+                if stop_event is not None and stop_event.is_set():
+                    break  # shutdown requested mid-cycle: publish nothing more
                 self._send_hand_command(scaled_left_cmd, scaled_right_cmd)
                 current_time = time.time()
                 time_elapsed = current_time - start_time
@@ -254,12 +300,24 @@ class Inspire_Controller_FTP:
                 break
         logger_mp.info("[Inspire_Controller_FTP] Initial hand states received or timeout.")
 
+        # Stop flag shared with the forked command process (self.running set in
+        # the parent never reaches the child).
+        self._stop_event = Event()
         hand_control_process = Process(target=self.control_process, args=(left_hand_array, right_hand_array, self.left_hand_state_array, self.right_hand_state_array,
                                                                           dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array))
         hand_control_process.daemon = True
         hand_control_process.start()
+        self.hand_control_process = hand_control_process
 
         logger_mp.info("Initialize Inspire_Controller_FTP OK!\n")
+
+    def deactivate(self, join_timeout=1.0):
+        """Shutdown: stop rt/inspire_hand/ctrl/{l,r} publication (no motion)."""
+        self.running = False
+        stopped = stop_hand_process(getattr(self, "hand_control_process", None),
+                                    getattr(self, "_stop_event", None), join_timeout=join_timeout)
+        logger_mp.info(f"[Inspire] hand command output stopped={stopped}; hand keeps its last commanded position.")
+        return stopped
 
     def _subscribe_hand_state(self):
         logger_mp.info("[Inspire_Controller_FTP] Subscribe thread started.")
@@ -313,12 +371,13 @@ class Inspire_Controller_FTP:
                               dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None):
         logger_mp.info("[Inspire_Controller_FTP] Control process started.")
         self.running = True
+        stop_event = getattr(self, "_stop_event", None)
 
         left_q_target  = np.full(Inspire_Num_Motors, 1.0)
         right_q_target = np.full(Inspire_Num_Motors, 1.0)
 
         try:
-            while self.running:
+            while self.running and not (stop_event is not None and stop_event.is_set()):
                 start_time = time.time()
                 # get dual hand state
                 with left_hand_array.get_lock():
@@ -360,6 +419,8 @@ class Inspire_Controller_FTP:
                         dual_hand_state_array[:] = state_data
                         dual_hand_action_array[:] = action_data
 
+                if stop_event is not None and stop_event.is_set():
+                    break  # shutdown requested mid-cycle: publish nothing more
                 self._send_hand_command(scaled_left_cmd, scaled_right_cmd)
                 current_time = time.time()
                 time_elapsed = current_time - start_time

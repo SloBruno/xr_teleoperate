@@ -2,7 +2,9 @@
 no DDS, no robot, no hand command)."""
 import importlib.util
 import os
+import signal
 import subprocess
+import types
 import sys
 import tempfile
 import time
@@ -184,7 +186,7 @@ echo "$*" >>"$FAKE_LOG"
 case "$*" in
   *--detect*) echo "head 243122072230 both"; exit 0;;
   "-s - "*) exit 0;;
-  *teleop_hand_and_arm*) exit "${FAKE_TELEOP_RC:-0}";;
+  *teleop_hand_and_arm*) [[ -n "${FAKE_TELEOP_PY:-}" ]] && exec python3 "$FAKE_TELEOP_PY"; exit "${FAKE_TELEOP_RC:-0}";;
   *--health-check*) [[ "${FAKE_HEALTH:-ok}" == ok ]] && exit 0; exit 4;;
   *inspire_dfq_485_driver.py*) exec python3 "$FAKE_DRV" "$@";;
 esac
@@ -202,8 +204,48 @@ while True:
 '''
 
 
+FAKE_TELEOP = r'''import os, signal, sys, time
+log = os.environ["FAKE_LOG"]
+def h(sig, _f):
+    open(log, "a").write("teleop-shutdown-start\n")
+    time.sleep(1.0)  # graceful arm return + weight ramp take time
+    open(log, "a").write("teleop-shutdown-done\n")
+    sys.exit(0)
+signal.signal(signal.SIGINT, h)
+open(log, "a").write("teleop-running\n")
+while True:
+    time.sleep(0.05)
+'''
+
+
 class LauncherDriverTest(unittest.TestCase):
-    def _run(self, args=(), **extra):
+    def test_ctrl_c_teleop_finishes_shutdown_before_driver_stops(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "faketeleop.py").write_text(FAKE_TELEOP)
+        holder = {}
+
+        def runner(env):
+            p = subprocess.Popen(["bash", str(LAUNCHER)], env=env, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, start_new_session=True)
+            log = Path(env["FAKE_LOG"])
+            deadline = time.monotonic() + 60
+            while "teleop-running" not in log.read_text() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            os.killpg(p.pid, signal.SIGINT)  # terminal Ctrl+C hits the foreground group
+            out, err = p.communicate(timeout=60)
+            holder["rc"] = p.returncode
+            return types.SimpleNamespace(returncode=p.returncode, stdout=out, stderr=err)
+
+        r, log, left = self._run(runner=runner, FAKE_TELEOP_PY=str(tmp / "faketeleop.py"))
+        lines = log.splitlines()
+        self.assertIn("teleop-shutdown-done", lines, r.stderr)
+        i_done = lines.index("teleop-shutdown-done")
+        i_stop = next(i for i, l in enumerate(lines) if l.startswith("driver-stopped"))
+        self.assertLess(i_done, i_stop)          # teleop graceful shutdown first, then driver
+        self.assertEqual(lines[i_stop], "driver-stopped-2")
+        self.assertEqual(left, "")
+
+    def _run(self, args=(), runner=None, **extra):
         tmp = Path(tempfile.mkdtemp())
         self.tmp = tmp
         state = tmp / "state"; state.mkdir()
@@ -221,7 +263,10 @@ class LauncherDriverTest(unittest.TestCase):
                    INSPIRE_DRIVER_TIMEOUT_S="3", INSPIRE_SDK_DIR=str(tmp / "nosdk"))
         env.pop("INSPIRE_DRIVER", None)
         env.update(extra)
-        r = subprocess.run(["bash", str(LAUNCHER), *args], env=env, capture_output=True, text=True, timeout=90)
+        if runner is not None:
+            r = runner(env)
+        else:
+            r = subprocess.run(["bash", str(LAUNCHER), *args], env=env, capture_output=True, text=True, timeout=90)
         time.sleep(0.3)
         leftover = subprocess.run(["pgrep", "-f", str(tmp / "fakedrv.py")], capture_output=True, text=True).stdout
         subprocess.run(["pkill", "-f", str(tmp)], check=False)
