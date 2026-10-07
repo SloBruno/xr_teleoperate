@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comparar punho: robô × mão — Teleop Inspire</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --fg:#e6e8ee; --dim:#9aa3b2;
+          --x:#ff5c5c; --y:#46d27a; --z:#4ea3ff; --n:#f3c34b; --ok:#3fcf6e; --bad:#ff5c5c; --warn:#f3c34b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui,Segoe UI,Roboto,sans-serif; }
+  header { padding:10px 14px; border-bottom:1px solid var(--line); display:flex; flex-wrap:wrap; gap:10px 18px; align-items:center; }
+  h1 { font-size:16px; margin:0; font-weight:600; }
+  .pill { display:inline-flex; gap:6px; align-items:center; padding:3px 9px; border-radius:999px; background:var(--panel); border:1px solid var(--line); color:var(--dim); white-space:nowrap; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--dim); }
+  .ok .dot { background:var(--ok); } .bad .dot { background:var(--bad); } .warn .dot { background:var(--warn); }
+  main { padding:10px 14px; display:grid; gap:12px; grid-template-columns: minmax(0,1fr) 320px; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px; }
+  .chart h2 { font-size:14px; margin:0 0 6px; font-weight:600; display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; }
+  .chart h2 small { color:var(--dim); font-weight:400; }
+  canvas { width:100%; height:240px; display:block; }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .seg button { background:transparent; color:var(--dim); border:0; padding:6px 10px; cursor:pointer; font:inherit; }
+  .seg button.on { background:#2b3242; color:var(--fg); }
+  button.act { background:#2b3242; color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:6px 12px; cursor:pointer; font:inherit; }
+  label { color:var(--dim); display:flex; gap:6px; align-items:center; }
+  input[type=text], input[type=number] { background:#0c0e12; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:7px 8px; font:inherit; width:100%; }
+  .legend { display:flex; flex-wrap:wrap; gap:12px; color:var(--dim); font-size:13px; }
+  .sw { display:inline-block; width:22px; height:0; border-top:3px solid; vertical-align:middle; margin-right:5px; }
+  .sw.dash { border-top-style:dashed; }
+  #save { width:100%; font-size:20px; font-weight:700; padding:16px; border-radius:12px; border:0; cursor:pointer; background:#1f7a46; color:#fff; }
+  #save.rec { background:#b03030; }
+  #save.cd { background:#8a6d12; }
+  #save:disabled { opacity:.5; cursor:default; }
+  .side h3 { margin:0 0 8px; font-size:14px; }
+  .row { display:grid; gap:8px; margin-bottom:10px; }
+  #recstatus { font-variant-numeric: tabular-nums; margin-top:8px; color:var(--dim); min-height:20px; }
+  #tasks { list-style:none; margin:0; padding:0; max-height:360px; overflow:auto; }
+  #tasks li { padding:6px 0; border-bottom:1px solid var(--line); font-size:13px; }
+  #tasks a { color:#8ec1ff; margin-right:8px; }
+  .muted { color:var(--dim); font-size:12px; }
+  #err { color:var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Punho do robô (FK) × punho da mão (alvo do IK)</h1>
+  <span class="pill" id="p-conn"><span class="dot"></span><span>conexão</span></span>
+  <span class="pill" id="p-track"><span class="dot"></span><span>tracking</span></span>
+  <span class="pill" id="p-rate"><span class="dot"></span><span>— Hz</span></span>
+  <span class="pill" id="p-age"><span class="dot"></span><span>idade —</span></span>
+  <span class="pill" id="p-fk"><span class="dot"></span><span>FK</span></span>
+  <span class="muted" id="err"></span>
+</header>
+<main>
+  <section style="display:grid; gap:12px; min-width:0">
+    <div class="card controls">
+      <span class="seg" id="arm"><button data-v="L">Esquerdo</button><button data-v="R" class="on">Direito</button><button data-v="B">Ambos</button></span>
+      <span class="seg" id="win"><button data-v="10" class="on">10 s</button><button data-v="30">30 s</button><button data-v="60">60 s</button></span>
+      <span class="seg" id="rob"><button data-v="both" class="on">Medido + comandado</button><button data-v="meas">Só medido</button><button data-v="cmd">Só comandado</button></span>
+      <label><input type="checkbox" id="showErr" checked> painel de erro</label>
+      <button class="act" id="pause">Pausar</button>
+    </div>
+    <div class="card legend">
+      <span><i class="sw" style="border-color:var(--x)"></i>X (frente)</span>
+      <span><i class="sw" style="border-color:var(--y)"></i>Y (esquerda)</span>
+      <span><i class="sw" style="border-color:var(--z)"></i>Z (cima)</span>
+      <span><i class="sw" style="border-color:#ccc"></i>sólido = medido (robô) / mão</span>
+      <span><i class="sw dash" style="border-color:#ccc"></i>tracejado = comandado (sol_q)</span>
+      <span>Ambos: esquerdo mais forte, direito mais claro</span>
+    </div>
+    <div class="card chart"><h2>1 · Robô — posição do punho (FK) <small>m, frame cintura do robô (frame do IK)</small></h2><canvas id="c1"></canvas></div>
+    <div class="card chart"><h2>2 · Mão — posição de referência do punho (alvo do IK) <small>mesmos eixos e tempo do gráfico 1</small></h2><canvas id="c2"></canvas></div>
+    <div class="card chart" id="errCard"><h2>3 · Erro |mão − robô medido| <small>mm por eixo (abs) e norma</small></h2><canvas id="c3"></canvas></div>
+  </section>
+  <aside class="side" style="display:grid; gap:12px; align-content:start">
+    <div class="card">
+      <h3>Salvar tarefa</h3>
+      <div class="row"><input type="text" id="tname" placeholder="nome da tarefa (ex.: pegar_caixa)" maxlength="60"></div>
+      <div class="row">
+        <span class="seg" id="mode"><button data-v="duration" class="on">Duração fixa</button><button data-v="manual">Iniciar/Parar</button></span>
+      </div>
+      <div class="row" id="durRow">
+        <label>duração (s) <input type="number" id="dur" value="10" min="1" max="3600" step="1" style="width:90px"></label>
+        <label><input type="checkbox" id="cd" checked> contagem regressiva de 3 s</label>
+      </div>
+      <button id="save">Salvar tarefa</button>
+      <div id="recstatus">pronto</div>
+    </div>
+    <div class="card">
+      <h3>Tarefas salvas <button class="act" id="refresh" style="float:right; padding:2px 8px">↻</button></h3>
+      <ul id="tasks"></ul>
+      <div class="muted" id="taskdir"></div>
+    </div>
+    <div class="card muted" id="info"></div>
+  </aside>
+</main>
+<script>
+"use strict";
+const TOKEN = new URLSearchParams(location.search).get("token");
+const H = TOKEN ? {"X-Token": TOKEN, "Content-Type": "application/json"} : {"Content-Type": "application/json"};
+const qs = (p) => p + (TOKEN ? (p.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN) : "");
+const COL = {x: "#ff5c5c", y: "#46d27a", z: "#4ea3ff", n: "#f3c34b"};
+const MAXKEEP = 125 * 60;  // ~125 s at 60 Hz
+let data = [];             // samples from server
+let since = 0, paused = false, freeze = null;
+let ui = {arm: "R", win: 10, rob: "both", mode: "duration"};
+
+function seg(id, key, cb) {
+  const el = document.getElementById(id);
+  el.addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    el.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    ui[key] = key === "win" ? +b.dataset.v : b.dataset.v;
+    cb && cb();
+  });
+}
+seg("arm", "arm"); seg("win", "win"); seg("rob", "rob");
+seg("mode", "mode", () => { document.getElementById("durRow").style.display = ui.mode === "duration" ? "" : "none"; });
+document.getElementById("pause").onclick = (e) => {
+  paused = !paused; e.target.textContent = paused ? "Retomar" : "Pausar";
+  freeze = paused && data.length ? data[data.length - 1].t : null;
+};
+document.getElementById("showErr").onchange = (e) => { document.getElementById("errCard").style.display = e.target.checked ? "" : "none"; };
+
+function pill(id, cls, text) { const p = document.getElementById(id); p.className = "pill " + cls; p.lastElementChild.textContent = text; }
+
+async function poll() {
+  try {
+    const r = await fetch(qs("/api/samples?since=" + since), {headers: H, cache: "no-store"});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    if (j.samples.length) {
+      if (j.samples[0].id < since) data = [];
+      since = j.samples[j.samples.length - 1].id;
+      if (data.length && j.samples[0].t < data[data.length - 1].t - 1) data = []; // teleop restarted
+      data.push(...j.samples);
+      if (data.length > MAXKEEP) data.splice(0, data.length - MAXKEEP);
+    } else if (j.stream.cursor < since) { since = 0; data = []; }
+    const s = j.stream;
+    pill("p-conn", "ok", "conectado");
+    pill("p-track", s.tracking ? "ok" : "warn", s.tracking ? "tracking ativo (r)" : "aguardando r (sem tracking)");
+    pill("p-rate", s.rate_hz > 20 ? "ok" : (s.rate_hz > 0 ? "warn" : "bad"), s.rate_hz.toFixed(1) + " Hz");
+    const age = s.age_s;
+    pill("p-age", age === null ? "bad" : (age < 0.5 ? "ok" : (age < 2 ? "warn" : "bad")),
+         age === null ? "sem pacotes do teleop" : "último pacote " + (age < 10 ? (age * 1000).toFixed(0) + " ms" : age.toFixed(0) + " s"));
+    pill("p-fk", s.fk ? (s.fk_errors ? "warn" : "ok") : "bad", s.fk ? "FK ok" + (s.lost ? " · perdidos " + s.lost : "") : "FK indisponível");
+    showRec(j.record);
+    document.getElementById("err").textContent = "";
+  } catch (e) {
+    pill("p-conn", "bad", "sem conexão"); document.getElementById("err").textContent = String(e);
+  }
+  setTimeout(poll, 100);
+}
+
+function showRec(st) {
+  const b = document.getElementById("save"), s = document.getElementById("recstatus");
+  b.classList.remove("rec", "cd");
+  if (st.state === "countdown") { b.classList.add("cd"); b.textContent = "Começa em " + st.countdown_left.toFixed(1) + " s"; b.disabled = false; s.textContent = "contagem regressiva…"; }
+  else if (st.state === "recording") {
+    b.classList.add("rec"); b.disabled = false;
+    b.textContent = st.duration ? "Gravando… " + st.remaining.toFixed(1) + " s" : "Parar e salvar";
+    s.textContent = "gravando “" + st.name + "”: " + st.elapsed.toFixed(1) + " s · " + st.n_samples + " amostras" + (st.duration ? " (clique para parar antes)" : "");
+  } else {
+    b.textContent = "Salvar tarefa"; b.disabled = false;
+    if (st.last && st.last.csv !== lastSaved) { lastSaved = st.last.csv; loadTasks(); }
+    s.textContent = st.last ? "salvo: " + st.last.csv + " (" + st.last.n_samples + " amostras)" : "pronto";
+  }
+  recState = st.state;
+}
+let recState = "idle", lastSaved = null;
+
+document.getElementById("save").onclick = async () => {
+  const s = document.getElementById("recstatus");
+  try {
+    if (recState !== "idle") {
+      const r = await fetch(qs("/api/record/stop"), {method: "POST", headers: H, body: "{}"});
+      const j = await r.json(); if (j.result) s.textContent = "salvo: " + j.result.csv; loadTasks(); return;
+    }
+    const body = {name: document.getElementById("tname").value || "tarefa", mode: ui.mode,
+                  duration: +document.getElementById("dur").value,
+                  countdown: ui.mode === "duration" && document.getElementById("cd").checked ? 3 : 0};
+    const r = await fetch(qs("/api/record/start"), {method: "POST", headers: H, body: JSON.stringify(body)});
+    const j = await r.json(); if (!r.ok) s.textContent = "erro: " + j.error;
+  } catch (e) { s.textContent = "erro: " + e; }
+};
+
+async function loadTasks() {
+  try {
+    const j = await (await fetch(qs("/api/tasks"), {headers: H})).json();
+    const ul = document.getElementById("tasks"); ul.innerHTML = "";
+    for (const t of j.tasks) {
+      const li = document.createElement("li");
+      const mk = (f, txt) => { const a = document.createElement("a"); a.href = qs("/tasks/" + encodeURIComponent(f)); a.textContent = txt; a.download = f; return a; };
+      const strong = document.createElement("strong"); strong.textContent = t.name || t.stem; li.append(strong, document.createElement("br"));
+      const sp = document.createElement("span"); sp.className = "muted";
+      sp.textContent = (t.start_utc || "") + " · " + (t.n_samples ?? "?") + " amostras · " + (t.data_duration_s ?? "?") + " s · " + (t.rate_hz ?? "?") + " Hz";
+      li.append(sp, document.createElement("br"));
+      if (t.csv) li.append(mk(t.csv, "CSV")); li.append(mk(t.json, "JSON"));
+      ul.append(li);
+    }
+    if (!j.tasks.length) ul.innerHTML = '<li class="muted">nenhuma tarefa salva</li>';
+    document.getElementById("taskdir").textContent = "pasta: " + j.dir;
+  } catch (e) {}
+}
+document.getElementById("refresh").onclick = loadTasks;
+
+// ---------------- plotting (pure canvas) ----------------
+function setup(cv) {
+  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+  return {g, w, h};
+}
+function niceStep(range, n) { const r = range / n, p = Math.pow(10, Math.floor(Math.log10(r))), m = r / p; return (m < 1.5 ? 1 : m < 3 ? 2 : m < 7 ? 5 : 10) * p; }
+
+function plot(cv, series, t0, t1, ymin, ymax, unit) {
+  const {g, w, h} = setup(cv), L = 52, R = 8, T = 6, B = 22, pw = w - L - R, ph = h - T - B;
+  const X = (t) => L + (t - t0) / (t1 - t0) * pw, Y = (v) => T + (1 - (v - ymin) / (ymax - ymin)) * ph;
+  g.font = "11px system-ui"; g.fillStyle = "#9aa3b2"; g.strokeStyle = "#2a2f3a"; g.lineWidth = 1;
+  const ys = niceStep(ymax - ymin, 5);
+  for (let v = Math.ceil(ymin / ys) * ys; v <= ymax + 1e-12; v += ys) {
+    const y = Y(v); g.beginPath(); g.moveTo(L, y); g.lineTo(w - R, y); g.stroke();
+    g.fillText(unit === "mm" ? v.toFixed(0) : v.toFixed(Math.max(0, -Math.floor(Math.log10(ys)))), 4, y + 4);
+  }
+  const ts = niceStep(t1 - t0, 6);
+  for (let t = Math.ceil(t0 / ts) * ts; t <= t1; t += ts) {
+    const x = X(t); g.beginPath(); g.moveTo(x, T); g.lineTo(x, h - B); g.stroke();
+    g.fillText((t - t1).toFixed(ts < 1 ? 1 : 0) + " s", x - 12, h - 6);
+  }
+
+  for (const s of series) {
+    g.strokeStyle = s.color; g.globalAlpha = s.alpha || 1; g.lineWidth = s.width || 1.6; g.setLineDash(s.dash ? [6, 4] : []);
+    g.beginPath(); let pen = false, lastT = null;
+    for (let i = 0; i < s.t.length; i++) {
+      const v = s.v[i];
+      if (v === null || v === undefined || (lastT !== null && s.t[i] - lastT > 0.5)) { pen = false; lastT = s.t[i]; if (v === null || v === undefined) continue; }
+      const x = X(s.t[i]), y = Y(v);
+      if (!pen) { g.moveTo(x, y); pen = true; } else g.lineTo(x, y);
+      lastT = s.t[i];
+    }
+    g.stroke();
+  }
+  g.setLineDash([]); g.globalAlpha = 1;
+  if (!series.some(s => s.v.some(v => v !== null))) { g.fillStyle = "#9aa3b2"; g.font = "13px system-ui"; g.fillText("sem dados", L + pw / 2 - 30, T + ph / 2); }
+}
+
+function draw() {
+  if (data.length) {
+    const tEnd = freeze !== null ? freeze : data[data.length - 1].t, t0 = tEnd - ui.win;
+    const win = data.filter(d => d.t >= t0 && d.t <= tEnd);
+    const t = win.map(d => d.t);
+    const sides = ui.arm === "B" ? ["l", "r"] : [ui.arm.toLowerCase()];
+    const alpha = (sd) => ui.arm === "B" && sd === "r" ? 0.55 : 1;
+    const rob = [], hand = [], err = [];
+    sides.forEach((sd) => {
+      ["x", "y", "z"].forEach((ax, k) => {
+        if (ui.rob !== "cmd") rob.push({t, v: win.map(d => d["m" + sd][k]), color: COL[ax], alpha: alpha(sd)});
+        if (ui.rob !== "meas") rob.push({t, v: win.map(d => d["c" + sd][k]), color: COL[ax], dash: true, alpha: alpha(sd)});
+        hand.push({t, v: win.map(d => d["h" + sd][k]), color: COL[ax], alpha: alpha(sd)});
+        err.push({t, v: win.map(d => (d["h" + sd][k] === null || d["m" + sd][k] === null) ? null : Math.abs(d["h" + sd][k] - d["m" + sd][k]) * 1000), color: COL[ax], alpha: alpha(sd), width: 1.2});
+      });
+      err.push({t, v: win.map(d => { const a = d["h" + sd], b = d["m" + sd]; if (a[0] === null || b[0] === null) return null; return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) * 1000; }), color: COL.n, alpha: alpha(sd), width: 2.2});
+    });
+    // shared Y range for plots 1 and 2 (same scale for comparison)
+    let lo = Infinity, hi = -Infinity;
+    for (const s of rob.concat(hand)) for (const v of s.v) if (v !== null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    if (!isFinite(lo)) { lo = -0.5; hi = 0.5; }
+    const pad = Math.max(0.02, (hi - lo) * 0.08); lo -= pad; hi += pad;
+    plot(document.getElementById("c1"), rob, t0, tEnd, lo, hi, "m");
+    plot(document.getElementById("c2"), hand, t0, tEnd, lo, hi, "m");
+    if (document.getElementById("showErr").checked) {
+      let emax = 10; for (const s of err) for (const v of s.v) if (v !== null && v > emax) emax = v;
+      plot(document.getElementById("c3"), err, t0, tEnd, 0, emax * 1.1, "mm");
+    }
+  } else {
+    for (const id of ["c1", "c2", "c3"]) plot(document.getElementById(id), [], -ui.win, 0, -0.5, 0.5, "m");
+  }
+  requestAnimationFrame(draw);
+}
+
+fetch(qs("/api/status"), {headers: H}).then(r => r.json()).then(j => {
+  document.getElementById("info").textContent = "Frame: " + j.frame + " · versão " + j.version + (j.fake ? " · FONTE FALSA (teste)" : "") + " · buffer " + j.buffer_s + " s";
+}).catch(() => {});
+loadTasks(); poll(); requestAnimationFrame(draw);
+</script>
+</body>
+</html>
