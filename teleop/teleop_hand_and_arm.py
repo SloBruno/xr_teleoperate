@@ -28,6 +28,7 @@ from teleop.utils.xr_video_plane import (
     describe_plane, plane_exceeds_headset, resolve_plane_height, validate_plane,
 )
 from teleop.utils.session_shutdown import install_shutdown_signal_handlers, run_session_shutdown
+from teleop.utils.pose_stream import PoseStreamSender
 
 # Historical dev-branch XR plane (TeleVuer 41e9182 defaults used on this line).
 DEV_VIDEO_PLANE_HEIGHT_M = 3.0
@@ -123,6 +124,11 @@ if __name__ == '__main__':
     img_client = None
     listen_keyboard_thread = None
     ipc_server = None
+    # Opt-in UDP side channel for tools/pose_compare_web.py (XR_POSE_STREAM=1);
+    # None = disabled, loop unchanged. Never blocks / never raises.
+    pose_stream = PoseStreamSender.from_env()
+    if pose_stream is not None:
+        logger_mp.info(f"[pose_stream] UDP -> {pose_stream.addr[0]}:{pose_stream.addr[1]} @ {1/pose_stream.min_period if pose_stream.min_period else 0:.0f} Hz")
     install_shutdown_signal_handlers()
 
     try:
@@ -308,6 +314,12 @@ if __name__ == '__main__':
                 xr_frame = compose_xr_frame(camera_layout, head_img, left_wrist_img, combined_img_shape)
                 if xr_frame is not None:
                     tv_wrapper.render_to_xr(xr_frame)
+            if pose_stream is not None and pose_stream.due():
+                try:
+                    _pre = tv_wrapper.get_tele_data()
+                    pose_stream.maybe_send(False, _pre.left_wrist_pose, _pre.right_wrist_pose, None, arm_ctrl.get_current_dual_arm_q())
+                except Exception:
+                    pass
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
@@ -401,6 +413,8 @@ if __name__ == '__main__':
             if STOP:
                 break  # q arrived during IK: no new target; graceful shutdown owns the arms
             arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
+            if pose_stream is not None:
+                pose_stream.maybe_send(True, tele_data.left_wrist_pose, tele_data.right_wrist_pose, sol_q, current_lr_arm_q)
 
             # record data
             if args.record:

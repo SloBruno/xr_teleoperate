@@ -27,6 +27,14 @@
 #     INSPIRE_STATE_DIR=~/.local/state/xr_teleoperate_inspire
 #   bash teleop/run_g1_quest_inspire.sh --inspire-preflight
 #     read-only: shows the running driver / port check and exits (starts nothing).
+#
+# Pose compare web (robot wrist FK x operator wrist/IK target, X/Y/Z vs time,
+# "Salvar tarefa"; see docs/pose_compare_web.md). Default OFF:
+#   XR_POSE_WEB=1  exports XR_POSE_STREAM=1 to the teleop (non-blocking UDP
+#     127.0.0.1:${XR_POSE_STREAM_PORT:-47555}, 50 Hz) and starts
+#     tools/pose_compare_web.py as a child (setsid; log in $INSPIRE_STATE_DIR/pose_web.log),
+#     stopped on exit. POSE_WEB_PORT=8093  POSE_WEB_TOKEN=<opcional>
+#     XR_POSE_STREAM_HZ=50  POSE_WEB_STOP_TIMEOUT_S=5
 set -euo pipefail
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -262,7 +270,52 @@ inspire_on_exit() {
     local rc=$?
     trap - EXIT INT TERM HUP
     inspire_stop_started
+    pose_web_stop
     exit "$rc"
+}
+
+# ---- pose compare web (opt-in XR_POSE_WEB=1) ----
+XR_POSE_WEB=${XR_POSE_WEB:-0}
+POSE_WEB_PORT=${POSE_WEB_PORT:-8093}
+POSE_WEB_STOP_TIMEOUT_S=${POSE_WEB_STOP_TIMEOUT_S:-5}
+pose_web_pid=""
+pose_web_log="$INSPIRE_STATE_DIR/pose_web.log"
+
+pose_web_stop() {
+    local pid=$pose_web_pid deadline
+    [[ -n "$pid" ]] || return 0
+    pose_web_pid=""
+    kill -0 "$pid" 2>/dev/null || return 0
+    kill -INT "$pid" 2>/dev/null || true
+    deadline=$((SECONDS + POSE_WEB_STOP_TIMEOUT_S))
+    while kill -0 "$pid" 2>/dev/null && (( SECONDS < deadline )); do sleep 0.1; done
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+    echo "POSE WEB: parado." >&2
+}
+
+pose_web_on_exit() {
+    local rc=$?
+    trap - EXIT INT TERM HUP
+    pose_web_stop
+    exit "$rc"
+}
+
+pose_web_start() {
+    [[ "$XR_POSE_WEB" == 1 ]] || return 0
+    export XR_POSE_STREAM=1
+    mkdir -p "$INSPIRE_STATE_DIR"
+    echo "==== $(date -Is) start ====" >>"$pose_web_log"
+    (cd "$repo" && exec setsid "$teleimager_python" -u -s tools/pose_compare_web.py --port "$POSE_WEB_PORT" \
+        >>"$pose_web_log" 2>&1 </dev/null 7>&- 8>&- 9>&-) &
+    pose_web_pid=$!
+    if [[ -z "$inspire_started_pid" ]]; then
+        trap pose_web_on_exit EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM HUP
+    fi
+    local ip
+    ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}') || true
+    echo "POSE WEB: PID $pose_web_pid, página http://${ip:-<ip-do-robô>}:${POSE_WEB_PORT}/${POSE_WEB_TOKEN:+?token=...} (log $pose_web_log; XR_POSE_STREAM=1)"
 }
 
 inspire_fail() {
@@ -590,6 +643,7 @@ XR_VIDEO_PLANE_HEIGHT=${XR_VIDEO_PLANE_HEIGHT:-auto}
 echo "Plano de vídeo XR: altura ${XR_VIDEO_PLANE_HEIGHT} (XR_VIDEO_PLANE_HEIGHT=3.0 XR_VIDEO_PLANE_DISTANCE=4.0 = antigo dev); perfil RealSense ${XR_REALSENSE_PROFILE}"
 video_plane_args=(--video-plane-height "$XR_VIDEO_PLANE_HEIGHT")
 [[ -n "${XR_VIDEO_PLANE_DISTANCE:-}" ]] && video_plane_args+=(--video-plane-distance "$XR_VIDEO_PLANE_DISTANCE")
+pose_web_start
 teleop_cmd=("$teleimager_python" -s teleop_hand_and_arm.py
   --arm G1_29
   --ee "$G1_EE"
@@ -597,11 +651,12 @@ teleop_cmd=("$teleimager_python" -s teleop_hand_and_arm.py
   ${motion_args[@]+"${motion_args[@]}"}
   --camera-layout "$teleop_camera_layout"
   ${video_plane_args[@]+"${video_plane_args[@]}"})
-if [[ -z "$inspire_started_pid" ]]; then
+if [[ -z "$inspire_started_pid" && -z "$pose_web_pid" ]]; then
     exec "${teleop_cmd[@]}"
 fi
-# We own the Inspire driver: run the teleop as a child so the EXIT trap stops
-# the driver after q / error / Ctrl+C (SIGINT reaches the foreground teleop).
+# We own the Inspire driver and/or the pose web: run the teleop as a child so
+# the EXIT trap stops them after q / error / Ctrl+C (SIGINT reaches the
+# foreground teleop; the setsid children do not get the terminal's SIGINT).
 teleop_rc=0
 "${teleop_cmd[@]}" || teleop_rc=$?
 exit "$teleop_rc"

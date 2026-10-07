@@ -12,7 +12,8 @@ echo "$*" >>"$FAKE_LOG"
 case "$*" in
   *--detect*) echo "head 243122072230 both"; exit 0;;
   "-s - "*) exit 0;;
-  *teleop_hand_and_arm*) exit 0;;
+  *teleop_hand_and_arm*) echo "XR_POSE_STREAM=${XR_POSE_STREAM:-unset}" >>"$FAKE_LOG"; exit 0;;
+  *pose_compare_web.py*) echo "web-started $$" >>"$FAKE_LOG"; trap 'echo web-stopped >>"$FAKE_LOG"; exit 0' INT TERM; while :; do sleep 0.1; done;;
 esac
 '''
 
@@ -77,6 +78,23 @@ class InspireLauncherTest(unittest.TestCase):
     def test_rejects_dex3(self):
         r, _ = self._run(G1_EE="dex3")
         self.assertEqual(r.returncode, 2)
+
+    def test_pose_web_off_by_default(self):
+        r, log = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("XR_POSE_STREAM=unset", log)
+        self.assertNotIn("pose_compare_web", log)
+
+    def test_pose_web_on_starts_and_stops_child(self):
+        r, log = self._run(XR_POSE_WEB="1", POSE_WEB_STOP_TIMEOUT_S="3")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("XR_POSE_STREAM=1", log)
+        self.assertIn("web-started", log)
+        self.assertIn("web-stopped", log)
+        self.assertIn("8093", r.stdout + r.stderr)
+        lines = log.splitlines()
+        self.assertLess(lines.index(next(l for l in lines if "web-started" in l)),
+                        lines.index(next(l for l in lines if "teleop_hand_and_arm" in l)))
 
 
 if __name__ == "__main__":
