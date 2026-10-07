@@ -35,6 +35,9 @@ LOCKED_JOINTS = [
 ]
 EE_OFFSET = np.array([0.05, 0.0, 0.0])
 EE_FRAMES = (("L_ee", "left_wrist_yaw_joint"), ("R_ee", "right_wrist_yaw_joint"))
+SKELETON_JOINTS = ("shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow",
+                   "wrist_roll", "wrist_pitch", "wrist_yaw")
+SKELETON_BASE_FRAMES = ("pelvis", "torso_link")
 FRAME_DESC = ("G1_29 IK frame: robot waist (pelvis-fixed reduced model, legs/waist locked at 0), "
               "metres, x forward, y left, z up; point = L_ee/R_ee (+0.05 m x of wrist_yaw_joint)")
 
@@ -54,6 +57,32 @@ class G1_29_WristFK:
         self.nq = self.model.nq
         self.l_id = self.model.getFrameId("L_ee")
         self.r_id = self.model.getFrameId("R_ee")
+        # Skeleton: joint origins shoulder -> wrist (7 per arm, model order) + L_ee/R_ee.
+        self.arm_joint_ids = tuple(
+            tuple(self.model.getJointId(f"{side}_{j}_joint") for j in SKELETON_JOINTS)
+            for side in ("left", "right"))
+        self.base_frame_ids = tuple(self.model.getFrameId(n) for n in SKELETON_BASE_FRAMES)
+
+    def skeleton(self, q):
+        """Arm skeleton for display, in the same frame as :meth:`wrist_xyz`.
+
+        Returns ``{"l": [[x,y,z]*8], "r": [...], "b": [pelvis, torso]}`` (lists of
+        floats): per arm the origins of shoulder_pitch, shoulder_roll,
+        shoulder_yaw, elbow, wrist_roll, wrist_pitch, wrist_yaw joints and the
+        IK end-effector point (L_ee/R_ee). ``None`` for a bad q.
+        """
+        q = np.asarray(q, dtype=float).reshape(-1)
+        if q.shape[0] != self.nq or not np.all(np.isfinite(q)):
+            return None
+        pin = self._pin
+        pin.forwardKinematics(self.model, self.data, q)
+        pin.updateFramePlacements(self.model, self.data)
+        out = {}
+        for key, jids, ee in (("l", self.arm_joint_ids[0], self.l_id), ("r", self.arm_joint_ids[1], self.r_id)):
+            pts = [self.data.oMi[j].translation for j in jids] + [self.data.oMf[ee].translation]
+            out[key] = [[float(v) for v in p] for p in pts]
+        out["b"] = [[float(v) for v in self.data.oMf[f].translation] for f in self.base_frame_ids]
+        return out
 
     def wrist_xyz(self, q):
         """Return (left_xyz, right_xyz) as numpy (3,), or (None, None) for a bad q."""

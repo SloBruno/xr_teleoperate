@@ -42,6 +42,11 @@
   #tasks a { color:#8ec1ff; margin-right:8px; }
   .muted { color:var(--dim); font-size:12px; }
   #err { color:var(--bad); }
+  #c3d { height:min(520px, 70vh); cursor:grab; touch-action:none; border-radius:8px; background:#0c0e12; }
+  #c3d.drag { cursor:grabbing; }
+  .views3d { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:6px 0; }
+  .views3d button { padding:4px 10px; }
+  #warn3d { color:var(--warn); font-size:12px; min-height:16px; }
 </style>
 </head>
 <body>
@@ -61,6 +66,7 @@
       <span class="seg" id="win"><button data-v="10" class="on">10 s</button><button data-v="30">30 s</button><button data-v="60">60 s</button></span>
       <span class="seg" id="rob"><button data-v="both" class="on">Medido + comandado</button><button data-v="meas">Só medido</button><button data-v="cmd">Só comandado</button></span>
       <label><input type="checkbox" id="showErr" checked> painel de erro</label>
+      <span class="seg" id="view"><button data-v="2d">2D</button><button data-v="3d">3D</button><button data-v="both" class="on">2D + 3D</button></span>
       <button class="act" id="pause">Pausar</button>
     </div>
     <div class="card legend">
@@ -71,9 +77,30 @@
       <span><i class="sw dash" style="border-color:#ccc"></i>tracejado = comandado (sol_q)</span>
       <span>Ambos: esquerdo mais forte, direito mais claro</span>
     </div>
-    <div class="card chart"><h2>1 · Robô — posição do punho (FK) <small>m, frame cintura do robô (frame do IK)</small></h2><canvas id="c1"></canvas></div>
-    <div class="card chart"><h2>2 · Mão — posição de referência do punho (alvo do IK) <small>mesmos eixos e tempo do gráfico 1</small></h2><canvas id="c2"></canvas></div>
-    <div class="card chart" id="errCard"><h2>3 · Erro |mão − robô medido| <small>mm por eixo (abs) e norma</small></h2><canvas id="c3"></canvas></div>
+    <div class="card chart" id="card3d">
+      <h2>3D · trajetórias do punho e esqueleto do braço (medido) <small>m, frame cintura do robô (frame do IK) · arrastar = girar, roda/pinça = zoom</small></h2>
+      <div class="views3d">
+        <span class="muted">vista:</span>
+        <button class="act" data-view="front">Frente</button><button class="act" data-view="side">Lado</button>
+        <button class="act" data-view="top">Topo</button><button class="act" data-view="iso">Isométrica</button>
+        <button class="act" id="recenter">Recentrar</button>
+        <label><input type="checkbox" id="skel3d" checked> esqueleto</label>
+        <label><input type="checkbox" id="trail3d" checked> rastro</label>
+      </div>
+      <canvas id="c3d"></canvas>
+      <div class="legend" style="margin-top:6px">
+        <span><i class="sw" style="border-color:#f3c34b"></i>mão (alvo do IK)</span>
+        <span><i class="sw" style="border-color:#c78bff"></i>robô medido (FK q medido)</span>
+        <span><i class="sw dash" style="border-color:#c78bff; border-top-width:2px"></i>robô comandado (FK sol_q)</span>
+        <span><i class="sw" style="border-color:#e6e8ee"></i>esqueleto (q medido)</span>
+        <span><i class="sw" style="border-color:#ffffff; border-top-width:1px"></i>erro atual mão↔medido</span>
+        <span>eixos na origem: <b style="color:var(--x)">X</b> frente · <b style="color:var(--y)">Y</b> esquerda · <b style="color:var(--z)">Z</b> cima · rastro mais apagado = mais antigo</span>
+      </div>
+      <div id="warn3d"></div>
+    </div>
+    <div class="card chart c2d"><h2>1 · Robô — posição do punho (FK) <small>m, frame cintura do robô (frame do IK)</small></h2><canvas id="c1"></canvas></div>
+    <div class="card chart c2d"><h2>2 · Mão — posição de referência do punho (alvo do IK) <small>mesmos eixos e tempo do gráfico 1</small></h2><canvas id="c2"></canvas></div>
+    <div class="card chart c2d" id="errCard"><h2>3 · Erro |mão − robô medido| <small>mm por eixo (abs) e norma</small></h2><canvas id="c3"></canvas></div>
   </section>
   <aside class="side" style="display:grid; gap:12px; align-content:start">
     <div class="card">
@@ -106,7 +133,8 @@ const COL = {x: "#ff5c5c", y: "#46d27a", z: "#4ea3ff", n: "#f3c34b"};
 const MAXKEEP = 125 * 60;  // ~125 s at 60 Hz
 let data = [];             // samples from server
 let since = 0, paused = false, freeze = null;
-let ui = {arm: "R", win: 10, rob: "both", mode: "duration"};
+let ui = {arm: "R", win: 10, rob: "both", mode: "duration", view: "both"};
+let dirty3d = true, streamInfo = {fk: true, skeleton: true};
 
 function seg(id, key, cb) {
   const el = document.getElementById(id);
@@ -117,13 +145,23 @@ function seg(id, key, cb) {
     cb && cb();
   });
 }
-seg("arm", "arm"); seg("win", "win"); seg("rob", "rob");
+seg("arm", "arm", () => dirty3d = true); seg("win", "win", () => dirty3d = true); seg("rob", "rob", () => dirty3d = true);
 seg("mode", "mode", () => { document.getElementById("durRow").style.display = ui.mode === "duration" ? "" : "none"; });
 document.getElementById("pause").onclick = (e) => {
   paused = !paused; e.target.textContent = paused ? "Retomar" : "Pausar";
   freeze = paused && data.length ? data[data.length - 1].t : null;
+  dirty3d = true;
 };
-document.getElementById("showErr").onchange = (e) => { document.getElementById("errCard").style.display = e.target.checked ? "" : "none"; };
+function applyView() {
+  const show2 = ui.view !== "3d", show3 = ui.view !== "2d";
+  document.querySelectorAll(".c2d").forEach(el => {
+    el.style.display = show2 && (el.id !== "errCard" || document.getElementById("showErr").checked) ? "" : "none";
+  });
+  document.getElementById("card3d").style.display = show3 ? "" : "none";
+  dirty3d = true;
+}
+seg("view", "view", applyView);
+document.getElementById("showErr").onchange = applyView;
 
 function pill(id, cls, text) { const p = document.getElementById(id); p.className = "pill " + cls; p.lastElementChild.textContent = text; }
 
@@ -138,8 +176,11 @@ async function poll() {
       if (data.length && j.samples[0].t < data[data.length - 1].t - 1) data = []; // teleop restarted
       data.push(...j.samples);
       if (data.length > MAXKEEP) data.splice(0, data.length - MAXKEEP);
+      if (!paused) dirty3d = true;
     } else if (j.stream.cursor < since) { since = 0; data = []; }
     const s = j.stream;
+    if (s.fk !== streamInfo.fk || s.skeleton !== streamInfo.skeleton) dirty3d = true;
+    streamInfo = s;
     pill("p-conn", "ok", "conectado");
     pill("p-track", s.tracking ? "ok" : "warn", s.tracking ? "tracking ativo (r)" : "aguardando r (sem tracking)");
     pill("p-rate", s.rate_hz > 20 ? "ok" : (s.rate_hz > 0 ? "warn" : "bad"), s.rate_hz.toFixed(1) + " Hz");
@@ -248,6 +289,7 @@ function plot(cv, series, t0, t1, ymin, ymax, unit) {
 }
 
 function draw() {
+  if (ui.view === "3d") { requestAnimationFrame(draw); return; }
   if (data.length) {
     const tEnd = freeze !== null ? freeze : data[data.length - 1].t, t0 = tEnd - ui.win;
     const win = data.filter(d => d.t >= t0 && d.t <= tEnd);
@@ -280,6 +322,189 @@ function draw() {
   }
   requestAnimationFrame(draw);
 }
+
+// ---------------- 3D (pure canvas, perspective projection, no libraries) ----------------
+const C3 = {hand: "#f3c34b", rob: "#c78bff", skel: "#e6e8ee", joint: "#ffffff", grid: "#232836"};
+const VIEWS = {front: [0, 0.05], side: [Math.PI / 2, 0.05], top: [0, Math.PI / 2 - 0.01], iso: [0.75, 0.45]};
+const cam = {yaw: VIEWS.iso[0], pitch: VIEWS.iso[1], dist: 1.6, tgt: [0.12, 0, 0.12], gridZ: -0.1, auto: true};
+const cv3 = document.getElementById("c3d");
+let last3d = 0;
+
+function camBasis() {
+  const cp = Math.cos(cam.pitch), eye = [cam.tgt[0] + cam.dist * cp * Math.cos(cam.yaw), cam.tgt[1] + cam.dist * cp * Math.sin(cam.yaw), cam.tgt[2] + cam.dist * Math.sin(cam.pitch)];
+  const f = [-cp * Math.cos(cam.yaw), -cp * Math.sin(cam.yaw), -Math.sin(cam.pitch)];
+  // right = f x up(0,0,1); fall back to yaw direction at the poles
+  let r = [f[1], -f[0], 0], rn = Math.hypot(r[0], r[1]);
+  if (rn < 1e-6) { r = [Math.sin(cam.yaw), -Math.cos(cam.yaw), 0]; rn = 1; }
+  r = [r[0] / rn, r[1] / rn, 0];
+  const u = [r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]];
+  return {eye, f, r, u};
+}
+function projector(w, h) {
+  const B = camBasis(), F = 0.9 * Math.min(w, h) / (2 * Math.tan(0.5 * 0.9)), cx = w / 2, cy = h / 2;
+  return (p) => {
+    if (!p || p[0] === null || p[1] === null || p[2] === null) return null;
+    const d = [p[0] - B.eye[0], p[1] - B.eye[1], p[2] - B.eye[2]];
+    const zc = d[0] * B.f[0] + d[1] * B.f[1] + d[2] * B.f[2];
+    if (zc < 0.02) return null;
+    return [cx + F * (d[0] * B.r[0] + d[1] * B.r[1] + d[2] * B.r[2]) / zc, cy - F * (d[0] * B.u[0] + d[1] * B.u[1] + d[2] * B.u[2]) / zc, zc];
+  };
+}
+function line3(g, P, a, b) { const A = P(a), Bp = P(b); if (!A || !Bp) return; g.beginPath(); g.moveTo(A[0], A[1]); g.lineTo(Bp[0], Bp[1]); g.stroke(); }
+function label3(g, P, p, txt, col) { const A = P(p); if (!A) return; g.fillStyle = col; g.fillText(txt, A[0] + 6, A[1] - 6); }
+function dot3(g, P, p, rad, col, ring) {
+  const A = P(p); if (!A) return;
+  g.beginPath(); g.arc(A[0], A[1], rad, 0, 2 * Math.PI); g.fillStyle = col; g.fill();
+  if (ring) { g.strokeStyle = ring; g.lineWidth = 1.5; g.stroke(); }
+}
+// trail with age fade (8 bins), gaps on nulls / >0.5 s holes
+function trail3(g, P, win, key, t0, t1, col, width, dash, alpha) {
+  const NB = 8; g.strokeStyle = col; g.lineWidth = width; g.setLineDash(dash ? [6, 4] : []);
+  for (let b = 0; b < NB; b++) {
+    const ta = t0 + (t1 - t0) * b / NB, tb = t0 + (t1 - t0) * (b + 1) / NB;
+    g.globalAlpha = alpha * (0.15 + 0.85 * (b + 1) / NB);
+    g.beginPath(); let pen = false, lastT = null;
+    for (const d of win) {
+      if (d.t < ta - 0.05 || d.t > tb) continue;   // small overlap keeps bins continuous
+      const A = P(d[key]);
+      if (!A || (lastT !== null && d.t - lastT > 0.5)) { pen = false; lastT = d.t; if (!A) continue; }
+      if (!pen) { g.moveTo(A[0], A[1]); pen = true; } else g.lineTo(A[0], A[1]);
+      lastT = d.t;
+    }
+    g.stroke();
+  }
+  g.globalAlpha = 1; g.setLineDash([]);
+}
+function lastWith(win, key) { for (let i = win.length - 1; i >= 0; i--) { const v = win[i][key]; if (v && v[0] !== null) return v; } return null; }
+function lastSkel(win) { for (let i = win.length - 1; i >= 0; i--) if (win[i].sk) return win[i].sk; return null; }
+
+function windowData() {
+  if (!data.length) return {win: [], t0: -ui.win, t1: 0};
+  const t1 = freeze !== null ? freeze : data[data.length - 1].t, t0 = t1 - ui.win;
+  let i = data.length - 1; while (i > 0 && data[i - 1].t >= t0) i--;
+  const win = []; for (let k = i; k < data.length && data[k].t <= t1; k++) win.push(data[k]);
+  return {win, t0, t1};
+}
+function recenter() {
+  const {win} = windowData(), sides = ui.arm === "B" ? ["l", "r"] : [ui.arm.toLowerCase()];
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  const add = (p) => { if (!p || p[0] === null) return; for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]); } };
+  for (const d of win) for (const sd of sides) { add(d["h" + sd]); add(d["m" + sd]); add(d["c" + sd]); }
+  const sk = lastSkel(win); if (sk) { for (const sd of sides) (sk[sd] || []).forEach(add); (sk.b || []).forEach(add); }
+  add([0, 0, 0]);
+  if (!isFinite(lo[0])) { cam.tgt = [0.12, 0, 0.12]; cam.dist = 1.6; cam.gridZ = -0.1; }
+  else {
+    cam.tgt = [0, 1, 2].map(k => (lo[k] + hi[k]) / 2);
+    const ext = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 0.3);
+    cam.dist = Math.max(0.6, 2.2 * ext);
+    cam.gridZ = Math.floor((Math.min(lo[2], 0) - 0.05) * 10) / 10;
+  }
+  dirty3d = true;
+}
+
+function draw3d() {
+  const {g, w, h} = setup(cv3), P = projector(w, h);
+  g.font = "12px system-ui"; g.lineCap = "round"; g.lineJoin = "round";
+  const {win, t0, t1} = windowData();
+  // grid (light) on z = gridZ, 1.2 m square around target, 0.1 m step
+  g.strokeStyle = C3.grid; g.lineWidth = 1;
+  const gx = Math.round(cam.tgt[0] * 10) / 10, gy = Math.round(cam.tgt[1] * 10) / 10, z = cam.gridZ;
+  for (let k = -6; k <= 6; k++) {
+    line3(g, P, [gx + k * 0.1, gy - 0.6, z], [gx + k * 0.1, gy + 0.6, z]);
+    line3(g, P, [gx - 0.6, gy + k * 0.1, z], [gx + 0.6, gy + k * 0.1, z]);
+  }
+  g.fillStyle = "#5c6475"; label3(g, P, [gx + 0.6, gy + 0.6, z], "grade 10 cm (z = " + z.toFixed(1) + " m)", "#5c6475");
+  // axes at origin
+  g.lineWidth = 2.5;
+  [[COL.x, [0.15, 0, 0], "X"], [COL.y, [0, 0.15, 0], "Y"], [COL.z, [0, 0, 0.15], "Z"]].forEach(([c, e, n]) => {
+    g.strokeStyle = c; line3(g, P, [0, 0, 0], e); g.font = "bold 13px system-ui"; label3(g, P, e, n, c);
+  });
+  g.font = "12px system-ui"; dot3(g, P, [0, 0, 0], 3, "#9aa3b2"); label3(g, P, [0, 0, 0], "origem (cintura)", "#9aa3b2");
+  const sides = ui.arm === "B" ? ["l", "r"] : [ui.arm.toLowerCase()];
+  const alpha = (sd) => ui.arm === "B" && sd === "r" ? 0.55 : 1;
+  const warn = [];
+  // skeleton (measured q): pelvis-torso, torso-shoulders, shoulder..wrist..ee
+  const sk = lastSkel(win);
+  if (document.getElementById("skel3d").checked) {
+    if (!streamInfo.skeleton) warn.push("esqueleto indisponível: FK/modelo não carregado (--no-fk ou pinocchio ausente)");
+    else if (!sk) warn.push("aguardando esqueleto (q medido)…");
+    else {
+      const torso = sk.b && sk.b[1];
+      g.strokeStyle = "#7d8597"; g.lineWidth = 4; g.globalAlpha = 0.9;
+      if (sk.b && sk.b.length > 1) line3(g, P, sk.b[0], sk.b[1]);
+      if (torso && sk.l && sk.r) { line3(g, P, torso, sk.l[0]); line3(g, P, torso, sk.r[0]); line3(g, P, sk.l[0], sk.r[0]); }
+      for (const sd of ["l", "r"]) {
+        const pts = sk[sd]; if (!pts) continue;
+        const sel = sides.includes(sd);
+        g.globalAlpha = sel ? 0.95 : 0.35; g.strokeStyle = C3.skel; g.lineWidth = sel ? 4 : 3;
+        for (let i = 0; i + 1 < pts.length; i++) line3(g, P, pts[i], pts[i + 1]);
+        for (let i = 0; i < pts.length; i++) dot3(g, P, pts[i], i === 0 || i === 3 ? 4.5 : 3, i === pts.length - 1 ? C3.rob : C3.joint);
+        if (sel) { label3(g, P, pts[0], sd === "l" ? "ombro E" : "ombro D", "#c9cfdb"); label3(g, P, pts[3], "cotovelo", "#c9cfdb"); }
+      }
+      g.globalAlpha = 1;
+    }
+  }
+  if (!streamInfo.fk) warn.push("FK indisponível: só a mão é mostrada");
+  // trails
+  if (document.getElementById("trail3d").checked && win.length > 1) {
+    for (const sd of sides) {
+      trail3(g, P, win, "h" + sd, t0, t1, C3.hand, 2.2, false, alpha(sd));
+      if (ui.rob !== "cmd") trail3(g, P, win, "m" + sd, t0, t1, C3.rob, 2.4, false, alpha(sd));
+      if (ui.rob !== "meas") trail3(g, P, win, "c" + sd, t0, t1, C3.rob, 1.3, true, alpha(sd));
+    }
+  }
+  // current points + error line
+  for (const sd of sides) {
+    const hcur = lastWith(win, "h" + sd), mcur = lastWith(win, "m" + sd), ccur = lastWith(win, "c" + sd);
+    const tag = sd === "l" ? "E" : "D";
+    g.globalAlpha = alpha(sd);
+    if (hcur && mcur) {
+      g.strokeStyle = "#ffffff"; g.lineWidth = 1; g.setLineDash([3, 3]); line3(g, P, hcur, mcur); g.setLineDash([]);
+      const mid = [(hcur[0] + mcur[0]) / 2, (hcur[1] + mcur[1]) / 2, (hcur[2] + mcur[2]) / 2];
+      label3(g, P, mid, (Math.hypot(hcur[0] - mcur[0], hcur[1] - mcur[1], hcur[2] - mcur[2]) * 1000).toFixed(0) + " mm", "#ffffff");
+    }
+    if (ccur && ui.rob !== "meas") dot3(g, P, ccur, 4, "transparent", C3.rob);
+    if (mcur && ui.rob !== "cmd") { dot3(g, P, mcur, 6, C3.rob, "#ffffff"); label3(g, P, mcur, "robô " + tag, C3.rob); }
+    if (hcur) { dot3(g, P, hcur, 6, C3.hand, "#000000"); label3(g, P, hcur, "mão " + tag, C3.hand); }
+    g.globalAlpha = 1;
+  }
+  if (!win.length) { g.fillStyle = "#9aa3b2"; g.font = "13px system-ui"; g.fillText("sem dados", w / 2 - 30, h / 2); }
+  g.fillStyle = "#5c6475"; g.font = "11px system-ui";
+  g.fillText("yaw " + (cam.yaw * 180 / Math.PI).toFixed(0) + "° · pitch " + (cam.pitch * 180 / Math.PI).toFixed(0) + "° · dist " + cam.dist.toFixed(2) + " m" + (paused ? " · PAUSADO" : ""), 8, h - 8);
+  document.getElementById("warn3d").textContent = warn.join(" · ");
+}
+
+function loop3d(ts) {
+  if (ui.view !== "2d" && dirty3d && ts - last3d >= 33) {   // ≤ ~30 fps, only when needed
+    if (cam.auto && data.length) { recenter(); cam.auto = false; }
+    dirty3d = false; last3d = ts; draw3d();
+  }
+  requestAnimationFrame(loop3d);
+}
+// interaction: drag = orbit, wheel/pinch = zoom
+const ptrs = new Map(); let pinch0 = null;
+cv3.addEventListener("pointerdown", (e) => { cv3.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]); cv3.classList.add("drag"); pinch0 = null; });
+cv3.addEventListener("pointermove", (e) => {
+  if (!ptrs.has(e.pointerId)) return;
+  const prev = ptrs.get(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+  if (ptrs.size === 1) {
+    cam.yaw -= (e.clientX - prev[0]) * 0.01;
+    cam.pitch = Math.max(-1.55, Math.min(1.56, cam.pitch + (e.clientY - prev[1]) * 0.01));
+  } else if (ptrs.size === 2) {
+    const [a, b] = [...ptrs.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    if (pinch0) cam.dist = Math.max(0.2, Math.min(10, cam.dist * pinch0 / d));
+    pinch0 = d;
+  }
+  dirty3d = true;
+});
+const endPtr = (e) => { ptrs.delete(e.pointerId); pinch0 = null; if (!ptrs.size) cv3.classList.remove("drag"); };
+cv3.addEventListener("pointerup", endPtr); cv3.addEventListener("pointercancel", endPtr);
+cv3.addEventListener("wheel", (e) => { e.preventDefault(); cam.dist = Math.max(0.2, Math.min(10, cam.dist * Math.exp(e.deltaY * 0.001))); dirty3d = true; }, {passive: false});
+document.querySelectorAll("[data-view]").forEach(b => b.onclick = () => { [cam.yaw, cam.pitch] = VIEWS[b.dataset.view]; dirty3d = true; });
+document.getElementById("recenter").onclick = recenter;
+document.getElementById("skel3d").onchange = document.getElementById("trail3d").onchange = () => dirty3d = true;
+window.addEventListener("resize", () => dirty3d = true);
+requestAnimationFrame(loop3d);
 
 fetch(qs("/api/status"), {headers: H}).then(r => r.json()).then(j => {
   document.getElementById("info").textContent = "Frame: " + j.frame + " · versão " + j.version + (j.fake ? " · FONTE FALSA (teste)" : "") + " · buffer " + j.buffer_s + " s";

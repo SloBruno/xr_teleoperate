@@ -235,8 +235,12 @@ class Recorder:
 class PoseHub:
     """UDP receiver + FK + bounded buffer + recorder."""
 
-    def __init__(self, fk=None, buffer_s=120.0, rate_hint=50.0, recorder=None, clock=time.monotonic):
+    def __init__(self, fk=None, buffer_s=120.0, rate_hint=50.0, recorder=None, clock=time.monotonic,
+                 skeleton=None, skeleton_hz=20.0):
         self.fk = fk
+        self.skeleton = skeleton  # callable(q_meas) -> {"l","r","b"} or None (3D panel)
+        self.skeleton_dt = 1.0 / skeleton_hz if skeleton_hz and skeleton_hz > 0 else 0.0
+        self._last_skel = None  # next due time (server clock) for a skeleton sample
         self.clock = clock
         self.buf = collections.deque(maxlen=int(buffer_s * rate_hint * 1.5) + 10)
         self.lock = threading.Lock()
@@ -245,6 +249,7 @@ class PoseHub:
         self.n_rx = 0
         self.n_bad = 0
         self.fk_errors = 0
+        self.n_skel = 0
         self.last_rx = None
         self.last_seq = None
         self.lost = 0
@@ -270,6 +275,18 @@ class PoseHub:
                  rob_meas_l=None if ml is None else [float(x) for x in ml],
                  rob_meas_r=None if mr is None else [float(x) for x in mr],
                  recv_mono=now)
+        if self.skeleton is not None and (self._last_skel is None or now >= self._last_skel):
+            try:
+                sk = self.skeleton(s["q_meas"])
+            except Exception:
+                sk = None
+                self.fk_errors += 1
+            if sk is not None:
+                s["skel"] = sk
+                # next due time (fixed cadence, no drift; resync after gaps)
+                nxt = (now if self._last_skel is None else self._last_skel) + self.skeleton_dt
+                self._last_skel = nxt if nxt > now else now + self.skeleton_dt
+                self.n_skel += 1
         with self.lock:
             if self.last_seq is not None and s["seq"] > self.last_seq + 1:
                 self.lost += s["seq"] - self.last_seq - 1
@@ -324,20 +341,28 @@ class PoseHub:
         with self.lock:
             out = [s for s in self.buf if s["id"] > since]
         out = out[-max_n:]
-        return [{
-            "id": s["id"], "t": round(s["t_mono"], 4), "u": round(s["t_unix"], 3),
-            "tr": int(s["tracking"]), "fr": int(s["fresh"]),
-            "hl": _xyz(s["hand_l"]), "hr": _xyz(s["hand_r"]),
-            "cl": _xyz(s["rob_cmd_l"]), "cr": _xyz(s["rob_cmd_r"]),
-            "ml": _xyz(s["rob_meas_l"]), "mr": _xyz(s["rob_meas_r"]),
-        } for s in out]
+        res = []
+        for s in out:
+            d = {
+                "id": s["id"], "t": round(s["t_mono"], 4), "u": round(s["t_unix"], 3),
+                "tr": int(s["tracking"]), "fr": int(s["fresh"]),
+                "hl": _xyz(s["hand_l"]), "hr": _xyz(s["hand_r"]),
+                "cl": _xyz(s["rob_cmd_l"]), "cr": _xyz(s["rob_cmd_r"]),
+                "ml": _xyz(s["rob_meas_l"]), "mr": _xyz(s["rob_meas_r"]),
+            }
+            sk = s.get("skel")
+            if sk is not None:  # ~20 Hz: arm skeleton from q measured (3D panel)
+                d["sk"] = {k: [_xyz(p) for p in v] for k, v in sk.items()}
+            res.append(d)
+        return res
 
     def status(self):
         with self.lock:
             last = self.buf[-1] if self.buf else None
             age = None if self.last_rx is None else round(self.clock() - self.last_rx, 3)
             st = {"n_rx": self.n_rx, "n_bad": self.n_bad, "lost": self.lost, "fk_errors": self.fk_errors,
-                  "fk": self.fk is not None, "age_s": age, "cursor": self.cursor,
+                  "fk": self.fk is not None,
+                  "skeleton": self.skeleton is not None, "n_skel": self.n_skel, "age_s": age, "cursor": self.cursor,
                   "tracking": bool(last["tracking"]) if last else False,
                   "fresh": bool(last["fresh"]) if last else False,
                   "t_teleop": round(last["t_mono"], 4) if last else None}
@@ -493,10 +518,13 @@ def fake_source(port, stop, rate=50.0, host="127.0.0.1"):
     tx.close()
 
 
-def build_fk():
+def build_fk_model():
     from teleop.utils.arm_fk import G1_29_WristFK
-    fk = G1_29_WristFK()
-    return fk.wrist_xyz
+    return G1_29_WristFK()
+
+
+def build_fk():
+    return build_fk_model().wrist_xyz
 
 
 def main(argv=None):
@@ -508,21 +536,24 @@ def main(argv=None):
     ap.add_argument("--buffer-s", type=float, default=120.0)
     ap.add_argument("--task-dir", default=os.environ.get("POSE_WEB_TASK_DIR", DEFAULT_TASK_DIR))
     ap.add_argument("--no-fk", action="store_true", help="não carregar pinocchio (só mão)")
+    ap.add_argument("--skeleton-hz", type=float, default=20.0, help="taxa do esqueleto 3D (FK do q medido)")
     ap.add_argument("--fake-source", action="store_true", help="gerador UDP sintético (teste)")
     ap.add_argument("--run-seconds", type=float, default=0.0, help="sair após N s (teste)")
     args = ap.parse_args(argv)
     token = os.environ.get("POSE_WEB_TOKEN") or None
 
-    fk = None
+    fk = skel = None
     if not args.no_fk:
         try:
-            fk = build_fk()
+            model = build_fk_model()
+            fk, skel = model.wrist_xyz, model.skeleton
             print("[pose_web] FK G1_29 carregada (mesmo modelo/frames L_ee/R_ee do IK).", flush=True)
         except Exception as e:  # keep serving the hand data
             print(f"[pose_web] AVISO: FK indisponível ({e!r}); só a mão será plotada.", flush=True)
     version = _git_version()
     recorder = Recorder(args.task_dir, version=version)
-    hub = PoseHub(fk=fk, buffer_s=args.buffer_s, recorder=recorder)
+    hub = PoseHub(fk=fk, buffer_s=args.buffer_s, recorder=recorder, skeleton=skel,
+                  skeleton_hz=args.skeleton_hz)
     udp_port = hub.bind(args.udp_host, args.udp_port)
     threading.Thread(target=hub.run_udp, name="pose-udp", daemon=True).start()
     stop = threading.Event()

@@ -21,6 +21,35 @@ O ponto do robô é o frame `L_ee`/`R_ee` do IK (+0,05 m em x de
 Gráficos 1 e 2 usam a mesma janela de tempo e a mesma escala Y. Antes do `r`
 os pacotes vão com `tracking=false` (mão + robô medido; comandado vazio).
 
+## Painel 3D
+
+Seletor **2D / 3D / 2D + 3D** na barra de controles. O painel 3D é um `<canvas>`
+com projeção perspectiva em JS puro (sem bibliotecas, sem CDN, funciona offline),
+no **mesmo referencial do FK/IK** (cintura do modelo reduzido, m):
+
+- eixos na origem: **X** vermelho (frente), **Y** verde (esquerda), **Z** azul
+  (cima); grade leve de 10 cm abaixo dos dados;
+- **rastro** dos últimos 10/30/60 s (mesma janela dos gráficos 2D), mais apagado
+  quanto mais antigo: mão/alvo do IK (amarelo), robô medido (roxo, sólido),
+  robô comandado (roxo, fino tracejado), conforme o seletor Medido/Comandado;
+- **ponto atual** de cada um e uma linha fina tracejada mão ↔ robô medido com o
+  erro atual em mm;
+- **esqueleto do braço medido**: origens das juntas ombro pitch → roll → yaw →
+  cotovelo → punho roll → pitch → yaw → ponto `L_ee`/`R_ee`, mais pelve ↔ tronco
+  ↔ ombros. Calculado no servidor (`G1_29_WristFK.skeleton`, mesmo modelo
+  pinocchio de `arm_fk.py`) a partir do q **medido** já recebido, decimado a
+  ~20 Hz (`--skeleton-hz`) e enviado em `/api/samples` no campo `sk`
+  (`{"l": 8 pts, "r": 8 pts, "b": [pelvis, torso]}`). O braço não selecionado
+  aparece apagado. Com `--no-fk` (ou sem pinocchio) o esqueleto some e o painel
+  avisa.
+- Seletores Braço (E/D/Ambos), Janela e **Pausar** valem também para o 3D.
+
+Interação: **arrastar** (mouse ou um dedo) gira em órbita (yaw/pitch);
+**roda** ou **pinça** = zoom; botões **Frente / Lado / Topo / Isométrica**;
+**Recentrar** enquadra os dados da janela. Caixas para ocultar esqueleto/rastro.
+Redesenho só quando chegam dados novos ou há interação, limitado a ~30 fps.
+O CSV salvo não mudou.
+
 ## Arquitetura
 
 1. Teleop: `teleop/utils/pose_stream.py` — com `XR_POSE_STREAM=1`, envia por
@@ -29,8 +58,8 @@ os pacotes vão com `tracking=false` (mão + robô medido; comandado vazio).
    JSON no loop; erro de envio só incrementa contador. Sem a variável, o
    objeto é `None` e o loop não muda.
 2. `tools/pose_compare_web.py` (stdlib `ThreadingHTTPServer`, polling 10 Hz):
-   recebe UDP, calcula FK com pinocchio, buffer de 120 s, gravação de
-   tarefas. Página `tools/pose_compare_web.html`: canvas puro, sem CDN,
+   recebe UDP, calcula FK com pinocchio (punho a cada amostra; esqueleto do
+   braço medido a ~20 Hz), buffer de 120 s, gravação de tarefas. Página `tools/pose_compare_web.html`: canvas puro, sem CDN,
    funciona offline. Não publica nada em DDS.
 3. Launcher: `XR_POSE_WEB=1` exporta `XR_POSE_STREAM=1` e inicia o servidor
    como filho (`setsid`, log `~/.local/state/xr_teleoperate_inspire/pose_web.log`),
