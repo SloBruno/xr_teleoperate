@@ -84,6 +84,25 @@ class G1_29_WristFK:
         out["b"] = [[float(v) for v in self.data.oMf[f].translation] for f in self.base_frame_ids]
         return out
 
+    def points_xyz(self, q, offset_l=EE_OFFSET, offset_r=EE_OFFSET):
+        """Points rigidly attached to ``{left,right}_wrist_yaw_link``.
+
+        ``offset_*`` is expressed in the wrist_yaw_link frame (origin at the
+        wrist_yaw_joint, rotates with the wrist). ``EE_OFFSET`` (default) gives
+        exactly ``L_ee``/``R_ee``; a hand-centre offset gives the palm centre.
+        Returns (left_xyz, right_xyz) numpy (3,), or (None, None) for a bad q.
+        """
+        q = np.asarray(q, dtype=float).reshape(-1)
+        if q.shape[0] != self.nq or not np.all(np.isfinite(q)):
+            return None, None
+        pin = self._pin
+        pin.forwardKinematics(self.model, self.data, q)
+        out = []
+        for jid, off in ((self.arm_joint_ids[0][-1], offset_l), (self.arm_joint_ids[1][-1], offset_r)):
+            M = self.data.oMi[jid]
+            out.append(M.translation + M.rotation @ np.asarray(off, dtype=float).reshape(3))
+        return out[0], out[1]
+
     def wrist_xyz(self, q):
         """Return (left_xyz, right_xyz) as numpy (3,), or (None, None) for a bad q."""
         q = np.asarray(q, dtype=float).reshape(-1)
