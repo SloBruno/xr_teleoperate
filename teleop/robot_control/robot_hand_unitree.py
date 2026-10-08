@@ -30,6 +30,9 @@ from teleop.utils.dex3_state_grace import Dex3StateGrace, state_is_fresh
 from teleop.utils.dex3_protection import (
     Dex3HandProtector, ProtectionWarner, extract_protection_state,
 )
+from teleop.utils.dex3_shutdown_hand import (
+    SideShutdownPlan, close_blocker, REASON_TEXT,
+)
 
 import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
@@ -60,6 +63,10 @@ Dex3_Right_Closed_Pose = np.array([
     0.0, -1.05, -1.75,
     1.37, 1.53, 1.37, 1.53,
 ])
+# Final shutdown frame (DEX3_SHUTDOWN_HAND=close|hold): a joint farther than
+# this from its goal (blocked by an object) is left at q_cmd = measured q so
+# the frame the firmware keeps after the publisher stops has no squeeze.
+SHUTDOWN_FINAL_SQUEEZE_TOL_RAD = 0.15
 
 
 class Dex3_1_Controller:
@@ -184,6 +191,118 @@ class Dex3_1_Controller:
             while time.monotonic() < deadline and thread.is_alive():
                 time.sleep(poll_s)
         self.deactivate()
+
+    # ---- shutdown hand mode (DEX3_SHUTDOWN_HAND=close|hold; see
+    # teleop/utils/dex3_shutdown_hand.py). ``open`` keeps open_and_deactivate.
+    def begin_shutdown_hand(self, mode="close", timeout_s=2.5, poll_s=0.01):
+        """Revoke trigger authority and ramp to closed (or hold) under protection.
+
+        Blocks (bounded) until both sides finished the ramp or were blocked by
+        a safety rule. The command thread keeps holding the result until
+        ``finish_shutdown_hand``. Returns a per-side summary; never raises on
+        a missing/inactive thread (nothing is commanded then).
+        """
+        if mode not in ("close", "hold"):
+            raise ValueError(f"unsupported shutdown hand mode {mode!r}")
+        if getattr(self, "_shutdown_hand_mode", None) is None:
+            self.__dict__.setdefault("_shutdown_plans", {})
+            self._shutdown_hand_mode = mode
+            try:
+                logger_mp.info(f"[Dex3 encerramento] gatilhos ignorados; modo '{mode}': "
+                               + ("fechando a mão em rampa" if mode == "close" else "mantendo o último alvo"))
+            except Exception:
+                pass
+        thread = getattr(self, "hand_control_process", None)
+        if getattr(self, "outputs_activated", False) and thread is not None and thread.is_alive():
+            deadline = time.monotonic() + max(0.0, float(timeout_s))
+            while time.monotonic() < deadline and thread.is_alive():
+                plans = self.__dict__.get("_shutdown_plans", {})
+                if len(plans) == 2 and all(p.done for p in plans.values()):
+                    break
+                time.sleep(poll_s)
+        return self.shutdown_hand_summary()
+
+    def shutdown_hand_summary(self):
+        plans = dict(self.__dict__.get("_shutdown_plans", {}))
+        return {side: {"mode": p.mode, "done": p.done, "blocked_reason": p.blocked_reason,
+                       "duration_s": round(p.duration, 3)} for side, p in plans.items()}
+
+    def finish_shutdown_hand(self, timeout_s=0.3, poll_s=0.01):
+        """Publish the final frame (no unmonitored squeeze) and stop the thread."""
+        self._shutdown_finalize = True
+        thread = getattr(self, "hand_control_process", None)
+        if getattr(self, "outputs_activated", False) and thread is not None and thread.is_alive():
+            deadline = time.monotonic() + max(0.0, float(timeout_s))
+            while (time.monotonic() < deadline and thread.is_alive()
+                   and not self.__dict__.get("_shutdown_final_published", False)):
+                time.sleep(poll_s)
+        self.deactivate()
+        return bool(self.__dict__.get("_shutdown_final_published", False))
+
+    def _shutdown_step(self, left_info, right_info):
+        """One control cycle while DEX3_SHUTDOWN_HAND=close|hold is active."""
+        now = time.monotonic()
+        mode = self._shutdown_hand_mode
+        plans = self.__dict__.setdefault("_shutdown_plans", {})
+        protectors = self.__dict__.get("_protectors") or {}
+        last_targets = self.__dict__.get("_last_trigger_target", {})
+        finalize = bool(self.__dict__.get("_shutdown_finalize", False))
+        closed = {"left": Dex3_Left_Closed_Pose, "right": Dex3_Right_Closed_Pose}
+        out = {}
+        for side, info in (("left", left_info), ("right", right_info)):
+            plan = plans.get(side)
+            if plan is None:
+                # Ramp from the last published (post-protection) command the
+                # servo is tracking; hold mode keeps the last trigger target.
+                with self._telemetry_lock:
+                    published = (getattr(self, f"_{side}_action", None)
+                                 if getattr(self, f"_{side}_action_valid", False) else None)
+                start = published if published is not None else last_targets.get(side)
+                plan = plans[side] = SideShutdownPlan(
+                    side, mode, start, closed[side], Dex3_Open_Pose, now,
+                    hold_target=last_targets.get(side))
+            protector = protectors.get(side)
+            with self._telemetry_lock:
+                state = self.__dict__.get("_protection_state", {}).get(side)
+            if protector is None:
+                reason = "protection_unavailable"
+            else:
+                reason = close_blocker(state, now, fault_latched=protector.fault_latched,
+                                       hot_latched=protector.hot_latched)
+            if reason is not None and plan.block(reason):
+                try:
+                    logger_mp.warning(
+                        f"[Dex3 encerramento {side}] NÃO fecha: {REASON_TEXT.get(reason, reason)}; "
+                        "mantendo a regra de proteção (abrir/relaxar)")
+                except Exception:
+                    pass
+            target = plan.target(now)
+            if protector is None:
+                q_cmd, enable, flags = Dex3_Open_Pose.copy(), None, None
+            else:
+                q_cmd, enable, flags = self._apply_protection_detail(side, now, target)
+            if finalize and plan.blocked_reason is None and isinstance(state, dict):
+                # The last frame persists in the Dex3 firmware after the
+                # publisher stops (mode timeout bit = 0) with no software
+                # thermal protection left: joints that did not reach the goal
+                # (blocked by an object) get q_cmd = measured q (zero implicit
+                # squeeze, hand stays closed around it); reached joints keep
+                # the protected closed command (~zero error).
+                q_meas = state.get("q") or []
+                q_cmd = np.asarray(q_cmd, dtype=float).copy()
+                for i in range(Dex3_Num_Motors):
+                    qi = q_meas[i] if i < len(q_meas) else None
+                    if qi is not None and np.isfinite(qi) and abs(plan.goal[i] - qi) > SHUTDOWN_FINAL_SQUEEZE_TOL_RAD:
+                        q_cmd[i] = float(qi)
+            info = dict(info)
+            info["exact_open_reason"] = plan.blocked_reason
+            info["shutdown_hand_mode"] = mode
+            self._record_trigger_path(side, info, target, q_cmd)
+            out[side] = (np.asarray(q_cmd, dtype=float), enable)
+        self.ctrl_dual_hand(out["left"][0], out["right"][0], 0.0, 0.0, out["left"][1], out["right"][1])
+        if finalize:
+            self._shutdown_final_published = True
+        return out["left"][0], out["right"][0]
 
     def deactivate(self):
         """Stop the Dex3 command thread when terminal q is processed."""
@@ -532,8 +651,10 @@ class Dex3_1_Controller:
         now_t = time.monotonic()
         latches = self.__dict__.setdefault("_grip_latches", {"left": GripLatch(), "right": GripLatch()})
         stopping = bool(getattr(self, "_force_open", False))
-        left_info = latches["left"].update_sample(left_trigger, left_sample_timestamp, now_t, stop=stopping)
-        right_info = latches["right"].update_sample(right_trigger, right_sample_timestamp, now_t, stop=stopping)
+        # Shutdown close/hold also revokes trigger authority (latches stopped).
+        revoke = stopping or getattr(self, "_shutdown_hand_mode", None) is not None
+        left_info = latches["left"].update_sample(left_trigger, left_sample_timestamp, now_t, stop=revoke)
+        right_info = latches["right"].update_sample(right_trigger, right_sample_timestamp, now_t, stop=revoke)
         left_trigger = left_info["trigger_effective"]
         right_trigger = right_info["trigger_effective"]
         if stopping:
@@ -544,6 +665,11 @@ class Dex3_1_Controller:
             self._record_trigger_path("right", right_info, right_q_target, right_q_target)
             self.ctrl_dual_hand(left_q_target, right_q_target)
             return left_q_target, right_q_target
+        if getattr(self, "_shutdown_hand_mode", None) is not None:
+            # DEX3_SHUTDOWN_HAND=close|hold: triggers have no authority (the
+            # latches above were revoked with stop=True); ramp/hold under the
+            # normal protection.
+            return self._shutdown_step(left_info, right_info)
 
         # Dex3 finger targets are controller-only: released is the explicit
         # open pose and trigger travel interpolates to the explicit close pose.
@@ -553,6 +679,8 @@ class Dex3_1_Controller:
             left_trigger, Dex3_Open_Pose, Dex3_Left_Closed_Pose)
         right_q_target = trigger_to_dex3_targets(
             right_trigger, Dex3_Open_Pose, Dex3_Right_Closed_Pose)
+        self.__dict__["_last_trigger_target"] = {
+            "left": left_q_target.copy(), "right": right_q_target.copy()}
 
         # A short DDS state gap cannot be passed to protection as if it were a
         # new feedback sample.  Instead retain only the last output protection

@@ -1,5 +1,6 @@
 import time
 import argparse
+import signal
 from multiprocessing import Value, Array, Lock
 import threading
 import cv2
@@ -42,6 +43,7 @@ from teleop.utils.arm_tracking_orchestration import build_arm_recording_actions,
 from teleop.utils.ee_rate_limiter import DualEePoseRateLimiter, G1_29_EE_RATE_LIMITER_CONFIG
 from teleop.utils.arm_enable_ramp import ArmEnableRamp, DEFAULT_ENABLE_RAMP_S
 from teleop.utils.arm_graceful_shutdown import run_graceful_arm_shutdown
+from teleop.utils import dex3_shutdown_hand
 from teleop.utils.pose_stream import PoseStreamSender
 from teleop.utils import torso_lean
 from teleop.utils.xr_video_plane import (
@@ -229,10 +231,16 @@ def enforce_l_pose_start_gate(calibrator, tele_data, arm_ctrl, arm_ik, sink):
 
 
 def graceful_g1_29_shutdown(arm_ctrl, *, arm_ik=None, hand_ctrl=None, sink=None,
-                            attempt_return=True, clock=time.monotonic, sleep=time.sleep):
-    """Terminal q/B, Ctrl+C or exception: return home, open Dex3, release arms.
+                            attempt_return=True, clock=time.monotonic, sleep=time.sleep,
+                            hand_mode=None):
+    """Terminal q/B, Ctrl+C, SIGTERM or exception: Dex3 close (default) or
+    open, return home, release arms.
 
-    Tracking must already have stopped. Bounded (worst case ~17 s) and never
+    ``hand_mode`` (None = env DEX3_SHUTDOWN_HAND, default ``close``): close|hold
+    close/hold the Dex3 BEFORE the arm return and stop its writer after the
+    weight ramp; ``open`` is the previous sequence unchanged. Only a hand
+    controller with ``begin_shutdown_hand`` (Dex3) supports close/hold.
+    Tracking must already have stopped. Bounded (worst case ~20 s) and never
     raises; the arm writer always ends deactivated.
     """
     global START, STOP
@@ -248,10 +256,13 @@ def graceful_g1_29_shutdown(arm_ctrl, *, arm_ik=None, hand_ctrl=None, sink=None,
         _log_best_effort("info", f"[shutdown] {event} {detail}")
 
     gravity = getattr(arm_ik, "gravity_tauff", None) if arm_ik is not None else None
-    open_hands = None
-    if hand_ctrl is not None:
-        open_hand_method = getattr(hand_ctrl, "open_and_deactivate", None)
-        open_hands = open_hand_method if open_hand_method is not None else hand_ctrl.deactivate
+    try:
+        _, open_hands, close_hands, release_hands = dex3_shutdown_hand.hand_shutdown_callbacks(
+            hand_ctrl, hand_mode, log=lambda message: _log_best_effort("error", message))
+    except BaseException as error:
+        _log_best_effort("error", f"[Dex3 encerramento] modo indisponível ({type(error).__name__}); abrindo")
+        open_hands = None if hand_ctrl is None else (getattr(hand_ctrl, "open_and_deactivate", None) or hand_ctrl.deactivate)
+        close_hands = release_hands = None
     try:
         result = run_graceful_arm_shutdown(
             arm_ctrl,
@@ -259,15 +270,25 @@ def graceful_g1_29_shutdown(arm_ctrl, *, arm_ik=None, hand_ctrl=None, sink=None,
             sleep=sleep,
             emit=emit,
             open_hands=open_hands,
+            close_hands=close_hands,
+            release_hands=release_hands,
             gravity_tauff=gravity,
             attempt_return=attempt_return,
         )
     except BaseException as error:
         _log_best_effort("error", f"Graceful arm shutdown failed: {type(error).__name__}")
         result = None
+    if (close_hands is not None and hand_ctrl is not None and result is not None
+            and result.deactivated and not (result.hands_released or result.hands_opened)):
+        # Close/hold path whose final release failed: never leave the Dex3
+        # writer running after the arm writer stopped.
+        try:
+            hand_ctrl.deactivate()
+        except BaseException as error:
+            _log_best_effort("error", f"Failed to deactivate Dex3 output: {error}")
     if result is None or not result.deactivated:
         # Last resort: never leave a writer running.
-        if hand_ctrl is not None and (result is None or not result.hands_opened):
+        if hand_ctrl is not None and (result is None or not (result.hands_opened or result.hands_released)):
             try:
                 hand_ctrl.deactivate()
             except BaseException as error:
@@ -332,6 +353,16 @@ def _cleanup_telemetry_event_best_effort(sink, event, *, cause=None):
         _safe_emit_lifecycle_event(sink, event, cause=cause)
     except BaseException as error:
         _log_best_effort("warning", f"Failed to emit cleanup telemetry {event}: {type(error).__name__}")
+
+
+def install_sigterm_handler():
+    """SIGTERM follows the q / Ctrl+C graceful path (see dex3_shutdown_hand)."""
+    try:
+        signal.signal(signal.SIGTERM, dex3_shutdown_hand.make_sigterm_handler(
+            lambda: STOP, lambda message: _log_best_effort("warning", message)))
+        return True
+    except (ValueError, OSError):  # not the main thread
+        return False
 
 
 def on_press(key):
@@ -503,6 +534,13 @@ if __name__ == '__main__':
         logger_mp.error(f"[torso_lean] configuração rejeitada ({e}); inclinação do tronco DESLIGADA")
         lean_cfg = None
     logger_mp.info(lean_cfg.describe() if lean_cfg is not None else "Inclinação do tronco: DESLIGADA")
+    install_sigterm_handler()
+    if args.ee == "dex3":
+        _dex3_shutdown_mode, _dex3_shutdown_warning = dex3_shutdown_hand.resolve_mode(
+            os.environ.get(dex3_shutdown_hand.ENV_VAR))
+        if _dex3_shutdown_warning:
+            logger_mp.error(f"[Dex3 encerramento] {_dex3_shutdown_warning}")
+        logger_mp.info(dex3_shutdown_hand.describe_mode(_dex3_shutdown_mode))
 
     try:
         # setup dds communication domains id

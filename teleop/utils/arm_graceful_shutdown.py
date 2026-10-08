@@ -17,6 +17,14 @@ Contract (terminal ``q`` / right-controller ``B`` / Ctrl+C / exception):
    procedure waits (bounded) until the WRITTEN waist command equals the
    neutral BEFORE the authority weight ramp. With the feature off nothing in
    this step runs and the sequence is byte-for-byte the previous one.
+4c. Dex3 close/hold at shutdown (``DEX3_SHUTDOWN_HAND=close|hold``, see
+   teleop/utils/dex3_shutdown_hand.py): when ``close_hands`` is given it runs
+   FIRST (before step 2): triggers lose authority and the hand ramps closed
+   (bounded); it stays held by its writer while the arms return and during the
+   weight ramp; ``release_hands`` (after step 5, before the arm writer is
+   deactivated) publishes the final frame and stops the Dex3 writer. Step 4 is
+   then skipped. If ``close_hands`` raises, step 4 (``open_hands``) runs as
+   before (fail-safe). Without ``close_hands`` the sequence is unchanged.
 5. Ramp the ``rt/arm_sdk`` authority weight (kNotUsedJoint0.q) linearly 1 -> 0
    so the Unitree motion controller takes the arms back smoothly, confirm the
    writer actually published weight 0, then deactivate the writer.
@@ -91,6 +99,9 @@ class GracefulShutdownResult:
     return_skipped_reason: str | None = None
     arrival_confirmed: bool = False
     hands_opened: bool = False
+    hands_closed: bool = False
+    hands_released: bool = False
+    hand_summary: dict | None = None
     waist_return_requested: bool = False
     waist_neutral_reached: bool = False
     weight_released: bool = False
@@ -107,6 +118,8 @@ def run_graceful_arm_shutdown(
     sleep,
     emit=None,
     open_hands=None,
+    close_hands=None,
+    release_hands=None,
     gravity_tauff=None,
     goal_q=None,
     attempt_return=True,
@@ -196,6 +209,18 @@ def run_graceful_arm_shutdown(
         except BaseException:
             return None
         return status if isinstance(status, dict) and status.get("enabled") else None
+
+    # ---- Phase -1: Dex3 close/hold (opt-in callback; default mode close) ----
+    hands_close_failed = False
+    if close_hands is not None:
+        try:
+            summary = close_hands()
+            result.hands_closed = True
+            result.hand_summary = summary if isinstance(summary, dict) else None
+            event("shutdown_dex3_closed", summary=result.hand_summary)
+        except BaseException as error:
+            hands_close_failed = True
+            event("shutdown_error", phase="dex3_close", error=type(error).__name__)
 
     # ---- Phase 0: torso lean -> neutral (only when the feature took the waist)
     waist0 = waist_status()
@@ -308,7 +333,7 @@ def run_graceful_arm_shutdown(
             event("shutdown_error", phase="waist_wait", error=type(error).__name__)
 
     # ---- Phase 2: open Dex3 and stop its writer -------------------------
-    if open_hands is not None:
+    if open_hands is not None and (close_hands is None or hands_close_failed):
         try:
             open_hands()
             result.hands_opened = True
@@ -341,6 +366,15 @@ def run_graceful_arm_shutdown(
             event("weight_release_finished", confirmed=result.release_confirmed)
     except BaseException as error:
         event("shutdown_error", phase="weight_release", error=type(error).__name__)
+
+    # ---- Phase 3b: Dex3 final frame + writer stop (close/hold modes) -----
+    if close_hands is not None and not hands_close_failed and release_hands is not None:
+        try:
+            release_hands()
+            result.hands_released = True
+            event("shutdown_dex3_released")
+        except BaseException as error:
+            event("shutdown_error", phase="dex3_release", error=type(error).__name__)
 
     # ---- Phase 4: stop the writer (always) ------------------------------
     try:

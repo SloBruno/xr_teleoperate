@@ -226,6 +226,16 @@ class Dex3HandProtector:
         self._limit_since: list[float | None] = [None] * n
         self._last_now: float | None = None
 
+    @property
+    def fault_latched(self) -> bool:
+        """Any joint in the latched (never auto-cleared) motor-fault state."""
+        return any(self._fault)
+
+    @property
+    def hot_latched(self) -> bool:
+        """Any joint still in the >= DERATE_OPEN_C thermal latch."""
+        return any(self._hot)
+
     def _open_result(self, res: ProtectionResult) -> ProtectionResult:
         res.q_cmd = self.open_pose.copy()
         return res

@@ -15,6 +15,13 @@
 #     tools/pose_compare_web.py as a child (setsid; log in $teleimager_state_dir/pose_web.log),
 #     stopped on exit. POSE_WEB_PORT=8093  POSE_WEB_TOKEN=<opcional>
 #     XR_POSE_STREAM_HZ=50  POSE_WEB_STOP_TIMEOUT_S=5
+#
+# Dex3 ao encerrar (q / B / Ctrl+C / SIGTERM / erro); see
+# teleop/utils/dex3_shutdown_hand.py:
+#   DEX3_SHUTDOWN_HAND=close (padrão) fecha em rampa até a pose do gatilho=1
+#     (não fecha com fault / estado DDS ausente ou antigo / >=80 C: abre)
+#   DEX3_SHUTDOWN_HAND=open  comportamento anterior (abre)
+#   DEX3_SHUTDOWN_HAND=hold  mantém o último alvo do gatilho
 set -euo pipefail
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -56,6 +63,15 @@ case "$G1_TORSO_LEAN" in
     *) echo "unsupported G1_TORSO_LEAN='$G1_TORSO_LEAN' (use 0|1)" >&2; exit 2 ;;
 esac
 export G1_TORSO_LEAN
+# Dex3 shutdown hand mode: validated before anything starts and again in Python.
+DEX3_SHUTDOWN_HAND=${DEX3_SHUTDOWN_HAND:-close}
+case "$DEX3_SHUTDOWN_HAND" in
+    close) dex3_shutdown_msg="Dex3 ao encerrar: FECHA (rampa suave até a pose do gatilho=1; DEX3_SHUTDOWN_HAND=open para abrir)" ;;
+    open)  dex3_shutdown_msg="Dex3 ao encerrar: ABRE (comportamento anterior)" ;;
+    hold)  dex3_shutdown_msg="Dex3 ao encerrar: MANTÉM o último alvo do gatilho" ;;
+    *) echo "DEX3_SHUTDOWN_HAND='$DEX3_SHUTDOWN_HAND' não suportado (use close|open|hold); não iniciando." >&2; exit 2 ;;
+esac
+export DEX3_SHUTDOWN_HAND
 # Pose compare web (8093): validated here, started right before the teleop.
 XR_POSE_WEB=${XR_POSE_WEB:-0}
 case "$XR_POSE_WEB" in
@@ -335,6 +351,7 @@ if ! ensure_teleimager; then
 fi
 exec 9>&-
 echo "$torso_lean_msg"
+echo "$dex3_shutdown_msg"
 if [[ "$XR_POSE_WEB" == 1 ]]; then
     echo "Página de comparação (XR_POSE_WEB=1): LIGADA, porta ${POSE_WEB_PORT}, XR_POSE_STREAM=1"
 else
