@@ -4,6 +4,13 @@ Ferramenta só-leitura para a teleop Inspire (`dev-inspire`): dois gráficos X/Y
 vs tempo — posição do punho do robô e posição de referência do punho do
 operador — mais um painel de erro, e o botão **Salvar tarefa**.
 
+> **Linha Dex3:** `XR_POSE_WEB=1 bash teleop/run_g1_quest_dex3.sh` (env `tv`,
+> estado em `~/.local/state/xr_teleoperate/`, tarefas em `.../tasks/`). Na Dex3
+> a "mão" é o **alvo do IK vindo dos controladores** já calibrado (e, com
+> `G1_TORSO_LEAN=1`, expresso no referencial do tronco), não o hand tracking.
+> Antes do `r` não há alvo (controles ainda não calibrados): só o robô é
+> enviado, mão = NaN. Sem `XR_POSE_WEB` nada é enviado (loop inalterado).
+
 ## O que é plotado (interpretação)
 
 | Série | Origem | Frame |

@@ -42,6 +42,8 @@ from teleop.utils.arm_tracking_orchestration import build_arm_recording_actions,
 from teleop.utils.ee_rate_limiter import DualEePoseRateLimiter, G1_29_EE_RATE_LIMITER_CONFIG
 from teleop.utils.arm_enable_ramp import ArmEnableRamp, DEFAULT_ENABLE_RAMP_S
 from teleop.utils.arm_graceful_shutdown import run_graceful_arm_shutdown
+from teleop.utils.pose_stream import PoseStreamSender
+from teleop.utils import torso_lean
 from teleop.utils.xr_video_plane import (
     describe_plane, plane_exceeds_headset, resolve_plane_height, validate_plane,
     DEFAULT_DISTANCE_M,
@@ -277,6 +279,18 @@ def graceful_g1_29_shutdown(arm_ctrl, *, arm_ik=None, hand_ctrl=None, sink=None,
     return result
 
 
+_NAN_POSE = np.full((4, 4), np.nan)
+
+
+def _pose_stream_hands(cycle):
+    """Operator wrist for the 8093 page = the target actually given to IK
+    (torso frame when the lean is on), NaN when this cycle had none."""
+    target = getattr(cycle, "ik_target", None)
+    if target is None:
+        return _NAN_POSE, _NAN_POSE
+    return target[0], target[1]
+
+
 def _format_shutdown_detail(detail):
     try:
         return ",".join(f"{key}={detail[key]}" for key in sorted(detail)) or None
@@ -472,6 +486,23 @@ if __name__ == '__main__':
     robot_monitor = None
     balance_monitor = None
     com_status = None
+    # Opt-in UDP side channel for tools/pose_compare_web.py (XR_POSE_STREAM=1);
+    # None = disabled, loop unchanged. Never blocks / never raises.
+    pose_stream = PoseStreamSender.from_env()
+    if pose_stream is not None:
+        logger_mp.info(f"[pose_stream] UDP -> {pose_stream.addr[0]}:{pose_stream.addr[1]} @ {1/pose_stream.min_period if pose_stream.min_period else 0:.0f} Hz")
+    # Opt-in torso lean from the operator's head displacement (G1_TORSO_LEAN=1,
+    # docs/torso_lean.md): waist PITCH/ROLL only, yaw held at the neutral
+    # captured at r. None = OFF: the waist (motors 12-14) keeps exactly the
+    # previous arm_sdk behaviour. Any invalid env value keeps it OFF.
+    lean_cfg = None
+    lean_session = None     # TorsoLeanSession after r, torso_lean.REFUSED, or None
+    try:
+        lean_cfg = torso_lean.config_from_env(os.environ)
+    except torso_lean.TorsoLeanConfigError as e:
+        logger_mp.error(f"[torso_lean] configuração rejeitada ({e}); inclinação do tronco DESLIGADA")
+        lean_cfg = None
+    logger_mp.info(lean_cfg.describe() if lean_cfg is not None else "Inclinação do tronco: DESLIGADA")
 
     try:
         # setup dds communication domains id
@@ -573,6 +604,10 @@ if __name__ == '__main__':
             motion_switcher = MotionSwitcher()
             status, result = motion_switcher.Enter_Debug_Mode()
             logger_mp.info(f"Enter debug mode: {'Success' if status == 0 else 'Failed'}")
+
+        if lean_cfg is not None and (args.arm != "G1_29" or not args.motion):
+            logger_mp.error("[torso_lean] requer --arm G1_29 e --motion (rt/arm_sdk); inclinação DESLIGADA")
+            lean_cfg = None
 
         # arm
         if args.arm == "G1_29":
@@ -818,6 +853,10 @@ if __name__ == '__main__':
                 if get_ready_arm_q is not None
                 else np.zeros(sum(ready_arm_joint_split))
             )
+            # Before r there is no IK target (raw controller poses are not in the
+            # robot frame until calibration): hands NaN, robot q only. Never raises.
+            if pose_stream is not None:
+                pose_stream.maybe_send(False, _NAN_POSE, _NAN_POSE, None, ready_arm_q)
             ready_balance = balance_telemetry.balance_snapshot_best_effort(
                 balance_monitor,
                 loco_backend=(getattr(loco_wrapper, "backend_telemetry", lambda: None)()
@@ -1088,6 +1127,20 @@ if __name__ == '__main__':
             first_target = first_controller_targets if args.arm == "G1_29" else None
             if args.arm != "G1_29" and controller_pose_is_fresh:
                 candidate_targets = (tele_data.left_wrist_pose, tele_data.right_wrist_pose)
+            # Torso lean (opt-in, G1_29 + --motion only): head displacement ->
+            # waist pitch/roll command; world-fixed controller targets are
+            # re-expressed in the leaning torso frame (IK model frame) and the
+            # arm gravity feed-forward uses R^T g. Off: nothing below runs.
+            lean_transform = None
+            waist_cmd = None
+            if lean_cfg is not None and lean_session is None:
+                lean_session = torso_lean.TorsoLeanSession.try_engage(
+                    lean_cfg, arm_ctrl, getattr(tele_data, "head_pose", None), time.monotonic(), log=logger_mp)
+            if isinstance(lean_session, torso_lean.TorsoLeanSession):
+                waist_cmd = lean_session.step(getattr(tele_data, "head_pose", None), time.monotonic())
+                R_torso = lean_session.torso_rotation(waist_cmd)
+                arm_ik.set_torso_rotation(R_torso)
+                lean_transform = lambda pose, _R=R_torso: torso_lean.retarget_world_fixed_to_torso(pose, _R)
             time_ik_start = time.time()
             cycle = run_arm_tracking_cycle(
                 arm_ctrl=arm_ctrl,
@@ -1104,7 +1157,15 @@ if __name__ == '__main__':
                 is_stopped=lambda: STOP,
                 rate_limiter=arm_rate_limiter,
                 enable_ramp=arm_enable_ramp,
+                target_transform=lean_transform,
             )
+            if waist_cmd is not None:
+                with LIFECYCLE_LOCK:
+                    if not STOP:
+                        arm_ctrl.set_waist_target(waist_cmd)
+            if pose_stream is not None:
+                pose_stream.maybe_send(True, *_pose_stream_hands(cycle), cycle.selected_q, current_lr_arm_q,
+                                       lean=torso_lean.stream_telemetry(lean_session, arm_ctrl))
             if first_target is not None:
                 first_controller_targets = None
             if cycle.target_accepted:
@@ -1368,6 +1429,13 @@ if __name__ == '__main__':
         # weight 1 -> 0 so the Unitree controller takes the arms back, then
         # deactivate the writer. Invalid/stale state or a dead writer skips
         # the motion (release/deactivate only). Every phase is time-bounded.
+        try:
+            if isinstance(lean_session, torso_lean.TorsoLeanSession) and arm_ik is not None:
+                # the waist returns to its neutral during the shutdown: the arm
+                # feed-forward uses the neutral (upright) gravity again.
+                arm_ik.set_torso_rotation(np.eye(3))
+        except BaseException as e:
+            _log_best_effort("error", f"[torso_lean] reset da gravidade do IK falhou: {e!r}")
         if args.arm == "G1_29":
             if outputs_activated:
                 graceful_g1_29_shutdown(
@@ -1449,6 +1517,8 @@ if __name__ == '__main__':
                 pass
         _close_telemetry_best_effort(pose_telemetry_sink, "pose telemetry sink")
         _close_telemetry_best_effort(status_sink, "teleop status sink")
+        if pose_stream is not None:
+            pose_stream.close()
 
         try:
             if not args.motion:

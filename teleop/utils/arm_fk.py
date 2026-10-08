@@ -6,6 +6,13 @@ frames ``L_ee``/``R_ee`` = +0.05 m along x of ``{left,right}_wrist_yaw_joint``),
 so FK(q) lives in the same frame as the IK targets (``tele_data.*_wrist_pose``:
 robot waist frame, metres). Read-only: no casadi, no solver, no DDS.
 
+Torso lean (G1_TORSO_LEAN, docs/torso_lean.md): the waist is locked at 0 in
+this model, so its base frame is rigidly the robot TORSO. With the waist at
+its neutral this is the classic waist frame; while the torso leans, FK(q) and
+the (retargeted) IK targets sent to the pose web are both in this torso frame,
+so the 8093/8095 comparisons stay coherent. The lean itself is reported in the
+pose stream telemetry (XPS2 packets), not folded into these coordinates.
+
 q layout: 14 arm joints, left 7 then right 7 (``G1_29_JointArmIndex`` order),
 identical to the reduced model's configuration vector.
 """
@@ -38,7 +45,8 @@ EE_FRAMES = (("L_ee", "left_wrist_yaw_joint"), ("R_ee", "right_wrist_yaw_joint")
 SKELETON_JOINTS = ("shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow",
                    "wrist_roll", "wrist_pitch", "wrist_yaw")
 SKELETON_BASE_FRAMES = ("pelvis", "torso_link")
-FRAME_DESC = ("G1_29 IK frame: robot waist (pelvis-fixed reduced model, legs/waist locked at 0), "
+FRAME_DESC = ("G1_29 IK frame: robot torso (reduced model, legs/waist locked at 0; = pelvis frame when "
+              "the waist is at 0, follows the torso when G1_TORSO_LEAN leans it), "
               "metres, x forward, y left, z up; point = L_ee/R_ee (+0.05 m x of wrist_yaw_joint)")
 
 

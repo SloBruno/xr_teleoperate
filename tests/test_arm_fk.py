@@ -152,7 +152,8 @@ class WristFKTest(unittest.TestCase):
             tl = d_ik.oMf[m_ik.getFrameId("L_ee")].homogeneous.copy()
             tr = d_ik.oMf[m_ik.getFrameId("R_ee")].homogeneous.copy()
             sol_q = q_true
-            ik.smooth_filter = type(ik.smooth_filter)(np.array([1.0]), 14)  # no averaging for the check
+            if hasattr(ik, "smooth_filter"):  # Dex3 line: solve_ik is already raw (no filter)
+                ik.smooth_filter = type(ik.smooth_filter)(np.array([1.0]), 14)  # no averaging for the check
             for _ in range(3):
                 sol_q, _tau = ik.solve_ik(tl, tr, sol_q, np.zeros(14))
             l, r = self.fk.wrist_xyz(sol_q)

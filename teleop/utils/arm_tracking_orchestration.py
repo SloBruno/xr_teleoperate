@@ -84,6 +84,7 @@ class ArmTrackingCycleResult:
     requested_target: object = None
     limiter_bands: tuple | None = None
     ramp_alpha: float | None = None
+    ik_target: object = None
 
 
 def run_arm_tracking_cycle(
@@ -103,6 +104,7 @@ def run_arm_tracking_cycle(
     is_stopped,
     rate_limiter=None,
     enable_ramp=None,
+    target_transform=None,
 ):
     """Resolve one target, solve only accepted fresh targets, then gate output.
 
@@ -115,6 +117,10 @@ def run_arm_tracking_cycle(
     4. ``enable_ramp`` blends the arming hold pose into the IK command;
     5. ``publish_arm_command`` (final lifecycle/freshness authority);
     6. ``rate_limiter.commit`` only if the command was actually published.
+
+    ``target_transform`` (optional, torso lean): maps the accepted target
+    pair (neutral-torso frame) to the frame actually given to IK and to the
+    residual gate, right before step 3.  ``None`` (default) = unchanged.
 
     STOP interrupts the ramp permanently.  The joint-space velocity clip in
     ``robot_arm`` remains the last barrier downstream.
@@ -173,14 +179,26 @@ def run_arm_tracking_cycle(
             target = limited.targets
             limiter_bands = tuple(limited.bands)
 
+    ik_target = None
+    if target is not None and target_transform is not None:
+        try:
+            ik_target = tuple(target_transform(pose) for pose in target)
+        except Exception:
+            ik_target = None
+        if ik_target is None or not _valid_target_pair(ik_target):
+            ik_target = None
+            target = None
+    elif target is not None:
+        ik_target = target
+
     if target is None:
         sol_q = np.asarray(current_q).copy()
         sol_tauff = np.zeros_like(sol_q)
     else:
         sol_q, sol_tauff = arm_ik.solve_ik(
-            target[0], target[1], current_q, current_dq
+            ik_target[0], ik_target[1], current_q, current_dq
         )
-        if not _fk_matches_target(arm_ik, sol_q, target):
+        if not _fk_matches_target(arm_ik, sol_q, ik_target):
             target = None
 
     command_q, command_tauff = sol_q, sol_tauff
@@ -238,6 +256,7 @@ def run_arm_tracking_cycle(
         requested_target=requested_target,
         limiter_bands=limiter_bands,
         ramp_alpha=ramp_alpha,
+        ik_target=ik_target if target is not None else None,
     )
 
 

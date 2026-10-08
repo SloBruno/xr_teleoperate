@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
 # Operator-run launcher: this process waits for local terminal r/q.
+#
+# Torso lean (waist PITCH/ROLL from the operator's head DISPLACEMENT, via
+# rt/arm_sdk; yaw stays at the neutral; see docs/torso_lean.md). Default OFF:
+#   G1_TORSO_LEAN=1  turns it on. Neutral = head + waist at r.
+#   G1_TORSO_LEAN_MAX_DEG=10 (hard ceiling 10; larger values are rejected)
+#   G1_TORSO_LEAN_GAIN_DEG_PER_M=66.7 (15 cm past the deadband = 10 deg)
+#   G1_TORSO_LEAN_DEADBAND_M=0.03  G1_TORSO_LEAN_RATE_DPS=15  G1_TORSO_LEAN_ACCEL_DPS2=0 (off)
+#
+# Pose compare web (robot wrist FK x operator wrist/IK target, 2D/3D,
+# "Salvar tarefa"; see docs/pose_compare_web.md). Default OFF:
+#   XR_POSE_WEB=1  exports XR_POSE_STREAM=1 to the teleop (non-blocking UDP
+#     127.0.0.1:${XR_POSE_STREAM_PORT:-47555}, 50 Hz) and starts
+#     tools/pose_compare_web.py as a child (setsid; log in $teleimager_state_dir/pose_web.log),
+#     stopped on exit. POSE_WEB_PORT=8093  POSE_WEB_TOKEN=<opcional>
+#     XR_POSE_STREAM_HZ=50  POSE_WEB_STOP_TIMEOUT_S=5
 set -euo pipefail
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -21,6 +36,35 @@ turn_rate_cap=${G1_TURN_RATE_CAP:-0.3}
 # Walking backend: rt/wirelesscontroller (continuous 20 Hz) by default;
 # G1_LOCO_BACKEND=setvelocity forces the legacy SetVelocity RPC.
 loco_backend=${G1_LOCO_BACKEND:-wirelesscontroller}
+
+# Torso lean: validated before anything starts and again in Python.
+G1_TORSO_LEAN=${G1_TORSO_LEAN:-0}
+case "$G1_TORSO_LEAN" in
+    0|"") G1_TORSO_LEAN=0; torso_lean_msg="Inclinação do tronco: DESLIGADA (G1_TORSO_LEAN=1 para ligar)" ;;
+    1)
+        G1_TORSO_LEAN_MAX_DEG=${G1_TORSO_LEAN_MAX_DEG:-10}
+        if ! awk -v v="$G1_TORSO_LEAN_MAX_DEG" 'BEGIN { exit !(v ~ /^[0-9]+(\.[0-9]+)?$/ && v > 0 && v <= 10) }'; then
+            echo "G1_TORSO_LEAN_MAX_DEG='$G1_TORSO_LEAN_MAX_DEG' rejeitado (0 < máx <= 10 graus); não iniciando." >&2
+            exit 2
+        fi
+        export G1_TORSO_LEAN_MAX_DEG
+        for v in G1_TORSO_LEAN_GAIN_DEG_PER_M G1_TORSO_LEAN_DEADBAND_M G1_TORSO_LEAN_RATE_DPS G1_TORSO_LEAN_ACCEL_DPS2; do
+            if [[ -n "${!v:-}" ]]; then export "${v?}"; fi
+        done
+        torso_lean_msg="Inclinação do tronco: LIGADA, máx ${G1_TORSO_LEAN_MAX_DEG}° pitch/roll (yaw fixo), ganho ${G1_TORSO_LEAN_GAIN_DEG_PER_M:-66.7}°/m, zona morta ${G1_TORSO_LEAN_DEADBAND_M:-0.03} m, ${G1_TORSO_LEAN_RATE_DPS:-15}°/s; neutro = postura no r"
+        ;;
+    *) echo "unsupported G1_TORSO_LEAN='$G1_TORSO_LEAN' (use 0|1)" >&2; exit 2 ;;
+esac
+export G1_TORSO_LEAN
+# Pose compare web (8093): validated here, started right before the teleop.
+XR_POSE_WEB=${XR_POSE_WEB:-0}
+case "$XR_POSE_WEB" in
+    0|"") XR_POSE_WEB=0 ;;
+    1) ;;
+    *) echo "unsupported XR_POSE_WEB='$XR_POSE_WEB' (use 0|1)" >&2; exit 2 ;;
+esac
+POSE_WEB_PORT=${POSE_WEB_PORT:-8093}
+POSE_WEB_STOP_TIMEOUT_S=${POSE_WEB_STOP_TIMEOUT_S:-5}
 
 teleimager_dir="$repo/teleop/teleimager"
 teleimager_state_dir=${TELEIMAGER_STATE_DIR:-/home/unitree/.local/state/xr_teleoperate}
@@ -290,9 +334,46 @@ if ! ensure_teleimager; then
     exit 1
 fi
 exec 9>&-
+echo "$torso_lean_msg"
+if [[ "$XR_POSE_WEB" == 1 ]]; then
+    echo "Página de comparação (XR_POSE_WEB=1): LIGADA, porta ${POSE_WEB_PORT}, XR_POSE_STREAM=1"
+else
+    echo "Página de comparação: DESLIGADA (XR_POSE_WEB=1 para ligar a 8093)"
+fi
 if [[ "${G1_LAUNCHER_SKIP_TELEOP:-0}" == 1 ]]; then
     exit 0
 fi
+
+# ---- pose compare web (opt-in XR_POSE_WEB=1) ----
+pose_web_pid=""
+pose_web_log="$teleimager_state_dir/pose_web.log"
+pose_web_stop() {
+    local pid=$pose_web_pid deadline
+    [[ -n "$pid" ]] || return 0
+    pose_web_pid=""
+    kill -0 "$pid" 2>/dev/null || return 0
+    kill -INT "$pid" 2>/dev/null || true
+    deadline=$((SECONDS + POSE_WEB_STOP_TIMEOUT_S))
+    while kill -0 "$pid" 2>/dev/null && (( SECONDS < deadline )); do sleep 0.1; done
+    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+    echo "POSE WEB: parado." >&2
+}
+pose_web_start() {
+    [[ "$XR_POSE_WEB" == 1 ]] || return 0
+    export XR_POSE_STREAM=1
+    mkdir -p "$teleimager_state_dir"
+    echo "==== $(date -Is) start ====" >>"$pose_web_log"
+    # --exit-with-pid: the web exits by itself within ~1 s once this launcher
+    # shell is gone (q, Ctrl+C, closed terminal, kill), so no shell signal
+    # handler is needed and the persistent Teleimager is never touched.
+    (cd "$repo" && exec setsid "$teleimager_python" -u -s tools/pose_compare_web.py --port "$POSE_WEB_PORT" \
+        --exit-with-pid "$$" >>"$pose_web_log" 2>&1 </dev/null 9>&-) &
+    pose_web_pid=$!
+    local ip
+    ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}') || true
+    echo "POSE WEB: PID $pose_web_pid, página http://${ip:-<ip-do-robô>}:${POSE_WEB_PORT}/${POSE_WEB_TOKEN:+?token=...} (log $pose_web_log; XR_POSE_STREAM=1)"
+}
+
 cd "$repo/teleop"
 [[ -n "${XR_TELEOP_VUER_IP:-}" ]] && echo "Quest: https://vuer.ai?ws=wss://${XR_TELEOP_VUER_IP}:${XR_NET_PORT}&grid=False"
 echo "Teto de caminhada: ${walk_speed_cap} m/s linear, ${turn_rate_cap} rad/s angular (BotBrain g1-r1)"
@@ -305,14 +386,26 @@ XR_VIDEO_PLANE_HEIGHT=${XR_VIDEO_PLANE_HEIGHT:-auto}
 echo "Plano de vídeo XR: altura ${XR_VIDEO_PLANE_HEIGHT} (XR_VIDEO_PLANE_HEIGHT=1.0 = antigo); perfil RealSense ${XR_REALSENSE_PROFILE}"
 video_plane_args=(--video-plane-height "$XR_VIDEO_PLANE_HEIGHT")
 [[ -n "${XR_VIDEO_PLANE_DISTANCE:-}" ]] && video_plane_args+=(--video-plane-distance "$XR_VIDEO_PLANE_DISTANCE")
-exec "$teleimager_python" -s teleop_hand_and_arm.py \
-  --arm G1_29 \
-  --ee dex3 \
-  --input-mode hand \
-  --motion \
-  --camera-layout "$teleop_camera_layout" \
-  --walk-speed-cap "$walk_speed_cap" \
-  --turn-rate-cap "$turn_rate_cap" \
-  --loco-backend "$loco_backend" \
-  --loco-request-fsm "${G1_LOCO_REQUEST_FSM:-none}" \
-  ${video_plane_args[@]+"${video_plane_args[@]}"}
+teleop_args=(
+  --arm G1_29
+  --ee dex3
+  --input-mode hand
+  --motion
+  --camera-layout "$teleop_camera_layout"
+  --walk-speed-cap "$walk_speed_cap"
+  --turn-rate-cap "$turn_rate_cap"
+  --loco-backend "$loco_backend"
+  --loco-request-fsm "${G1_LOCO_REQUEST_FSM:-none}"
+  ${video_plane_args[@]+"${video_plane_args[@]}"})
+pose_web_start
+if [[ -z "$pose_web_pid" ]]; then
+    # Default (XR_POSE_WEB off): same exec as before.
+    exec "$teleimager_python" -s teleop_hand_and_arm.py "${teleop_args[@]}"
+fi
+# We own the pose web: run the teleop as a child (SIGINT from the terminal
+# reaches the foreground teleop, which shuts down gracefully), then stop the
+# web. If this shell dies first, the web exits via --exit-with-pid.
+teleop_rc=0
+"$teleimager_python" -s teleop_hand_and_arm.py "${teleop_args[@]}" || teleop_rc=$?
+pose_web_stop
+exit "$teleop_rc"

@@ -259,5 +259,25 @@ class MainSmokeTest(unittest.TestCase):
         self.assertTrue(all("sk" not in s and s["ml"] == [None, None, None] for s in j["samples"]))
 
 
+
+class ExitWithPidTest(unittest.TestCase):
+    """Dex3 launcher passes --exit-with-pid $$: the web exits when the launcher is gone."""
+
+    def test_pid_alive(self):
+        import os
+        self.assertTrue(web.pid_alive(os.getpid()))
+        self.assertFalse(web.pid_alive(2 ** 22 + 12345))
+
+    def test_main_exits_when_watched_pid_dies(self):
+        import subprocess
+        p = subprocess.Popen(["sleep", "0.3"])
+        threading.Thread(target=p.wait, daemon=True).start()   # reap: a zombie still answers kill 0
+        d = tempfile.mkdtemp()
+        t0 = time.monotonic()
+        rc = web.main(["--no-fk", "--host", "127.0.0.1", "--port", "0", "--udp-port", "0",
+                       "--task-dir", d, "--exit-with-pid", str(p.pid), "--run-seconds", "20"])
+        self.assertEqual(rc, 0)
+        self.assertLess(time.monotonic() - t0, 5.0)
+
 if __name__ == "__main__":
     unittest.main()
