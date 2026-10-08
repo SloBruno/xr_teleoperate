@@ -237,6 +237,36 @@ class FKTest(unittest.TestCase):
         self.assertAlmostEqual(float(np.linalg.norm(h - w)), 0.110, places=6)
 
 
+class Dex3HandCentreTest(unittest.TestCase):
+    """Dex3 line: 'centro da mão' defaults to the Dex3-1 profile derived from the
+    repo URDF (marked ESTIMADO); the Inspire value stays selectable."""
+
+    def test_default_profile_is_dex3_and_inspire_selectable(self):
+        self.assertEqual(web.DEFAULT_HAND, "dex3")
+        l, r, src = web.HAND_PROFILES["dex3"]
+        self.assertEqual((l[0], l[1]), (0.080, 0.004))
+        self.assertEqual((r[0], r[1]), (0.080, -0.004))
+        self.assertIn("ESTIMADO", src)
+        self.assertIn("Não medido", src)                                  # page shows ESTIMADO badge
+        self.assertEqual(web.HAND_PROFILES["inspire"][0], web.HAND_CENTER_OFFSET)
+
+    def test_dex3_offset_matches_urdf_palm_and_finger_bases(self):
+        import re
+        urdf = (REPO / "assets" / "g1" / "g1_body29_hand14.urdf").read_text()
+
+        def origin(joint):
+            m = re.search(r'<joint name="%s"[^>]*>\s*<origin xyz="([^"]+)"' % joint, urdf)
+            return np.array([float(v) for v in m.group(1).split()])
+        for side, sign in (("left", 1.0), ("right", -1.0)):
+            palm = origin(f"{side}_hand_palm_joint")
+            idx = palm + origin(f"{side}_hand_index_0_joint")
+            mid = palm + origin(f"{side}_hand_middle_0_joint")
+            centre = (palm + (idx + mid) / 2.0) / 2.0
+            prof = np.array(web.HAND_PROFILES["dex3"][0 if side == "left" else 1])
+            np.testing.assert_allclose(prof, centre, atol=0.002)
+            self.assertAlmostEqual(prof[1] * sign, 0.004, places=6)
+
+
 class FakeMotor:
     def __init__(self, q):
         self.q = q

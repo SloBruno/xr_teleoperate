@@ -48,7 +48,7 @@ from teleop.utils.arm_fk import EE_OFFSET, FRAME_DESC  # noqa: E402  (pinocchio 
 
 PAGE_PATH = os.path.join(TOOLS, "arm_path_web.html")
 JS_PATH = os.path.join(TOOLS, "path_plot.js")
-DEFAULT_DIR = os.path.expanduser("~/.local/state/xr_teleoperate_inspire/arm_paths")
+DEFAULT_DIR = os.path.expanduser("~/.local/state/xr_teleoperate/arm_paths")  # Dex3 line state dir
 DEFAULT_PORT = 8095
 DEFAULT_IFACE = "enP8p1s0"
 TOPIC = "rt/lowstate"
@@ -65,6 +65,25 @@ HAND_CENTER_OFFSET = (0.110, 0.0, 0.0)
 HAND_CENTER_SOURCE = ("derivado do URDF oficial Unitree g1_29dof_rev_1_0_with_inspire_hand_DFQ "
                       "(montagem +0.0415 m x; articulações MCP dos dedos +0.178 m x; centro = ponto médio "
                       "~+0.110 m x; CoM da base da mão +0.108 m x). Não medido fisicamente.")
+# Centre of the Unitree Dex3-1 (3 fingers) hand, per side, in
+# {left,right}_wrist_yaw_link. Derived from this repo's assets/g1/g1_body29_hand14.urdf
+# (the IK model, Dex3): {left,right}_hand_palm_joint at (+0.0415, +-0.003, 0);
+# index_0/middle_0 finger base joints at palm + (0.0777, +-0.0016, +-0.0285)
+# -> wrist (+0.1192, +-0.0046, +-0.0285); thumb_0 at palm + 0.0255 x. Palm
+# centre ~ midpoint between the mount and the finger-base line, z midway
+# between index and middle: (+0.080, +-0.004, 0). The palm-link CoM sits at
+# +0.104 m x. ESTIMATED from the URDF; not measured on the physical robot.
+DEX3_HAND_CENTER_LEFT = (0.080, 0.004, 0.0)
+DEX3_HAND_CENTER_RIGHT = (0.080, -0.004, 0.0)
+DEX3_HAND_CENTER_SOURCE = ("Dex3-1 (3 dedos): ESTIMADO do URDF assets/g1/g1_body29_hand14.urdf (palma montada "
+                           "+0.0415 m x; base dos dedos indicador/médio +0.119 m x; centro = ponto médio ~+0.080 m x, "
+                           "y ±0.004 m; CoM da palma +0.104 m x). Não medido fisicamente.")
+# Hand profiles selectable with --hand (default dex3 on this Dex3 line).
+HAND_PROFILES = {
+    "dex3": (DEX3_HAND_CENTER_LEFT, DEX3_HAND_CENTER_RIGHT, DEX3_HAND_CENTER_SOURCE),
+    "inspire": (HAND_CENTER_OFFSET, HAND_CENTER_OFFSET, "Inspire RH56DFQ: " + HAND_CENTER_SOURCE),
+}
+DEFAULT_HAND = "dex3"
 CSV_COLUMNS = (["t_rel_s", "t_utc", "x_raw", "y_raw", "z_raw", "x_filt", "y_filt", "z_filt",
                 "dist_cum_raw_m", "dist_cum_filt_m", "lowstate_age_s"] + [f"q_{j}" for j in JOINTS])
 _TASK_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z_[A-Za-z0-9._-]+$")
@@ -701,8 +720,10 @@ def main(argv=None):
     ap.add_argument("--domain", type=int, default=0)
     ap.add_argument("--rate", type=float, default=100.0, help="taxa de amostragem/FK (Hz)")
     ap.add_argument("--point", choices=("wrist", "hand"), default="wrist", help="ponto medido inicial")
+    ap.add_argument("--hand", choices=sorted(HAND_PROFILES), default=os.environ.get("ARM_PATH_HAND", DEFAULT_HAND),
+                    help="mão montada para o 'centro da mão' (padrão dex3 nesta linha; inspire = 0.110,0,0)")
     ap.add_argument("--hand-center-offset", type=parse_xyz, default=None,
-                    help="x,y,z (m) no frame wrist_yaw_link, ambas as mãos (padrão Inspire DFQ: 0.110,0,0)")
+                    help="x,y,z (m) no frame wrist_yaw_link, ambas as mãos (sobrepõe --hand)")
     ap.add_argument("--hand-center-offset-left", type=parse_xyz, default=None)
     ap.add_argument("--hand-center-offset-right", type=parse_xyz, default=None)
     ap.add_argument("--filter-window-s", type=float, default=apm.DEFAULT_WINDOW_S)
@@ -714,10 +735,12 @@ def main(argv=None):
     args = ap.parse_args(argv)
     token = os.environ.get("ARM_PATH_TOKEN") or None
 
-    hl = args.hand_center_offset_left or args.hand_center_offset or HAND_CENTER_OFFSET
-    hr = args.hand_center_offset_right or args.hand_center_offset or HAND_CENTER_OFFSET
+    prof_l, prof_r, prof_src = HAND_PROFILES[args.hand]
+    hl = args.hand_center_offset_left or args.hand_center_offset or prof_l
+    hr = args.hand_center_offset_right or args.hand_center_offset or prof_r
     custom = any((args.hand_center_offset, args.hand_center_offset_left, args.hand_center_offset_right))
-    point_cfg = PointConfig(args.point, hl, hr, "definido pelo usuário (--hand-center-offset)" if custom else HAND_CENTER_SOURCE)
+    point_cfg = PointConfig(args.point, hl, hr, "definido pelo usuário (--hand-center-offset)" if custom else prof_src)
+    print(f"[arm_path] centro da mão: perfil {args.hand} E {hl} D {hr} (m, wrist_yaw_link)", flush=True)
     points_fn = build_points_fn()
     print("[arm_path] FK G1_29 carregada (mesmo modelo/frames do IK).", flush=True)
     qstate = QState()

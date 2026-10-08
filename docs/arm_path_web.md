@@ -5,6 +5,14 @@ punho (ou do centro da mão) de **cada braço** do G1 durante uma tarefa que voc
 inicia/para na página, desenha o caminho e mede o **comprimento percorrido**
 por braço. Os dados são salvos **separados por braço**.
 
+> **Linha Dex3:** rodar no env `tv` (`/home/unitree/miniconda3/envs/tv/bin/python`),
+> tarefas em `~/.local/state/xr_teleoperate/arm_paths/`. O "centro da mão"
+> agora tem perfil selecionável `--hand dex3|inspire` (padrão **dex3**,
+> env `ARM_PATH_HAND`): Dex3-1 = **(0,080; ±0,004; 0) m** no `wrist_yaw_link`,
+> **ESTIMADO** do URDF `assets/g1/g1_body29_hand14.urdf` (palma +0,0415 m x;
+> base dos dedos indicador/médio +0,119 m x; centro = ponto médio; não medido).
+> `--hand inspire` mantém o valor (0,110; 0; 0) descrito abaixo.
+
 ## Iniciar
 
 No robô (env `tv_inspire`, com ou sem teleop rodando — Inspire ou Dex3):
