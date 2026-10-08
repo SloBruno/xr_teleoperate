@@ -12,7 +12,7 @@ echo "$*" >>"$FAKE_LOG"
 case "$*" in
   *--detect*) echo "head 243122072230 both"; exit 0;;
   "-s - "*) exit 0;;
-  *teleop_hand_and_arm*) echo "XR_POSE_STREAM=${XR_POSE_STREAM:-unset}" >>"$FAKE_LOG"; exit 0;;
+  *teleop_hand_and_arm*) echo "XR_POSE_STREAM=${XR_POSE_STREAM:-unset}" >>"$FAKE_LOG"; echo "LEAN=${G1_TORSO_LEAN:-unset} MAX=${G1_TORSO_LEAN_MAX_DEG:-unset} RATE=${G1_TORSO_LEAN_RATE_DPS:-unset}" >>"$FAKE_LOG"; exit 0;;
   *pose_compare_web.py*) echo "web-started $$" >>"$FAKE_LOG"; trap 'echo web-stopped >>"$FAKE_LOG"; exit 0' INT TERM; while :; do sleep 0.1; done;;
 esac
 '''
@@ -95,6 +95,39 @@ class InspireLauncherTest(unittest.TestCase):
         lines = log.splitlines()
         self.assertLess(lines.index(next(l for l in lines if "web-started" in l)),
                         lines.index(next(l for l in lines if "teleop_hand_and_arm" in l)))
+
+    def _clean_lean_env(self):
+        return {k: "" for k in os.environ if k.startswith("G1_TORSO_LEAN")}
+
+    def test_torso_lean_off_by_default(self):
+        r, log = self._run(**self._clean_lean_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Inclinação do tronco: DESLIGADA", r.stdout)
+        self.assertIn("LEAN=0 ", log)
+
+    def test_torso_lean_on_passes_env_and_prints_state(self):
+        env = self._clean_lean_env()
+        env.update(G1_TORSO_LEAN="1", G1_TORSO_LEAN_MAX_DEG="3", G1_TORSO_LEAN_RATE_DPS="10")
+        r, log = self._run(**env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Inclinação do tronco: LIGADA, máx 3°", r.stdout)
+        self.assertIn("LEAN=1 MAX=3 RATE=10", log)
+
+    def test_torso_lean_max_above_10_rejected_before_anything_starts(self):
+        for bad in ("10.5", "20", "0", "abc"):
+            env = self._clean_lean_env()
+            env.update(G1_TORSO_LEAN="1", G1_TORSO_LEAN_MAX_DEG=bad)
+            r, log = self._run(**env)
+            self.assertEqual(r.returncode, 2, bad)
+            self.assertIn("rejeitado", r.stderr)
+            self.assertNotIn("teleop_hand_and_arm", log)
+            self.assertNotIn("--detect", log)
+
+    def test_torso_lean_requires_motion(self):
+        env = self._clean_lean_env()
+        env.update(G1_TORSO_LEAN="1", G1_MOTION="0")
+        r, _ = self._run(**env)
+        self.assertEqual(r.returncode, 2)
 
 
 if __name__ == "__main__":

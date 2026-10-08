@@ -57,6 +57,7 @@
   <span class="pill" id="p-rate"><span class="dot"></span><span>— Hz</span></span>
   <span class="pill" id="p-age"><span class="dot"></span><span>idade —</span></span>
   <span class="pill" id="p-fk"><span class="dot"></span><span>FK</span></span>
+  <span class="pill" id="p-lean" title="Inclinação do tronco (G1_TORSO_LEAN): pedida = alvo da cabeça, cmd = comando suavizado, medida = cintura medida relativa ao neutro do r. Graus; pitch + = frente, roll + = direita."><span class="dot"></span><span>tronco —</span></span>
   <span class="muted" id="err"></span>
 </header>
 <main>
@@ -188,12 +189,24 @@ async function poll() {
     pill("p-age", age === null ? "bad" : (age < 0.5 ? "ok" : (age < 2 ? "warn" : "bad")),
          age === null ? "sem pacotes do teleop" : "último pacote " + (age < 10 ? (age * 1000).toFixed(0) + " ms" : age.toFixed(0) + " s"));
     pill("p-fk", s.fk ? (s.fk_errors ? "warn" : "ok") : "bad", s.fk ? "FK ok" + (s.lost ? " · perdidos " + s.lost : "") : "FK indisponível");
+    showLean(s.lean);
     showRec(j.record);
     document.getElementById("err").textContent = "";
   } catch (e) {
     pill("p-conn", "bad", "sem conexão"); document.getElementById("err").textContent = String(e);
   }
   setTimeout(poll, 100);
+}
+
+function showLean(L) {
+  if (!L) { pill("p-lean", "", "tronco: sem dados (desligado ou teleop antigo)"); return; }
+  const f = (v) => (v === null || v === undefined) ? "—" : (v >= 0 ? "+" : "") + v.toFixed(1) + "°";
+  const two = (a) => a ? "P " + f(a[0]) + " R " + f(a[1]) : "—";
+  let cls = L.active ? "ok" : "warn";
+  if (L.active && L.meas_deg && L.cmd_deg &&
+      (Math.abs(L.meas_deg[0] - L.cmd_deg[0]) > 3 || Math.abs(L.meas_deg[1] - L.cmd_deg[1]) > 3)) cls = "warn";
+  pill("p-lean", cls, "tronco " + (L.active ? "" : "(inativo) ") + "pedida " + two(L.target_deg) +
+       " · cmd " + two(L.cmd_deg) + " · medida " + two(L.meas_deg));
 }
 
 function showRec(st) {

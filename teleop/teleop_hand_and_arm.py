@@ -29,6 +29,7 @@ from teleop.utils.xr_video_plane import (
 )
 from teleop.utils.session_shutdown import install_shutdown_signal_handlers, run_session_shutdown
 from teleop.utils.pose_stream import PoseStreamSender
+from teleop.utils import torso_lean
 
 # Historical dev-branch XR plane (TeleVuer 41e9182 defaults used on this line).
 DEV_VIDEO_PLANE_HEIGHT_M = 3.0
@@ -130,6 +131,17 @@ if __name__ == '__main__':
     if pose_stream is not None:
         logger_mp.info(f"[pose_stream] UDP -> {pose_stream.addr[0]}:{pose_stream.addr[1]} @ {1/pose_stream.min_period if pose_stream.min_period else 0:.0f} Hz")
     install_shutdown_signal_handlers()
+    # Opt-in torso lean from the operator's head displacement (G1_TORSO_LEAN=1,
+    # docs/torso_lean.md). None = OFF: the waist (motors 12-14) keeps exactly
+    # the previous arm_sdk behaviour. Any invalid env value keeps it OFF.
+    lean_cfg = None
+    lean_session = None     # TorsoLeanSession after r, torso_lean.REFUSED, or None
+    try:
+        lean_cfg = torso_lean.config_from_env(os.environ)
+    except torso_lean.TorsoLeanConfigError as e:
+        logger_mp.error(f"[torso_lean] configuração rejeitada ({e}); inclinação do tronco DESLIGADA")
+        lean_cfg = None
+    logger_mp.info(lean_cfg.describe() if lean_cfg is not None else "Inclinação do tronco: DESLIGADA")
 
     try:
         # setup dds communication domains id
@@ -194,6 +206,10 @@ if __name__ == '__main__':
             motion_switcher = MotionSwitcher()
             status, result = motion_switcher.Enter_Debug_Mode()
             logger_mp.info(f"Enter debug mode: {'Success' if status == 0 else 'Failed'}")
+
+        if lean_cfg is not None and (args.arm != "G1_29" or not args.motion):
+            logger_mp.error("[torso_lean] requer --arm G1_29 e --motion (rt/arm_sdk); inclinação DESLIGADA")
+            lean_cfg = None
 
         # arm
         if args.arm == "G1_29":
@@ -405,16 +421,32 @@ if __name__ == '__main__':
             current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()
             current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
 
+            # torso lean (opt-in): head displacement -> waist command; wrist
+            # targets re-expressed in the leaning torso frame (IK model frame).
+            ik_left_target, ik_right_target = tele_data.left_wrist_pose, tele_data.right_wrist_pose
+            if lean_cfg is not None and lean_session is None:
+                lean_session = torso_lean.TorsoLeanSession.try_engage(
+                    lean_cfg, arm_ctrl, tele_data.head_pose, time.monotonic(), log=logger_mp)
+            if isinstance(lean_session, torso_lean.TorsoLeanSession):
+                waist_cmd = lean_session.step(tele_data.head_pose, time.monotonic())
+                R_torso = lean_session.torso_rotation(waist_cmd)
+                ik_left_target = torso_lean.retarget_to_torso(ik_left_target, R_torso)
+                ik_right_target = torso_lean.retarget_to_torso(ik_right_target, R_torso)
+                arm_ik.set_torso_rotation(R_torso)
+
             # solve ik using motor data and wrist pose, then use ik results to control arms.
             time_ik_start = time.time()
-            sol_q, sol_tauff  = arm_ik.solve_ik(tele_data.left_wrist_pose, tele_data.right_wrist_pose, current_lr_arm_q, current_lr_arm_dq)
+            sol_q, sol_tauff  = arm_ik.solve_ik(ik_left_target, ik_right_target, current_lr_arm_q, current_lr_arm_dq)
             time_ik_end = time.time()
             logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
             if STOP:
                 break  # q arrived during IK: no new target; graceful shutdown owns the arms
             arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
+            if isinstance(lean_session, torso_lean.TorsoLeanSession):
+                arm_ctrl.set_waist_target(waist_cmd)
             if pose_stream is not None:
-                pose_stream.maybe_send(True, tele_data.left_wrist_pose, tele_data.right_wrist_pose, sol_q, current_lr_arm_q)
+                lean_tm = torso_lean.stream_telemetry(lean_session, arm_ctrl)
+                pose_stream.maybe_send(True, ik_left_target, ik_right_target, sol_q, current_lr_arm_q, lean=lean_tm)
 
             # record data
             if args.record:
@@ -577,6 +609,13 @@ if __name__ == '__main__':
         # zero pose + rt/arm_sdk weight ramp 1->0 + writer deactivated ->
         # TeleVuer closed without orphan -> remaining children reaped. The
         # RS-485 driver is stopped by the launcher after this process exits.
+        try:
+            if isinstance(lean_session, torso_lean.TorsoLeanSession) and arm_ik is not None:
+                # the waist returns to its neutral during the shutdown: the arm
+                # feed-forward uses the neutral (upright) gravity again.
+                arm_ik.set_torso_rotation(np.eye(3))
+        except BaseException as e:
+            logger_mp.error(f"[torso_lean] reset da gravidade do IK falhou: {e!r}")
         try:
             run_session_shutdown(arm_kind=args.arm, arm_ctrl=arm_ctrl, arm_ik=arm_ik,
                                  hand_ctrl=hand_ctrl, tv_wrapper=None, log=logger_mp, reap=False)

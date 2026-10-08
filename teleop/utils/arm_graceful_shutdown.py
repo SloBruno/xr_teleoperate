@@ -10,6 +10,13 @@ Contract (terminal ``q`` / right-controller ``B`` / Ctrl+C / exception):
    writer gates (finite/shape) and publication receipts still apply.
 3. Wait (bounded) for measured arrival within ``arrival_tolerance``.
 4. Open Dex3 and stop its writer (via the ``open_hands`` callback).
+4b. Torso lean (only if the controller's waist command was configured at
+   ``r``, see teleop/utils/torso_lean.py): the waist target is set back to the
+   neutral captured at ``r`` at the START of the arm return (the writer slews
+   it at the configured rate limit, concurrently with the arms), and the
+   procedure waits (bounded) until the WRITTEN waist command equals the
+   neutral BEFORE the authority weight ramp. With the feature off nothing in
+   this step runs and the sequence is byte-for-byte the previous one.
 5. Ramp the ``rt/arm_sdk`` authority weight (kNotUsedJoint0.q) linearly 1 -> 0
    so the Unitree motion controller takes the arms back smoothly, confirm the
    writer actually published weight 0, then deactivate the writer.
@@ -39,6 +46,9 @@ DEFAULT_RELEASE_DT = 0.02               # s
 DEFAULT_RELEASE_CONFIRM_TIMEOUT = 0.5   # s to observe a published weight-0 frame
 DEFAULT_STATE_MAX_AGE = 0.25            # s
 DEFAULT_WRITER_MAX_AGE = 0.25           # s since the last successful arm write
+DEFAULT_WAIST_NEUTRAL_TOL = 1e-4        # rad, written waist command == neutral
+DEFAULT_WAIST_MEASURED_TOL = 0.05       # rad, measured waist near neutral (logged)
+DEFAULT_WAIST_EXTRA_TIMEOUT = 1.5       # s on top of distance / rate
 SMOOTHSTEP_PEAK_VELOCITY_FACTOR = 1.5   # max d/ds of 3s^2 - 2s^3
 
 
@@ -81,6 +91,8 @@ class GracefulShutdownResult:
     return_skipped_reason: str | None = None
     arrival_confirmed: bool = False
     hands_opened: bool = False
+    waist_return_requested: bool = False
+    waist_neutral_reached: bool = False
     weight_released: bool = False
     release_confirmed: bool = False
     deactivated: bool = False
@@ -110,6 +122,8 @@ def run_graceful_arm_shutdown(
     release_confirm_timeout=DEFAULT_RELEASE_CONFIRM_TIMEOUT,
     state_max_age=DEFAULT_STATE_MAX_AGE,
     writer_max_age=DEFAULT_WRITER_MAX_AGE,
+    waist_neutral_tol=DEFAULT_WAIST_NEUTRAL_TOL,
+    waist_extra_timeout=DEFAULT_WAIST_EXTRA_TIMEOUT,
 ):
     """Run the graceful shutdown once; never raises, always ends deactivated.
 
@@ -172,6 +186,27 @@ def run_graceful_arm_shutdown(
             if tau is not None:
                 return tau
         return fallback
+
+    def waist_status():
+        getter = getattr(arm_ctrl, "get_waist_command", None)
+        if getter is None:
+            return None
+        try:
+            status = getter()
+        except BaseException:
+            return None
+        return status if isinstance(status, dict) and status.get("enabled") else None
+
+    # ---- Phase 0: torso lean -> neutral (only when the feature took the waist)
+    waist0 = waist_status()
+    if waist0 is not None:
+        try:
+            if arm_ctrl.waist_return_to_neutral():
+                result.waist_return_requested = True
+                event("shutdown_waist_return_started",
+                      max_distance_rad=float(np.max(np.abs(np.asarray(waist0["written"]) - np.asarray(waist0["neutral"])))))
+        except BaseException as error:
+            event("shutdown_error", phase="waist_return", error=type(error).__name__)
 
     last_tau = np.zeros(size)
     try:
@@ -240,6 +275,37 @@ def run_graceful_arm_shutdown(
                 event("shutdown_return_cancelled", error=type(error).__name__)
     except BaseException as error:
         event("shutdown_error", phase="return", error=type(error).__name__)
+
+    # ---- Phase 1b: waist command back at neutral before releasing authority
+    if result.waist_return_requested:
+        try:
+            rate = float(waist0.get("max_rate") or 0.0)
+            dist = float(np.max(np.abs(np.asarray(waist0["written"]) - np.asarray(waist0["neutral"]))))
+            timeout = (dist / rate if rate > 0 else 0.0) + float(waist_extra_timeout)
+            deadline = clock() + timeout
+            while True:
+                status = waist_status()
+                if status is not None and np.all(np.abs(np.asarray(status["written"]) - np.asarray(status["neutral"]))
+                                                 <= waist_neutral_tol):
+                    result.waist_neutral_reached = True
+                    break
+                if clock() >= deadline or not writer_alive():
+                    break
+                sleep(waypoint_dt)
+            measured_ok = None
+            snap = getattr(arm_ctrl, "get_waist_q_snapshot", None)
+            if snap is not None and status is not None:
+                try:
+                    wq, wage = snap()
+                    if wq is not None and np.isfinite(wage) and wage <= state_max_age:
+                        measured_ok = bool(np.all(np.abs(np.asarray(wq, float) - np.asarray(status["neutral"]))
+                                                  <= DEFAULT_WAIST_MEASURED_TOL))
+                except BaseException:
+                    measured_ok = None
+            event("shutdown_waist_return_finished", neutral_reached=result.waist_neutral_reached,
+                  measured_near_neutral=measured_ok)
+        except BaseException as error:
+            event("shutdown_error", phase="waist_wait", error=type(error).__name__)
 
     # ---- Phase 2: open Dex3 and stop its writer -------------------------
     if open_hands is not None:

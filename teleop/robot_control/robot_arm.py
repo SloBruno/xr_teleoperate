@@ -155,6 +155,18 @@ class G1_29_ArmController:
         self._motion_authority_weight = 1.0
         self._last_publish_monotonic = None
         self._last_published_weight = None
+        # Optional torso lean (teleop/utils/torso_lean.py, G1_TORSO_LEAN=1).
+        # Until configure_waist_command() is called the writer NEVER touches
+        # motor_cmd[12..14]: they keep the constructor values above (q =
+        # measured at construction, kp/kd = kp_high/kd_high, dq = tau = 0).
+        self._waist_enabled = False
+        self._waist_target = None
+        self._waist_written = None
+        self._waist_lower = None
+        self._waist_upper = None
+        self._waist_max_step = 0.0
+        self._waist_max_rate = None
+        self._waist_neutral = None
         self.output_enabled = threading.Event()
         self.output_enabled.set()
         self.publish_thread.daemon = True
@@ -201,6 +213,13 @@ class G1_29_ArmController:
                 self.msg.motor_cmd[id].dq = 0
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]   
 
+            waist_q = self._next_waist_frame()
+            if waist_q is not None:
+                for idx, id in enumerate(G1_29_WAIST_INDICES):
+                    self.msg.motor_cmd[id].q = float(waist_q[idx])
+                    self.msg.motor_cmd[id].dq = 0
+                    self.msg.motor_cmd[id].tau = 0
+
             if not self.output_enabled.is_set():
                 break  # deactivated while building the frame: write nothing
             self.msg.crc = self.crc.Crc(self.msg)
@@ -208,6 +227,8 @@ class G1_29_ArmController:
             with self.ctrl_lock:
                 self._last_publish_monotonic = time.monotonic()
                 self._last_published_weight = motion_weight if self.motion_mode else None
+                if waist_q is not None:
+                    self._waist_written = waist_q
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -233,6 +254,89 @@ class G1_29_ArmController:
             raise ValueError("motion authority weight must be finite")
         with self.ctrl_lock:
             self._motion_authority_weight = min(1.0, max(0.0, weight))
+
+    # ---- optional waist (torso lean) command, motors 12 yaw, 13 roll, 14 pitch
+    def _next_waist_frame(self):
+        '''Writer side: next waist q to write, or None (= do not touch 12..14).
+
+        Final authority before the DDS write: the target is clamped to the
+        configured box (neutral +- lean limit, inside the URDF limits) and the
+        step from the last WRITTEN value is bounded by max_rate * control_dt.
+        '''
+        with self.ctrl_lock:
+            if not getattr(self, "_waist_enabled", False):
+                return None
+            target = self._waist_target
+            last = self._waist_written
+            lower, upper, max_step = self._waist_lower, self._waist_upper, self._waist_max_step
+        step = np.clip(np.clip(target, lower, upper) - last, -max_step, max_step)
+        q = np.clip(last + step, lower, upper)
+        if q.shape != (3,) or not np.all(np.isfinite(q)):
+            return last.copy()
+        return q
+
+    def configure_waist_command(self, lower, upper, max_rate, initial_target):
+        '''Take the waist (12..14) from the q currently in the message.
+
+        kp/kd/mode of 12..14 are NOT changed (they keep the values written since
+        construction, see docs/torso_lean.md). Raises ValueError on bad input.
+        '''
+        lower = np.asarray(lower, dtype=float).reshape(-1).copy()
+        upper = np.asarray(upper, dtype=float).reshape(-1).copy()
+        target = np.asarray(initial_target, dtype=float).reshape(-1).copy()
+        max_rate = float(max_rate)
+        if (lower.shape != (3,) or upper.shape != (3,) or target.shape != (3,)
+                or not np.all(np.isfinite(lower)) or not np.all(np.isfinite(upper))
+                or not np.all(np.isfinite(target)) or np.any(lower > upper)
+                or not np.isfinite(max_rate) or max_rate <= 0.0):
+            raise ValueError("invalid waist command configuration")
+        with self.ctrl_lock:
+            start = np.array([float(self.msg.motor_cmd[i].q) for i in G1_29_WAIST_INDICES])
+            self._waist_written = np.clip(start, lower, upper)
+            self._waist_lower, self._waist_upper = lower, upper
+            self._waist_max_step = max_rate * self.control_dt
+            self._waist_max_rate = max_rate
+            self._waist_neutral = np.clip(target, lower, upper)
+            self._waist_target = self._waist_neutral.copy()
+            self._waist_enabled = True
+
+    def set_waist_target(self, q):
+        '''Set the absolute waist target [yaw, roll, pitch] (rad); ignored unless configured.'''
+        q = np.asarray(q, dtype=float).reshape(-1)
+        if q.shape != (3,) or not np.all(np.isfinite(q)):
+            raise ValueError("waist target must be 3 finite values")
+        with self.ctrl_lock:
+            if self._waist_enabled:
+                self._waist_target = np.clip(q, self._waist_lower, self._waist_upper)
+
+    def waist_return_to_neutral(self):
+        '''Target = neutral captured at r (writer slews at the configured rate). False if not configured.'''
+        with self.ctrl_lock:
+            if not self._waist_enabled:
+                return False
+            self._waist_target = self._waist_neutral.copy()
+            return True
+
+    def get_waist_command(self):
+        '''Snapshot dict {enabled, target, written, neutral, max_rate}; arrays are copies.'''
+        with self.ctrl_lock:
+            if not self._waist_enabled:
+                return {"enabled": False, "target": None, "written": None, "neutral": None, "max_rate": None}
+            return {"enabled": True, "target": self._waist_target.copy(), "written": self._waist_written.copy(),
+                    "neutral": self._waist_neutral.copy(), "max_rate": self._waist_max_rate}
+
+    def get_waist_command_written(self):
+        '''Waist q currently in the outgoing message (what the servos are holding).'''
+        with self.ctrl_lock:
+            return np.array([float(self.msg.motor_cmd[i].q) for i in G1_29_WAIST_INDICES])
+
+    def get_waist_q_snapshot(self):
+        '''(measured waist q [yaw, roll, pitch], age s) from one atomic read.'''
+        lowstate, timestamp = self.lowstate_buffer.GetSnapshot()
+        if lowstate is None:
+            return None, float("inf")
+        q = np.array([lowstate.motor_state[i].q for i in G1_29_WAIST_INDICES], dtype=float)
+        return q, time.monotonic() - timestamp
 
     def get_arm_command(self):
         '''Return copies of the current arm q/tau command.'''
@@ -410,6 +514,11 @@ class G1_29_JointIndex(IntEnum):
     kNotUsedJoint3 = 32
     kNotUsedJoint4 = 33
     kNotUsedJoint5 = 34
+
+# Waist motors (yaw, roll, pitch) = G1_29_JointIndex 12, 13, 14; same order as
+# the Unitree g1_arm7_sdk_dds_example (kWaistYaw, kWaistRoll, kWaistPitch).
+G1_29_WAIST_INDICES = (G1_29_JointIndex.kWaistYaw, G1_29_JointIndex.kWaistRoll, G1_29_JointIndex.kWaistPitch)
+
 
 class G1_23_ArmController:
     def __init__(self, motion_mode = False, simulation_mode = False):

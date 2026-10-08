@@ -35,6 +35,13 @@
 #     tools/pose_compare_web.py as a child (setsid; log in $INSPIRE_STATE_DIR/pose_web.log),
 #     stopped on exit. POSE_WEB_PORT=8093  POSE_WEB_TOKEN=<opcional>
 #     XR_POSE_STREAM_HZ=50  POSE_WEB_STOP_TIMEOUT_S=5
+#
+# Torso lean (waist pitch/roll from the operator's head DISPLACEMENT, via
+# rt/arm_sdk; see docs/torso_lean.md). Default OFF:
+#   G1_TORSO_LEAN=1  turns it on (requires G1_MOTION=1). Neutral = head + waist at r.
+#   G1_TORSO_LEAN_MAX_DEG=10 (hard ceiling 10; larger values are rejected)
+#   G1_TORSO_LEAN_GAIN_DEG_PER_M=66.7 (15 cm past the deadband = 10 deg)
+#   G1_TORSO_LEAN_DEADBAND_M=0.03  G1_TORSO_LEAN_RATE_DPS=15  G1_TORSO_LEAN_ACCEL_DPS2=0 (off)
 set -euo pipefail
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -61,6 +68,29 @@ case "$G1_MOTION" in
     0) motion_args=() ;;
     *) echo "unsupported G1_MOTION='$G1_MOTION' (use 1|0)" >&2; exit 2 ;;
 esac
+# Torso lean: validated before anything starts and again in Python.
+G1_TORSO_LEAN=${G1_TORSO_LEAN:-0}
+case "$G1_TORSO_LEAN" in
+    0|"") echo "Inclinação do tronco: DESLIGADA (G1_TORSO_LEAN=1 para ligar)" ;;
+    1)
+        G1_TORSO_LEAN_MAX_DEG=${G1_TORSO_LEAN_MAX_DEG:-10}
+        if ! awk -v v="$G1_TORSO_LEAN_MAX_DEG" 'BEGIN { exit !(v ~ /^[0-9]+(\.[0-9]+)?$/ && v > 0 && v <= 10) }'; then
+            echo "G1_TORSO_LEAN_MAX_DEG='$G1_TORSO_LEAN_MAX_DEG' rejeitado (0 < máx <= 10 graus); não iniciando." >&2
+            exit 2
+        fi
+        if [[ "$G1_MOTION" != 1 ]]; then
+            echo "G1_TORSO_LEAN=1 requer G1_MOTION=1 (rt/arm_sdk); não iniciando." >&2
+            exit 2
+        fi
+        export G1_TORSO_LEAN G1_TORSO_LEAN_MAX_DEG
+        for v in G1_TORSO_LEAN_GAIN_DEG_PER_M G1_TORSO_LEAN_DEADBAND_M G1_TORSO_LEAN_RATE_DPS G1_TORSO_LEAN_ACCEL_DPS2; do
+            [[ -n "${!v:-}" ]] && export "$v"
+        done
+        echo "Inclinação do tronco: LIGADA, máx ${G1_TORSO_LEAN_MAX_DEG}° (frente/trás/lados), ganho ${G1_TORSO_LEAN_GAIN_DEG_PER_M:-66.7}°/m, zona morta ${G1_TORSO_LEAN_DEADBAND_M:-0.03} m, ${G1_TORSO_LEAN_RATE_DPS:-15}°/s; neutro = postura no r"
+        ;;
+    *) echo "unsupported G1_TORSO_LEAN='$G1_TORSO_LEAN' (use 0|1)" >&2; exit 2 ;;
+esac
+export G1_TORSO_LEAN
 
 teleimager_dir="$repo/teleop/teleimager"
 teleimager_state_dir=${TELEIMAGER_STATE_DIR:-/home/unitree/.local/state/xr_teleoperate}

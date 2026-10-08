@@ -258,6 +258,22 @@ class G1_29_ArmIK:
         zeros = np.zeros(self.reduced_robot.model.nv)
         return np.asarray(pin.rnea(self.reduced_robot.model, self.reduced_robot.data, q, zeros, zeros)).copy()
 
+    def set_torso_rotation(self, R_torso):
+        """Torso lean support (teleop/utils/torso_lean.py, docs/torso_lean.md).
+
+        The reduced model has the waist locked at 0, so its base frame is the
+        TORSO frame; the lean is handled by expressing the wrist targets in the
+        torso frame (``retarget_to_torso``). The only other effect of a leaning
+        torso on this model is the direction of gravity in the feed-forward
+        (rnea): gravity expressed in the torso frame is ``R^T g``. ``R_torso``
+        = torso rotation w.r.t. the neutral torso; identity restores the
+        default. Never touches the casadi problem (kinematics are unchanged).
+        """
+        R = np.asarray(R_torso, dtype=float).reshape(3, 3)
+        if not np.all(np.isfinite(R)) or np.max(np.abs(R.T @ R - np.eye(3))) > 1e-6:
+            raise ValueError("torso rotation must be a finite rotation matrix")
+        self.reduced_robot.model.gravity.linear = R.T @ np.array([0.0, 0.0, -9.81])
+
     def solve_ik(self, left_wrist, right_wrist, current_lr_arm_motor_q = None, current_lr_arm_motor_dq = None):
         if current_lr_arm_motor_q is not None:
             self.init_data = current_lr_arm_motor_q

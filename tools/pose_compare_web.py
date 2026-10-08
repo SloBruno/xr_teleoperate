@@ -54,6 +54,9 @@ CSV_COLUMNS = (
     + [f"robot_meas_{s}_{a}" for s in "LR" for a in "xyz"]
     + [f"q_cmd_{i}" for i in range(ps.N_ARM)]
     + [f"q_meas_{i}" for i in range(ps.N_ARM)]
+    # torso lean (XPS2 packets; empty for XPS1 / feature off). rad.
+    + ["lean_active", "lean_target_pitch", "lean_target_roll", "lean_cmd_pitch", "lean_cmd_roll"]
+    + [f"waist_{k}_{j}" for k in ("cmd", "meas") for j in ("yaw", "roll", "pitch")]
 )
 
 
@@ -185,6 +188,10 @@ class Recorder:
                     row += ["" if v is None or not math.isfinite(x) else f"{x:.6f}" for x in (v if v is not None else (NAN,) * 3)]
                 for key in ("q_cmd", "q_meas"):
                     row += ["" if not math.isfinite(x) else f"{x:.6f}" for x in r[key]]
+                row.append(int(bool(r.get("lean_active"))) if r.get("lean_target") is not None else "")
+                for key, n in (("lean_target", 2), ("lean_cmd", 2), ("waist_cmd", 3), ("waist_meas", 3)):
+                    v = r.get(key)
+                    row += [""] * n if v is None else ["" if not math.isfinite(x) else f"{x:.6f}" for x in v]
                 w.writerow(row)
         dur = (samples[-1]["t_mono"] - samples[0]["t_mono"]) if len(samples) > 1 else 0.0
         meta = {
@@ -200,7 +207,7 @@ class Recorder:
             "tracking_fraction": round(sum(r["tracking"] for r in samples) / len(samples), 4) if samples else None,
             "frame": FRAME_DESC,
             "units": {"position": "m", "q": "rad", "time": "s"},
-            "hand": "operator wrist = IK target (tele_data.*_wrist_pose translation, robot waist frame)",
+            "hand": "operator wrist = IK target (tele_data.*_wrist_pose translation, IK frame; retargeted to the torso frame when G1_TORSO_LEAN is active)",
             "robot_cmd": "FK(sol_q commanded by IK)",
             "robot_meas": "FK(lowstate q measured)",
             "q_order": "G1_29 arm: left 7 (shoulder pitch,roll,yaw, elbow, wrist roll,pitch,yaw) then right 7",
@@ -230,6 +237,33 @@ class Recorder:
     def status(self):
         with self.lock:
             return self.status_locked()
+
+
+def _deg(v):
+    try:
+        return [None if not math.isfinite(float(x)) else round(math.degrees(float(x)), 2) for x in v]
+    except Exception:
+        return None
+
+
+def _lean_status(s):
+    """Torso lean block for /api/status (degrees); None for XPS1 packets."""
+    if not s or s.get("lean_target") is None:
+        return None
+    wc, wm = s.get("waist_cmd"), s.get("waist_meas")
+    meas_rel = None
+    if wc is not None and wm is not None and s.get("lean_cmd") is not None:
+        # measured lean relative to neutral = (meas - cmd) + commanded lean
+        try:
+            meas_rel = [float(wm[2]) - float(wc[2]) + float(s["lean_cmd"][0]),
+                        float(wm[1]) - float(wc[1]) + float(s["lean_cmd"][1])]
+        except Exception:
+            meas_rel = None
+    return {"active": bool(s.get("lean_active")),
+            "target_deg": _deg(s["lean_target"]), "cmd_deg": _deg(s["lean_cmd"]),
+            "meas_deg": _deg(meas_rel) if meas_rel is not None else None,
+            "waist_cmd_deg": _deg(wc) if wc is not None else None,
+            "waist_meas_deg": _deg(wm) if wm is not None else None}
 
 
 class PoseHub:
@@ -365,7 +399,8 @@ class PoseHub:
                   "skeleton": self.skeleton is not None, "n_skel": self.n_skel, "age_s": age, "cursor": self.cursor,
                   "tracking": bool(last["tracking"]) if last else False,
                   "fresh": bool(last["fresh"]) if last else False,
-                  "t_teleop": round(last["t_mono"], 4) if last else None}
+                  "t_teleop": round(last["t_mono"], 4) if last else None,
+                  "lean": _lean_status(last)}
         st["rate_hz"] = self.rate()
         return st
 
@@ -513,7 +548,11 @@ def fake_source(port, stop, rate=50.0, host="127.0.0.1"):
         qm = q - 0.03
         L = np.eye(4); L[:3, 3] = (0.30 + 0.05 * math.sin(t), 0.20, 0.10 + 0.05 * math.cos(t))
         R = np.eye(4); R[:3, 3] = (0.30 + 0.05 * math.cos(t), -0.20, 0.10 + 0.05 * math.sin(t))
-        tx.maybe_send(t > 1.0, L, R, q, qm)
+        lp, lr = math.radians(6.0) * math.sin(0.3 * t), math.radians(3.0) * math.cos(0.3 * t)
+        wc = (0.0, lr, lp)
+        lean = {"active": t > 1.0, "target": (lp, lr), "cmd": (lp, lr), "waist_cmd": wc,
+                "waist_meas": (0.0, lr - 0.005, lp - 0.01)}
+        tx.maybe_send(t > 1.0, L, R, q, qm, lean=lean)
         time.sleep(0.5 / rate)
     tx.close()
 
