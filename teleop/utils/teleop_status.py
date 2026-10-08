@@ -163,15 +163,25 @@ def create_status_sink(
 
 
 class TeleopStatusMonitor:
-    """Emit JSON status heartbeats and controller freshness transitions."""
+    """Emit JSON status heartbeats and input freshness transitions."""
 
-    def __init__(self, emit: Callable[[str], None], interval_s: float = 1.0):
+    def __init__(self, emit: Callable[[str], None], interval_s: float = 1.0,
+                 warn: Callable[[str], None] | None = None):
         if interval_s <= 0.0:
             raise ValueError("status interval must be positive")
         self._emit = emit
+        self._warn = warn or (lambda message: None)
         self._interval_s = interval_s
         self._last_status_at: float | None = None
         self._last_controller_fresh: bool | None = None
+        self._head_unavailable_since: float | None = None
+        self._head_alerted = False
+
+    def _warn_best_effort(self, message: str) -> None:
+        try:
+            self._warn(message)
+        except BaseException:
+            pass
 
     def _emit_best_effort(self, payload: Mapping[str, object]) -> None:
         try:
@@ -192,11 +202,14 @@ class TeleopStatusMonitor:
         now: float,
         lifecycle: str,
         controller_sample_timestamp: float,
+        head_pose_sample_timestamp: float = 0.0,
+        head_pose_is_fallback: bool = True,
         motion_enabled: bool = False,
         locomotion: Sequence[float] = (0.0, 0.0, 0.0),
         cameras: Mapping[str, object] | None = None,
         dex3_pressure_timestamps: tuple[float, float] = (0.0, 0.0),
         stick: Mapping[str, object] | None = None,
+        torso_lean: Mapping[str, object] | None = None,
     ) -> dict | None:
         """Observe a control cycle and emit a heartbeat at the configured rate."""
         controller_age_ms = _age_ms(controller_sample_timestamp, now)
@@ -211,6 +224,33 @@ class TeleopStatusMonitor:
                 "age_ms": controller_age_ms,
             })
 
+        head_age_ms = _age_ms(head_pose_sample_timestamp, now)
+        head_available = not bool(head_pose_is_fallback) and head_age_ms is not None and head_age_ms <= 1000
+        if head_available:
+            if self._head_alerted:
+                self._emit_best_effort({
+                    "event": "head_pose_recovered",
+                    "age_ms": head_age_ms,
+                })
+            self._head_unavailable_since = None
+            self._head_alerted = False
+        else:
+            if self._head_unavailable_since is None:
+                self._head_unavailable_since = now
+            unavailable_s = max(0.0, now - self._head_unavailable_since)
+            if unavailable_s > 1.0 and not self._head_alerted:
+                reason = "fallback" if head_pose_is_fallback else "stale"
+                self._head_alerted = True
+                self._emit_best_effort({
+                    "event": "head_pose_unavailable",
+                    "reason": reason,
+                    "duration_ms": round(unavailable_s * 1000),
+                })
+                self._warn_best_effort(
+                    "[XR] AVISO: pose da cabeça ausente há mais de 1 s; "
+                    f"TeleVuer está usando fallback ({reason}). Inclinação do tronco não será ativada."
+                )
+
         if self._last_status_at is not None and now - self._last_status_at < self._interval_s:
             return None
         self._last_status_at = now
@@ -219,6 +259,11 @@ class TeleopStatusMonitor:
             "event": "teleop_status",
             "lifecycle": lifecycle,
             "controller": {"fresh": controller_fresh, "age_ms": controller_age_ms},
+            "head_pose": {
+                "available": head_available,
+                "fallback": bool(head_pose_is_fallback),
+                "age_ms": head_age_ms,
+            },
             "locomotion": {
                 "enabled": bool(motion_enabled),
                 "command": [float(value) for value in locomotion],
@@ -235,6 +280,8 @@ class TeleopStatusMonitor:
             for key, value in stick.items():
                 if key != "command":  # command stays the dispatched value
                     status["locomotion"][key] = value
+        if isinstance(torso_lean, Mapping):
+            status["torso_lean"] = dict(torso_lean)
         self._emit_best_effort(status)
         return status
 

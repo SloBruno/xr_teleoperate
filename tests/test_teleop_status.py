@@ -107,6 +107,42 @@ def test_status_monitor_emits_one_warning_on_controller_freshness_transition():
     assert warnings == [{"event": "controller_freshness_changed", "fresh": False, "age_ms": 400}]
 
 
+def test_head_fallback_over_one_second_is_visible_once_and_recovery_is_reported():
+    from teleop.utils.teleop_status import TeleopStatusMonitor
+
+    records, terminal_warnings = [], []
+    monitor = TeleopStatusMonitor(records.append, warn=terminal_warnings.append, interval_s=99.0)
+    common = {"lifecycle": "ready", "controller_sample_timestamp": 9.9,
+              "head_pose_sample_timestamp": 0.0, "head_pose_is_fallback": True}
+
+    monitor.observe(now=10.0, **common)
+    monitor.observe(now=11.01, **common)
+    monitor.observe(now=12.0, **common)
+    monitor.observe(now=12.1, lifecycle="ready", controller_sample_timestamp=12.0,
+                    head_pose_sample_timestamp=12.05, head_pose_is_fallback=False)
+
+    assert len(terminal_warnings) == 1
+    assert "pose da cabeça" in terminal_warnings[0] and "fallback" in terminal_warnings[0]
+    head_events = [event for event in records if event["event"].startswith("head_pose_")]
+    assert head_events == [
+        {"event": "head_pose_unavailable", "reason": "fallback", "duration_ms": 1010},
+        {"event": "head_pose_recovered", "age_ms": 50},
+    ]
+
+
+def test_status_heartbeat_includes_head_stream_health():
+    from teleop.utils.teleop_status import TeleopStatusMonitor
+
+    status = TeleopStatusMonitor(lambda payload: None).observe(
+        now=20.0, lifecycle="tracking", controller_sample_timestamp=19.9,
+        head_pose_sample_timestamp=19.95, head_pose_is_fallback=False,
+        torso_lean={"configured": True, "enabled": False, "status": "waist_watchdog_tripped"})
+
+    assert status["head_pose"] == {"available": True, "fallback": False, "age_ms": 50}
+    assert status["torso_lean"] == {
+        "configured": True, "enabled": False, "status": "waist_watchdog_tripped"}
+
+
 def test_camera_frame_is_usable_only_when_the_image_has_pixels():
     from teleop.utils.teleop_status import camera_frame_is_usable
 

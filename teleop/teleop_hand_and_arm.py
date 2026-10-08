@@ -783,7 +783,7 @@ if __name__ == '__main__':
         )
         # status_sink = AsyncStatusFileSink(status_log_path, logger_mp.warning)
         status_sink = create_status_sink(status_log_path, logger_mp.warning)
-        status_monitor = TeleopStatusMonitor(status_sink.emit)
+        status_monitor = TeleopStatusMonitor(status_sink.emit, warn=logger_mp.warning)
         pose_log_dir = os.environ.get(
             "XR_TELEOP_POSE_LOG_DIR",
             "/home/unitree/.local/state/xr_teleoperate",
@@ -881,6 +881,8 @@ if __name__ == '__main__':
                 now=time.monotonic(),
                 lifecycle="ready",
                 controller_sample_timestamp=ready_tele_data.controller_sample_timestamp,
+                head_pose_sample_timestamp=getattr(ready_tele_data, "head_pose_sample_timestamp", 0.0),
+                head_pose_is_fallback=getattr(ready_tele_data, "head_pose_is_fallback", True),
                 cameras=camera_status_for_layout(args.camera_layout, head_img, left_wrist_img),
                 dex3_pressure_timestamps=ready_pressure_timestamps,
             )
@@ -1142,11 +1144,14 @@ if __name__ == '__main__':
                 now=time.monotonic(),
                 lifecycle="tracking",
                 controller_sample_timestamp=tele_data.controller_sample_timestamp,
+                head_pose_sample_timestamp=getattr(tele_data, "head_pose_sample_timestamp", 0.0),
+                head_pose_is_fallback=getattr(tele_data, "head_pose_is_fallback", True),
                 motion_enabled=args.motion,
                 locomotion=locomotion,
                 stick=stick_log,
                 cameras=camera_status_for_layout(args.camera_layout, head_img, left_wrist_img),
                 dex3_pressure_timestamps=tracking_pressure_timestamps,
+                torso_lean=torso_lean.status_telemetry(lean_session),
             )
 
             if _diag is not None: _diag.mark("telemetry")
@@ -1175,8 +1180,20 @@ if __name__ == '__main__':
                 lean_session = torso_lean.TorsoLeanSession.try_engage(
                     lean_cfg, arm_ctrl, getattr(tele_data, "head_pose", None), time.monotonic(), log=logger_mp)
             if isinstance(lean_session, torso_lean.TorsoLeanSession):
-                waist_cmd = lean_session.step(getattr(tele_data, "head_pose", None), time.monotonic())
-                R_torso = lean_session.torso_rotation(waist_cmd)
+                lean_now = time.monotonic()
+                try:
+                    measured_waist, measured_waist_age = arm_ctrl.get_waist_q_snapshot()
+                except Exception:
+                    measured_waist, measured_waist_age = None, float("inf")
+                # Compensation is derived exclusively from measured lowstate
+                # waist feedback. The watchdog may disable new lean before this
+                # cycle's command is generated; telemetry failure never raises.
+                R_torso = lean_session.observe_measured_waist(
+                    measured_waist, measured_waist_age, lean_now)
+                waist_cmd = lean_session.step(
+                    getattr(tele_data, "head_pose", None), lean_now)
+                if R_torso is None:
+                    R_torso = np.eye(3)
                 arm_ik.set_torso_rotation(R_torso)
                 lean_transform = lambda pose, _R=R_torso: torso_lean.retarget_world_fixed_to_torso(pose, _R)
             time_ik_start = time.time()

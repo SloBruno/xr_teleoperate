@@ -288,6 +288,71 @@ def test_urdf_limits_respected_when_neutral_near_limit():
     assert q[1] <= 0.52 and q[2] >= -0.52
 
 
+def _lean_session(neutral=(0.0, 0.0, 0.0)):
+    cfg = tl.TorsoLeanConfig(max_deg=10.0, lowpass_tau_s=0.0, rate_dps=30.0)
+    tracker = tl.HeadLeanTracker(cfg)
+    assert tracker.engage(head(), 0.0)
+    command = tl.WaistLeanCommand(cfg, neutral, neutral, 0.0)
+    return tl.TorsoLeanSession(cfg, tracker, command, np.asarray(neutral, float))
+
+
+def test_ik_compensation_rotation_uses_measured_waist_never_commanded_waist():
+    session = _lean_session()
+    session.waist_cmd = np.array([0.0, -8 * DEG, 9 * DEG])
+    measured = np.array([0.0, 1.5 * DEG, -2.0 * DEG])
+
+    rotation = session.observe_measured_waist(measured, age=0.01, now=1.0)
+
+    np.testing.assert_allclose(rotation, tl.waist_rotation(measured), atol=1e-12)
+    assert not np.allclose(rotation, tl.waist_rotation(session.waist_cmd))
+
+
+def test_persistent_roll_pitch_tracking_error_trips_watchdog_and_commands_neutral():
+    logs = []
+    session = _lean_session()
+    session.log = types.SimpleNamespace(warning=logs.append)
+    session.waist_cmd = np.array([0.0, 4 * DEG, -4 * DEG])
+    session.command.cmd = session.waist_cmd.copy()
+    session.command.last_t = 1.0
+    measured = np.zeros(3)
+
+    assert session.observe_measured_waist(measured, age=0.01, now=1.0) is not None
+    assert session.observe_measured_waist(measured, age=0.01, now=1.49) is not None
+    assert session.observe_measured_waist(measured, age=0.01, now=1.51) is not None
+
+    assert session.watchdog_tripped is True
+    assert session.enabled is False
+    before = session.waist_cmd.copy()
+    after = session.step(head(pivot=(0.3, 0.0, 1.6)), 1.61)
+    assert np.all(np.abs(after[1:]) < np.abs(before[1:]))
+    assert session.tracker.target == (0.0, 0.0)
+    assert len(logs) == 1 and ">2" in logs[0] and "0,5" in logs[0]
+
+
+def test_invalid_or_stale_waist_telemetry_fails_neutral_without_raising():
+    session = _lean_session()
+    session.waist_cmd = np.array([0.0, 3 * DEG, 3 * DEG])
+
+    assert session.observe_measured_waist(None, age=float("inf"), now=1.0) is None
+    assert session.observe_measured_waist(np.full(3, np.nan), age=0.0, now=1.1) is None
+    assert session.observe_measured_waist(np.zeros(3), age=1.0, now=1.2) is None
+    assert session.enabled is False
+    assert session.telemetry()["status"] == "waist_telemetry_lost"
+
+
+def test_status_telemetry_reports_watchdog_and_measured_compensation_source():
+    session = _lean_session()
+    measured = np.array([0.0, 1 * DEG, -1 * DEG])
+    session.observe_measured_waist(measured, age=0.02, now=1.0)
+
+    status = tl.status_telemetry(session)
+
+    assert status["configured"] is True and status["enabled"] is True
+    assert status["watchdog_tripped"] is False
+    assert status["compensation_source"] == "measured_waist"
+    assert status["waist_measured"] == pytest.approx(measured.tolist())
+
+
 # ------------------------------------------------------------ env config
 def test_env_default_off_and_values():
     assert tl.config_from_env({}) is None

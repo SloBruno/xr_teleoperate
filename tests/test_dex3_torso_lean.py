@@ -150,7 +150,8 @@ W_RIGHT = np.eye(4)
 W_RIGHT[:3, 3] = (0.25, -0.20, 0.10)
 
 
-def _run_dex3(monkeypatch, env, *, keys=("r", "q"), cycles_before_q=30, head_fn=None):
+def _run_dex3(monkeypatch, env, *, keys=("r", "q"), cycles_before_q=30, head_fn=None,
+              waist_follows=True):
     calls = []
     state = {"ik_targets": [], "gravity": [], "waist_targets": [], "arm_cmds": 0}
     callbacks = []
@@ -231,6 +232,8 @@ def _run_dex3(monkeypatch, env, *, keys=("r", "q"), cycles_before_q=30, head_fn=
         def set_waist_target(self, q):
             calls.append("waist_target")
             self.waist_target = np.array(q)
+            if waist_follows:
+                self.waist_held = self.waist_target.copy()
             state["waist_targets"].append(np.array(q))
 
         def get_waist_command(self):
@@ -308,6 +311,7 @@ def _run_dex3(monkeypatch, env, *, keys=("r", "q"), cycles_before_q=30, head_fn=
                 head_pose=hp, left_wrist_pose=W_LEFT.copy(), right_wrist_pose=W_RIGHT.copy(),
                 left_hand_pos=np.zeros((25, 3)), right_hand_pos=np.zeros((25, 3)),
                 controller_sample_timestamp=time.monotonic(),
+                head_pose_sample_timestamp=time.monotonic(), head_pose_is_fallback=False,
                 left_ctrl_triggerValue=0.0, right_ctrl_triggerValue=0.0,
                 left_ctrl_squeezeValue=0.0, right_ctrl_squeezeValue=0.0,
                 left_ctrl_thumbstickValue=np.zeros(2), right_ctrl_thumbstickValue=np.zeros(2),
@@ -343,7 +347,8 @@ def _run_dex3(monkeypatch, env, *, keys=("r", "q"), cycles_before_q=30, head_fn=
             calls.append("ipc_stop")
 
     logger = types.SimpleNamespace(debug=lambda *a: None, info=lambda *a: calls.append(("info", a[0])),
-                                   warning=lambda *a: None, error=lambda *a: calls.append(("error", a[0])))
+                                   warning=lambda *a: calls.append(("warning", a[0])),
+                                   error=lambda *a: calls.append(("error", a[0])))
     def loco(**kw):
         return types.SimpleNamespace(
             read_fsm_id=lambda timeout=0.3: 500, set_speed_mode=lambda m: 0, set_balance_mode=lambda m: 0,
@@ -416,7 +421,7 @@ def _seq(calls):
     """Call sequence without logging and per-cycle commands (stable across runs)."""
     out = []
     for c in calls:
-        if isinstance(c, tuple) and c[0] in ("info", "error"):
+        if isinstance(c, tuple) and c[0] in ("info", "warning", "error"):
             continue
         if c == "cmd" and out and out[-1] == "cmd":
             continue
@@ -473,6 +478,23 @@ def test_dex3_feature_on_pitch_roll_only_yaw_fixed_and_neutral_before_weight_ram
     np.testing.assert_allclose(state["gravity"][-1], np.eye(3))
     # the IK got torso-frame targets once leaning
     assert not np.allclose(state["ik_targets"][-1][0], W_LEFT)
+
+
+def test_nonfollowing_measured_waist_trips_watchdog_and_ik_never_uses_commanded_lean(monkeypatch):
+    calls, state = _run_dex3(
+        monkeypatch, {"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "3"},
+        cycles_before_q=75, waist_follows=False,
+        head_fn=lambda n: head(pivot=(min(max(n - 8, 0) * 0.01, 0.20), 0.0, 1.6)))
+
+    warnings = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "warning"]
+    assert any("cintura não acompanhou" in message for message in warnings)
+    # Measured waist remained neutral, so compensation/gravity must remain
+    # identity even while the commanded target briefly leaned.
+    assert state["gravity"] and all(np.allclose(R, np.eye(3)) for R in state["gravity"])
+    assert state["ik_targets"] and all(np.allclose(pair[0], W_LEFT) for pair in state["ik_targets"])
+    targets = np.asarray(state["waist_targets"])
+    assert np.max(np.abs(targets[:, 1:] - np.array([0.01, -0.02]))) > 0.2 * DEG
+    np.testing.assert_allclose(targets[-1], [0.0, 0.01, -0.02], atol=0.2 * DEG)
 
 
 def test_dex3_feature_rejects_max_above_10_and_stays_off(monkeypatch):

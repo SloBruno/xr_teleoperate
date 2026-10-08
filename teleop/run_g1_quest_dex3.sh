@@ -84,6 +84,13 @@ POSE_WEB_STOP_TIMEOUT_S=${POSE_WEB_STOP_TIMEOUT_S:-5}
 
 teleimager_dir="$repo/teleop/teleimager"
 teleimager_state_dir=${TELEIMAGER_STATE_DIR:-/home/unitree/.local/state/xr_teleoperate}
+mkdir -p "$teleimager_state_dir"
+launcher_utc=$(date -u +%Y%m%dT%H%M%SZ)
+launcher_log="$teleimager_state_dir/launcher-${launcher_utc}.log"
+# Duplicate stdout/stderr to an append-only operator log while leaving stdin
+# attached to the terminal: teleop_hand_and_arm.py must still receive r/q.
+exec > >(tee -a "$launcher_log") 2> >(tee -a "$launcher_log" >&2)
+echo "Launcher log: $launcher_log"
 teleimager_pid_file="$teleimager_state_dir/teleimager.pid"
 teleimager_log="$teleimager_state_dir/teleimager.log"
 teleimager_lock="$teleimager_state_dir/teleimager.lock"

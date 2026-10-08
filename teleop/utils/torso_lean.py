@@ -57,6 +57,9 @@ DEFAULT_JUMP_YAW_DEG = 45.0
 # Handover at r: measured waist must be within this of the commanded waist
 # (the arm_sdk writer already holds 12-14 at the constructor-time position).
 HANDOVER_TOL_RAD = 0.05
+WAIST_TRACKING_ERROR_RAD = 2.0 * DEG
+WAIST_TRACKING_ERROR_DURATION_S = 0.5
+WAIST_TELEMETRY_MAX_AGE_S = 0.25
 
 # URDF waist limits (g1_body29_hand14.urdf): yaw +-2.618, roll/pitch +-0.52.
 URDF_WAIST_LOWER = np.array([-2.618, -0.52, -0.52])
@@ -430,8 +433,13 @@ class TorsoLeanSession:
         self.neutral_measured = neutral_measured
         self.log = log
         self.waist_cmd = command.cmd.copy()
+        self.measured_waist = np.asarray(neutral_measured, dtype=float).reshape(3).copy()
         self._R_neutral_T = waist_rotation(command.neutral).T
         self._jumps_logged = 0
+        self.enabled = True
+        self.watchdog_tripped = False
+        self._tracking_error_since = None
+        self._disable_logged = False
 
     @classmethod
     def try_engage(cls, cfg, arm_ctrl, head_pose, now, log=None):
@@ -477,9 +485,64 @@ class TorsoLeanSession:
                      f"yaw do operador {tracker.yaw0 / DEG:.0f}°, roll/pitch ±{cfg.max_deg:g}°, {cfg.rate_dps:g}°/s")
         return cls(cfg, tracker, command, meas, log)
 
+    def _disable(self, status, message):
+        self.enabled = False
+        self.tracker.target = (0.0, 0.0)
+        self.tracker.status = status
+        if self.log is not None and not self._disable_logged:
+            self._disable_logged = True
+            try:
+                self.log.warning(message)
+            except BaseException:
+                pass
+
+    def observe_measured_waist(self, measured_q, age, now):
+        """Validate feedback, run the tracking watchdog and return measured R.
+
+        The returned rotation is derived exclusively from lowstate feedback.
+        Invalid/stale feedback disables new lean and returns ``None`` without
+        raising, so telemetry failure cannot block the control loop.
+        """
+        measured = None
+        try:
+            measured = np.asarray(measured_q, dtype=float).reshape(-1)
+            age = float(age)
+            now = float(now)
+            valid = (measured.shape == (3,) and np.all(np.isfinite(measured))
+                     and math.isfinite(age) and 0.0 <= age <= WAIST_TELEMETRY_MAX_AGE_S
+                     and math.isfinite(now))
+        except Exception:
+            valid = False
+        if not valid or measured is None:
+            self._disable(
+                "waist_telemetry_lost",
+                "[torso_lean] AVISO: telemetria da cintura ausente/inválida; inclinação desativada e retorno ao neutro",
+            )
+            return None
+        self.measured_waist = measured.copy()
+        if self.enabled:
+            error = float(np.max(np.abs(self.waist_cmd[1:] - measured[1:])))
+            if error > WAIST_TRACKING_ERROR_RAD:
+                if self._tracking_error_since is None:
+                    self._tracking_error_since = now
+                elif now - self._tracking_error_since > WAIST_TRACKING_ERROR_DURATION_S:
+                    self.watchdog_tripped = True
+                    self._disable(
+                        "waist_watchdog_tripped",
+                        "[torso_lean] AVISO: cintura não acompanhou o comando (>2° por >0,5 s); "
+                        "inclinação desativada e retorno ao neutro",
+                    )
+            else:
+                self._tracking_error_since = None
+        return self.torso_rotation(measured)
+
     def step(self, head_pose, now):
         """One control cycle: returns the absolute waist command [yaw, roll, pitch]."""
-        target = self.tracker.update(head_pose, now)
+        if self.enabled:
+            target = self.tracker.update(head_pose, now)
+        else:
+            self.tracker.target = (0.0, 0.0)
+            target = self.tracker.target
         self.waist_cmd = self.command.step(target, now)
         if self.log is not None and self.tracker.jumps != self._jumps_logged:
             self._jumps_logged = self.tracker.jumps
@@ -494,7 +557,29 @@ class TorsoLeanSession:
         pitch, roll = self.command.lean()
         tp, tr = self.tracker.target
         return {"lean_pitch": pitch, "lean_roll": roll, "target_pitch": tp, "target_roll": tr,
-                "waist_cmd": self.waist_cmd, "status": self.tracker.status}
+                "waist_cmd": self.waist_cmd, "waist_measured": self.measured_waist,
+                "enabled": self.enabled, "watchdog_tripped": self.watchdog_tripped,
+                "status": self.tracker.status}
+
+
+def status_telemetry(session):
+    """JSON-safe torso decision block for ``teleop-status.jsonl``; never raises."""
+    if not isinstance(session, TorsoLeanSession):
+        return {"configured": False, "enabled": False, "status": "off"}
+    try:
+        tm = session.telemetry()
+        return {
+            "configured": True,
+            "enabled": bool(tm["enabled"]),
+            "watchdog_tripped": bool(tm["watchdog_tripped"]),
+            "status": str(tm["status"]),
+            "compensation_source": "measured_waist",
+            "waist_command": [float(value) for value in tm["waist_cmd"]],
+            "waist_measured": [float(value) for value in tm["waist_measured"]],
+            "target_pitch_roll": [float(tm["target_pitch"]), float(tm["target_roll"])],
+        }
+    except Exception:
+        return {"configured": True, "enabled": False, "status": "telemetry_error"}
 
 
 def stream_telemetry(session, arm_ctrl):

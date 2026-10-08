@@ -14,10 +14,17 @@ Portado da `dev-inspire` (01ccdac) para a linha Dex3 (mão de 3 dedos,
   `Inclinação do tronco: LIGADA, máx N° pitch/roll (yaw fixo)` ou `DESLIGADA` e o
   estado da página 8093. `G1_TORSO_LEAN_MAX_DEG` > 10 ou inválido: sai com código 2
   antes de iniciar qualquer coisa.
-* **Cabeça:** `tele_data.head_pose` continua vindo do **headset** (televuer
-  `tvuer.head_pose`, evento `CAMERA_MOVE`), não dos controles: na Dex3 só o
-  braço usa a pose dos controles (`arm_pose_source="controller"`). Os
-  controles seguem dando os gatilhos (dedos) e o alvo do punho.
+* **Cabeça:** `tele_data.head_pose` vem do **headset**. O Quest abre o cliente
+  hospedado `vuer.ai` (observado em 0.0.103), que não envia mais `CAMERA_MOVE`
+  continuamente sem um consumidor de câmera. A partir do cliente 0.0.98 o
+  componente de cena `Head` envia `HEAD_MOVE` com `value.matrix` (16 floats,
+  column-major). O TeleVuer desta branch adiciona `Head(stream=true, fps=30)`
+  como elemento genérico — compatível com o Python Vuer 0.0.60, que ainda não
+  possui a classe `Head` — e aceita `HEAD_MOVE`; `CAMERA_MOVE` continua como
+  compatibilidade com clientes antigos. Ausência/fallback por >1 s gera aviso
+  no terminal e evento em `teleop-status.jsonl`. Na Dex3 só o braço usa a pose
+  dos controles (`arm_pose_source="controller"`). Os controles seguem dando os
+  gatilhos (dedos) e o alvo do punho.
 * **Somente pitch/roll:** o yaw da cintura fica **fixo no neutro** capturado
   no `r` (caixa de yaw com largura zero no comando e no writer). Girar a
   cabeça não gira a cintura; `tests/test_quest_controls.py::test_headset_waist_yaw_follow_has_no_cli_or_robot_actuator_path`
@@ -35,15 +42,21 @@ Portado da `dev-inspire` (01ccdac) para a linha Dex3 (mão de 3 dedos,
   e não relativo à cabeça. Por isso a transformação é
   `torso_lean.retarget_world_fixed_to_torso`: `p' = c + Rᵀ(p − c)`,
   `R' = Rᵀ R_alvo`, com `c` = centro de rotação roll/pitch da cintura no URDF
-  (−0,0040; 0; 0,044 m). Resultado: a mão fica onde o controle manda mesmo com
-  o tronco inclinado (checado com FK do URDF completo). A transformação é
+  (−0,0040; 0; 0,044 m). **R vem exclusivamente da cintura medida em
+  `rt/lowstate` (motores 12–14), nunca do comando.** Resultado: a mão fica onde
+  o controle manda mesmo com o tronco inclinado (checado com FK do URDF completo).
+  Se `|cmd−medida|` de roll/pitch exceder 2° continuamente por >0,5 s, o
+  watchdog desativa novas inclinações, comanda retorno ao neutro e avisa no
+  terminal/`teleop-status.jsonl`. Telemetria ausente, antiga ou inválida também
+  falha para neutro, sem lançar exceção nem bloquear o loop. A transformação é
   aplicada dentro de `run_arm_tracking_cycle(target_transform=...)` **depois**
   do calibrador, do limitador cartesiano e do Cartesian hold, e antes do IK
   e do gate de resíduo (que compara com o alvo transformado). Gravidade do
   feed-forward: `Rᵀ g` (igual à Inspire).
 * **Shutdown:** usa o shutdown gracioso da linha Dex3 (retorno à pose de
-  preparação, abre a Dex3, rampa do peso). A cintura volta ao neutro na fase
-  0/1b (antes da rampa do peso), a gravidade do IK volta à vertical antes.
+  preparação; mão fecha por padrão, configurável por `DEX3_SHUTDOWN_HAND`). A
+  cintura volta ao neutro na fase 0/1b (antes da rampa do peso), e a gravidade
+  do IK volta à vertical antes.
 * **Desligado:** nenhum método de cintura é chamado; os quadros do writer são
   idênticos aos do `ec07bcf` (teste byte a byte) e o IK recebe exatamente os
   alvos calibrados.
@@ -179,12 +192,14 @@ provadas por FK no teste:
   própria cabeça;
 * sem essa correção o alvo erraria vários centímetros (≈ 4–9 cm a 10° para alvos típicos).
 
-Usa-se o ângulo **comandado** (o mesmo que vai para o writer, já suavizado),
-não o medido: é determinístico, sem ruído de encoder, e o atraso de
-rastreamento da cintura a 15°/s é pequeno. Além disso o feed-forward de
-gravidade dos braços (rnea do modelo reduzido) usa a gravidade no referencial
-do tronco, `Rᵀ g` (`G1_29_ArmIK.set_torso_rotation`; teste compara com rnea do
-modelo completo com a cintura inclinada — igual a 1e-9). No shutdown a gravidade
+Usa-se o ângulo **medido** em `rt/lowstate`, não o comandado: a compensação da
+IK e o feed-forward de gravidade precisam refletir a orientação real do tronco,
+especialmente se `rt/arm_sdk` não tiver autoridade sobre a cintura no FSM 501.
+O comando continua suavizado/limitado, mas nunca alimenta a compensação. O
+watchdog de erro persistente descrito acima retorna o alvo ao neutro. O
+feed-forward de gravidade dos braços (rnea do modelo reduzido) usa a gravidade
+no referencial medido do tronco, `Rᵀ g` (`G1_29_ArmIK.set_torso_rotation`; teste
+compara com rnea do modelo completo — igual a 1e-9). No shutdown a gravidade
 volta ao neutro. O problema casadi não muda.
 
 **Sites 8093/8095:** continuam no referencial da IK (= tronco). Em 8093 o
@@ -224,30 +239,43 @@ faz 3 clamps a mais por frame quando ativo e nada quando desligado.
 
 ## Protocolo do primeiro teste físico (NÃO executado)
 
-Pré-requisitos: robô **suspenso no pórtico ou apoiado** com folga para o tronco
-inclinar, área livre, **R3 (e-stop) na mão** de um segundo operador, deploy
-conferido (`git -C ~/xr_teleoperate_inspire log -1`), Quest com hand tracking.
+Risco aberto: no FSM 501 (`Regular walk`) ainda não foi demonstrado em hardware
+que a cintura 12–14 obedece `rt/arm_sdk`. O watchdog impede que a IK compense
+por um comando fictício, mas não substitui o primeiro teste suspenso.
 
-1. `G1_TORSO_LEAN=1 G1_TORSO_LEAN_MAX_DEG=3 XR_POSE_WEB=1 bash teleop/run_g1_quest_inspire.sh`;
-   conferir no terminal “Inclinação do tronco: LIGADA, máx 3°”; abrir
-   `http://<ip>:8093`.
-2. Operador parado, ereto, olhando para frente → `r`. Conferir no log
-   `[torso_lean] ativada: cintura neutra …` (e não a mensagem de recusa).
-   Robô não deve mover a cintura.
-3. Só girar a cabeça (olhar para baixo, lados): pílula “pedida” deve ficar 0.
-4. Deslocar a cabeça ~5 cm para a frente (dentro da zona morta + 2 cm): pedida
-   ≈ +1,3°; depois ~20 cm: pedida satura em +3°. Observar no robô inclinação
-   **para a frente**, lenta (≤ 15°/s), e “medida” acompanhando “cmd”.
-5. Repetir para trás, esquerda (roll **negativo**, robô tomba para a ESQUERDA)
-   e direita. Qualquer sentido trocado → `q` imediatamente.
-6. Observar os braços: com o corpo inteiro inclinado, as mãos devem acompanhar
-   o tronco sem saltos; no 8093 o erro mão×robô não deve crescer com a
-   inclinação.
-7. Tirar o headset/cobrir sensores > 1 s: cintura volta ao neutro sozinha.
-8. `q`: cintura volta ao neutro antes da rampa de peso; braços voltam como hoje.
-9. Abortar (R3) em: movimento sem deslocamento da cabeça, sentido errado,
-   oscilação, ruído/vibração na cintura, “medida” longe de “cmd” (> 3°) por
-   mais de 1 s, perda de equilíbrio.
-10. Só depois de 3° limpo em todas as direções, repetir com 5° e 10°; só então
-    testar com o robô em pé no chão (balanço: o controlador da Unitree vai
-    reagir ao deslocamento do CoM).
+Pré-requisitos: robô **suspenso no pórtico ou apoiado** com folga para o tronco,
+área livre, **R3 (e-stop) na mão** de um segundo operador, controles neutros,
+checkout e gitlink TeleVuer conferidos. A mão esquerda Dex3 continua sem estado
+DDS e não faz parte desta validação.
+
+1. Sem iniciar teleoperação, conferir os commits do pai/submódulo e que não há
+   outro `teleop_hand_and_arm.py`; preservar `rt/arm_sdk` e não usar `lowcmd`.
+2. O operador abre terminal interativo e executa:
+   `G1_TORSO_LEAN=1 G1_TORSO_LEAN_MAX_DEG=3 XR_POSE_WEB=1 bash teleop/run_g1_quest_dex3.sh`.
+   Conferir o caminho `launcher-<UTC>.log`, a página 8093 e nenhum aviso de pose
+   da cabeça em fallback. **Não pressionar `r`** até a imagem e os controles
+   estarem estáveis.
+3. Operador parado, ereto, olhando para frente → `r`. Conferir
+   `[torso_lean] ativada`; robô não deve mover a cintura. O segundo operador
+   mantém R3 pronto.
+4. Só girar/inclinar a cabeça sem deslocar o pivô: pedido de pitch/roll deve
+   ficar próximo de 0 e yaw da cintura deve permanecer exatamente no neutro.
+5. Deslocar a cabeça ~5 cm para frente: pedido ≈ +1,3°; avançar lentamente até
+   saturar em +3°. Confirmar **medida** acompanhando comando, sentido para
+   frente e erro abaixo de 2°. Parar e inspecionar o log.
+6. Repetir separadamente para trás, esquerda (roll negativo) e direita. Qualquer
+   sentido trocado, oscilação ou movimento inesperado → `q` e R3.
+7. Com o robô ainda suspenso, provocar apenas uma recusa segura da cintura se o
+   operador responsável aprovar: se cmd−medida superar 2° por >0,5 s, confirmar
+   aviso único, `enabled=false` em `teleop-status.jsonl`, comando voltando ao
+   neutro e IK usando exclusivamente a medida. Não contornar o watchdog.
+8. Tirar o headset/cobrir sensores >1 s: confirmar aviso de fallback e retorno
+   ao neutro; restaurar e confirmar evento `head_pose_recovered`.
+9. `q`: cintura volta ao neutro antes da rampa de peso; braços e Dex3 seguem o
+   shutdown configurado. Conferir que nenhum processo teleop ficou ativo.
+10. Só depois de 3° limpo em todas as direções e revisão dos logs considerar 5°
+    e 10°. Teste no chão/FSM 501 é uma fase separada, com nova aprovação.
+
+Abortar imediatamente em: movimento sem deslocamento da cabeça, sentido errado,
+ruído/vibração, cmd−medida >2° por >0,5 s sem disparo do watchdog, perda de
+visibilidade/equilíbrio ou qualquer movimento após `q`.

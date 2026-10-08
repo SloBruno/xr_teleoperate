@@ -95,6 +95,18 @@ class Dex3LauncherTorsoPoseWebTest(unittest.TestCase):
         # The persistent Teleimager must never be stopped by the launcher.
         self.assertNotIn("trap", LAUNCHER.read_text(encoding="utf-8"))
 
+    def test_launcher_saves_terminal_output_without_redirecting_stdin(self):
+        r, _ = self.run_launcher()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        logs = list(self.state.glob("launcher-*.log"))
+        self.assertEqual(len(logs), 1)
+        saved = logs[0].read_text(encoding="utf-8")
+        self.assertIn("Inclinação do tronco: DESLIGADA", saved)
+        launcher = LAUNCHER.read_text(encoding="utf-8")
+        log_block = launcher[launcher.index("launcher_log="):launcher.index("# ---- pose compare web")]
+        self.assertIn("exec > >(", log_block)
+        self.assertNotIn("exec </dev/null", log_block)
+
     def test_lean_on_exports_and_prints(self):
         r, log = self.run_launcher(G1_TORSO_LEAN="1", G1_TORSO_LEAN_MAX_DEG="3")
         self.assertEqual(r.returncode, 0, r.stderr)
