@@ -88,8 +88,8 @@ xr_net_announce() {
     echo "$bar"
     if [[ -n $ip ]]; then
         echo "IP do robô na rede ($label): $ip"
-        echo "URL recomendada (cliente local 0.0.60): https://$ip:$XR_NET_PORT?grid=False"
-        echo "Alternativa hospedada: https://vuer.ai?ws=wss://$ip:$XR_NET_PORT&grid=False (versão não controlada)"
+        echo "URL recomendada: https://vuer.ai?ws=wss://$ip:$XR_NET_PORT&grid=False"
+        echo "Opção local (não recomendada): https://$ip:$XR_NET_PORT?grid=False"
     else
         echo "AVISO: SEM rota default / sem IP Wi-Fi detectado. O Quest não vai conseguir conectar."
         echo "       Conecte o Wi-Fi ou defina XR_TELEOP_VUER_IP=<ip>. Seguindo mesmo assim."
