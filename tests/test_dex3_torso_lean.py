@@ -484,7 +484,10 @@ def test_nonfollowing_measured_waist_warns_degraded_but_keeps_limited_command_an
     calls, state = _run_dex3(
         monkeypatch, {"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "3"},
         cycles_before_q=75, waist_follows=False,
-        head_fn=lambda n: head(pivot=(min(max(n - 8, 0) * 0.01, 0.20), 0.0, 1.6)))
+        # sub-mm jitter = a live headset (identical frames would be "stale" and,
+        # after decay_after_s, the target decays; with no low-pass/second ramp
+        # that decay is no longer hidden by lag)
+        head_fn=lambda n: head(pivot=(min(max(n - 8, 0) * 0.01, 0.20) + 1e-5 * (n % 2), 0.0, 1.6)))
 
     warnings = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "warning"]
     assert any("cintura não acompanhou" in message for message in warnings)
@@ -499,8 +502,8 @@ def test_nonfollowing_measured_waist_warns_degraded_but_keeps_limited_command_an
     assert np.linalg.norm(targets[-1, 1:] - neutral[1:]) > 0.2 * DEG
 
 
-def test_dex3_feature_rejects_max_above_10_and_stays_off(monkeypatch):
-    calls, _ = _run_dex3(monkeypatch, {"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "15"})
+def test_dex3_feature_rejects_max_above_20_and_stays_off(monkeypatch):
+    calls, _ = _run_dex3(monkeypatch, {"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "21"})
     assert _waist_calls(calls) == []
     assert any(isinstance(c, tuple) and c[0] == "error" and "rejeitada" in c[1] for c in calls)
 

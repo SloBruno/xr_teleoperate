@@ -413,7 +413,8 @@ class G1_29_ArmController(_ArmPublicationMixin):
         if (lower.shape != (3,) or upper.shape != (3,) or target.shape != (3,)
                 or not np.all(np.isfinite(lower)) or not np.all(np.isfinite(upper))
                 or not np.all(np.isfinite(target)) or np.any(lower > upper)
-                or not np.isfinite(max_rate) or max_rate <= 0.0):
+                or not np.isfinite(max_rate) or max_rate <= 0.0
+                or max_rate > G1_29_WAIST_HARD_MAX_RATE + 1e-9):
             raise ValueError("invalid waist command configuration")
         if self.msg is None or not self.outputs_activated:
             # Dex3 line: the command message only exists after activate().
@@ -638,6 +639,9 @@ class G1_29_JointIndex(IntEnum):
 # Waist motors (yaw, roll, pitch) = G1_29_JointIndex 12, 13, 14; same order as
 # the Unitree g1_arm7_sdk_dds_example (kWaistYaw, kWaistRoll, kWaistPitch).
 G1_29_WAIST_INDICES = (G1_29_JointIndex.kWaistYaw, G1_29_JointIndex.kWaistRoll, G1_29_JointIndex.kWaistPitch)
+# Hard ceiling of the waist slew rate at the final writer (= torso_lean
+# HARD_MAX_RATE_DPS, 90 deg/s); the writer is the single waist rate limiter.
+G1_29_WAIST_HARD_MAX_RATE = np.deg2rad(90.0)
 
 
 class G1_23_ArmController(_ArmPublicationMixin):

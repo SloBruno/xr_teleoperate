@@ -48,7 +48,7 @@ Portado da `dev-inspire` (01ccdac) para a linha Dex3 (mão de 3 dedos,
   Se `|cmd−medida|` de roll/pitch exceder 2° continuamente por >0,5 s, o estado
   vira `waist_tracking_degraded` e há um aviso limitado no terminal/
   `teleop-status.jsonl`, com comando, medida, erro por eixo e duração. A
-  inclinação continua limitada por taxa e por ±10°: atraso finito persistente
+  inclinação continua limitada por taxa e por ±máx (teto 20°): atraso finito persistente
   **não** desativa nem comanda neutro. Telemetria ausente, antiga ou inválida
   ainda falha para neutro, sem lançar exceção nem bloquear o loop. A transformação é
   aplicada dentro de `run_arm_tracking_cycle(target_transform=...)` **depois**
@@ -71,7 +71,8 @@ zona morta, ganho, saturação, filtro, taxa, gates) é a mesma.
 
 Linha `dev-inspire` (G1_29 + mãos Inspire, hand tracking). O operador inclina o
 próprio corpo (desloca a cabeça) e o robô inclina o tronco pela cintura
-(pitch = frente/trás, roll = lados), no máximo **±10°**. **Desligado por padrão.**
+(pitch = frente/trás, roll = lados), padrão **±10°**, teto duro **±20°**
+(aprovado pelo operador). **Desligado por padrão.**
 
 Código: `teleop/utils/torso_lean.py` (lógica pura), writer em
 `teleop/robot_control/robot_arm.py` (`G1_29_ArmController`), integração em
@@ -87,11 +88,14 @@ G1_TORSO_LEAN=1 G1_TORSO_LEAN_MAX_DEG=3 XR_POSE_WEB=1 bash teleop/run_g1_quest_i
 | variável | padrão | limite | significado |
 |---|---|---|---|
 | `G1_TORSO_LEAN` | `0` | 0/1 | liga a função (exige `G1_MOTION=1`) |
-| `G1_TORSO_LEAN_MAX_DEG` | `10` | (0, 10] — maior é **rejeitado** (launcher sai com código 2; o Python mantém DESLIGADO) | saturação de pitch e roll |
-| `G1_TORSO_LEAN_GAIN_DEG_PER_M` | `66.7` | (0, 200] | 15 cm além da zona morta = 10° |
+| `G1_TORSO_LEAN_MAX_DEG` | `10` | (0, 20] — maior é **rejeitado** (launcher sai com código 2; o Python mantém DESLIGADO) | saturação de pitch e roll |
+| `G1_TORSO_LEAN_GAIN_DEG_PER_M` | `66.7` | (0, 200] | 15 cm além da zona morta = 10° (20° pede 30 cm; `133` = 20° em 15 cm) |
 | `G1_TORSO_LEAN_DEADBAND_M` | `0.03` | [0, 0.20] | zona morta do deslocamento |
-| `G1_TORSO_LEAN_RATE_DPS` | `15` | (0, 30] | limite de velocidade da cintura |
-| `G1_TORSO_LEAN_ACCEL_DPS2` | `0` (desligado) | [0, 200] | limite de aceleração opcional |
+| `G1_TORSO_LEAN_RATE_DPS` | `60` | (0, 90] | velocidade da cintura, aplicada **uma única vez** pelo writer de 250 Hz |
+| `G1_TORSO_LEAN_ACCEL_DPS2` | `0` (desligado) | [0, 200] | perfil de aceleração opcional |
+
+Além de `neutro ± máx`, o envelope fica sempre ≥ 0,05 rad (2,9°) dentro dos
+limites do URDF de roll/pitch (±0,52 rad): no máximo ±0,47 rad = 26,9°.
 
 O launcher imprime `Inclinação do tronco: LIGADA, máx N°` ou `DESLIGADA`.
 Sem embreagem (o operador usa hand tracking; não há botão de controle).
@@ -109,9 +113,21 @@ Sem embreagem (o operador usa hand tracking; não há botão de controle).
 * Frente → `+pitch`; esquerda → `−roll` (ver convenção abaixo). Sem yaw de cintura.
 
 Mapa: zona morta 3 cm → ganho linear → **saturação dura** ±máx por eixo →
-passa-baixa (τ = 0,3 s) → limite de velocidade (15°/s) [+ aceleração] →
-clamp no envelope `neutro ± máx` ∩ limites do URDF → writer (clamp final de
-novo, ver abaixo).
+clamp no envelope `neutro ± máx` ∩ (URDF − 0,05 rad) [+ aceleração opcional] →
+writer de 250 Hz: clamp final + **limite de velocidade único** (60°/s).
+
+### Latência (mudança de 2026-10-09)
+
+Antes: passa-baixa τ = 0,3 s **e** rampa de 15°/s no loop do teleop (10–24 Hz,
+mediana 13,8 Hz no teste) **e de novo** rampa de 15°/s no writer. Degrau de 10°:
+50 % em 0,33 s, 90 % em ~0,65 s, 100 % só em ~2,0 s (simulação com o mesmo
+código). Agora o loop entrega o alvo saturado direto e o writer é o único
+limitador (60°/s, teto 90°/s, também verificado em `configure_waist_command`):
+10° em ~0,17 s e 20° em ~0,33 s (+ até 1 ciclo do loop, 40–100 ms). O atraso
+restante comando→medida é físico (servo kp/kd 300/3 + carga): no teste de
+10° a mediana de |cmd−medida| foi 3,2° (p90 10,4°, máx 14,4°) contra 1,1°
+(p90 3,8°) de |alvo−cmd|, com o pórtico (“girafa”) muito tensionado segurando o
+tronco. Os ganhos kp/kd não foram alterados.
 
 Robustez da entrada:
 * pose inválida (NaN, não rígida, pose de fallback `CONST_HEAD_POSE` do TeleVuer)
@@ -169,7 +185,7 @@ uma mudança de rigidez não testada no hardware e foi deixada de fora. A
 autoridade do vendor sobre a cintura continua governada pelo mesmo peso.
 
 Clamp final no writer (imediatamente antes do `Write`): alvo preso ao
-envelope `neutro ± máx` (∩ URDF), e passo por frame ≤ `taxa · 4 ms` a partir
+envelope `neutro ± máx` (∩ URDF − 0,05 rad), e passo por frame ≤ `taxa · 4 ms` a partir
 do último valor **escrito**; valor não finito → repete o último escrito.
 
 ## Consistência da IK (decisão)
@@ -197,8 +213,9 @@ provadas por FK no teste:
 Usa-se o ângulo **medido** em `rt/lowstate`, não o comandado: a compensação da
 IK e o feed-forward de gravidade precisam refletir a orientação real do tronco,
 especialmente se `rt/arm_sdk` não tiver autoridade sobre a cintura no FSM 501.
-O comando continua suavizado/limitado, mas nunca alimenta a compensação. O
-watchdog de erro persistente descrito acima retorna o alvo ao neutro. O
+O comando continua limitado, mas nunca alimenta a compensação. Erro
+persistente cmd−medida só gera `waist_tracking_degraded` (aviso), nunca
+desativa; telemetria inválida/antiga volta ao neutro. O
 feed-forward de gravidade dos braços (rnea do modelo reduzido) usa a gravidade
 no referencial medido do tronco, `Rᵀ g` (`G1_29_ArmIK.set_torso_rotation`; teste
 compara com rnea do modelo completo — igual a 1e-9). No shutdown a gravidade
@@ -239,7 +256,30 @@ ganha `lean` (graus, `null` para pacotes antigos), o CSV ganha colunas no fim
 O(1): algumas multiplicações 3×3, sem I/O, sem alocação relevante; o writer
 faz 3 clamps a mais por frame quando ativo e nada quando desligado.
 
-## Protocolo do primeiro teste físico (NÃO executado)
+## Protocolo do próximo teste físico (latência + 20°; NÃO executado)
+
+Pré-requisitos: robô **suspenso**, pórtico/“girafa” **com folga** (o cabo não
+pode puxar nem segurar o tronco; no teste de 10° o cabo tenso resistiu à
+cintura), área livre, **R3 na mão** de um segundo operador, controles neutros,
+checkout no commit publicado e gitlink TeleVuer `977b965`.
+
+1. Conferir que não há outro `teleop_hand_and_arm.py`. Operador abre o terminal
+   interativo e roda primeiro **10°** (agora com 60°/s):
+   `G1_TORSO_LEAN=1 G1_TORSO_LEAN_MAX_DEG=10 XR_POSE_WEB=1 bash teleop/run_g1_quest_dex3.sh`.
+2. `r` ereto e parado; conferir `[torso_lean] ativada ... ±10°, 60°/s`.
+3. Um eixo de cada vez, deslocamentos lentos e depois mais rápidos: frente,
+   trás, esquerda (roll negativo), direita. Conferir no 8093/`teleop-status.jsonl`
+   alvo≈cmd quase sem atraso e quanto a **medida** atrasa do comando. Sentido
+   errado, oscilação, batida ou vibração (60°/s com kp 300) → `q` e R3.
+4. `q`; revisar logs. Só então repetir com **20°**:
+   `G1_TORSO_LEAN=1 G1_TORSO_LEAN_MAX_DEG=20 XR_POSE_WEB=1 bash teleop/run_g1_quest_dex3.sh`
+   (com o ganho padrão 20° pede ~33 cm de deslocamento da cabeça; opcional
+   `G1_TORSO_LEAN_GAIN_DEG_PER_M=133` = 20° em 15 cm — só depois de 20° limpo
+   com o ganho padrão). Se 60°/s parecer brusco, `G1_TORSO_LEAN_RATE_DPS=30`.
+5. Perda do headset >1 s → neutro; `q` → cintura volta ao neutro antes da rampa
+   de peso. Teste no chão/FSM 501 é fase separada, com nova aprovação.
+
+## Protocolo do primeiro teste físico (histórico, 3°)
 
 Risco aberto: no FSM 501 (`Regular walk`) ainda não foi demonstrado em hardware
 que a cintura 12–14 obedece `rt/arm_sdk`. O watchdog impede que a IK compense
@@ -267,10 +307,9 @@ DDS e não faz parte desta validação.
    frente e erro abaixo de 2°. Parar e inspecionar o log.
 6. Repetir separadamente para trás, esquerda (roll negativo) e direita. Qualquer
    sentido trocado, oscilação ou movimento inesperado → `q` e R3.
-7. Com o robô ainda suspenso, provocar apenas uma recusa segura da cintura se o
-   operador responsável aprovar: se cmd−medida superar 2° por >0,5 s, confirmar
-   aviso único, `enabled=false` em `teleop-status.jsonl`, comando voltando ao
-   neutro e IK usando exclusivamente a medida. Não contornar o watchdog.
+7. Se cmd−medida superar 2° por >0,5 s: aviso único e status
+   `waist_tracking_degraded`, `enabled=true` (não desativa), IK usando
+   exclusivamente a medida.
 8. Tirar o headset/cobrir sensores >1 s: confirmar aviso de fallback e retorno
    ao neutro; restaurar e confirmar evento `head_pose_recovered`.
 9. `q`: cintura volta ao neutro antes da rampa de peso; braços e Dex3 seguem o
@@ -279,5 +318,5 @@ DDS e não faz parte desta validação.
     e 10°. Teste no chão/FSM 501 é uma fase separada, com nova aprovação.
 
 Abortar imediatamente em: movimento sem deslocamento da cabeça, sentido errado,
-ruído/vibração, cmd−medida >2° por >0,5 s sem disparo do watchdog, perda de
+ruído/vibração, cmd−medida >2° por >0,5 s sem `waist_tracking_degraded`, perda de
 visibilidade/equilíbrio ou qualquer movimento após `q`.

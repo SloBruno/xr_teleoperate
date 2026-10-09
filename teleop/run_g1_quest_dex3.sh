@@ -4,9 +4,10 @@
 # Torso lean (waist PITCH/ROLL from the operator's head DISPLACEMENT, via
 # rt/arm_sdk; yaw stays at the neutral; see docs/torso_lean.md). Default OFF:
 #   G1_TORSO_LEAN=1  turns it on. Neutral = head + waist at r.
-#   G1_TORSO_LEAN_MAX_DEG=10 (hard ceiling 10; larger values are rejected)
+#   G1_TORSO_LEAN_MAX_DEG=10 (hard ceiling 20; larger values are rejected)
 #   G1_TORSO_LEAN_GAIN_DEG_PER_M=66.7 (15 cm past the deadband = 10 deg)
-#   G1_TORSO_LEAN_DEADBAND_M=0.03  G1_TORSO_LEAN_RATE_DPS=15  G1_TORSO_LEAN_ACCEL_DPS2=0 (off)
+#   G1_TORSO_LEAN_DEADBAND_M=0.03  G1_TORSO_LEAN_RATE_DPS=60 (max 90; single limiter = 250 Hz
+#   arm_sdk writer, no low-pass)  G1_TORSO_LEAN_ACCEL_DPS2=0 (off)
 #
 # Pose compare web (robot wrist FK x operator wrist/IK target, 2D/3D,
 # "Salvar tarefa"; see docs/pose_compare_web.md). Default OFF:
@@ -50,15 +51,15 @@ case "$G1_TORSO_LEAN" in
     0|"") G1_TORSO_LEAN=0; torso_lean_msg="Inclinação do tronco: DESLIGADA (G1_TORSO_LEAN=1 para ligar)" ;;
     1)
         G1_TORSO_LEAN_MAX_DEG=${G1_TORSO_LEAN_MAX_DEG:-10}
-        if ! awk -v v="$G1_TORSO_LEAN_MAX_DEG" 'BEGIN { exit !(v ~ /^[0-9]+(\.[0-9]+)?$/ && v > 0 && v <= 10) }'; then
-            echo "G1_TORSO_LEAN_MAX_DEG='$G1_TORSO_LEAN_MAX_DEG' rejeitado (0 < máx <= 10 graus); não iniciando." >&2
+        if ! awk -v v="$G1_TORSO_LEAN_MAX_DEG" 'BEGIN { exit !(v ~ /^[0-9]+(\.[0-9]+)?$/ && v > 0 && v <= 20) }'; then
+            echo "G1_TORSO_LEAN_MAX_DEG='$G1_TORSO_LEAN_MAX_DEG' rejeitado (0 < máx <= 20 graus); não iniciando." >&2
             exit 2
         fi
         export G1_TORSO_LEAN_MAX_DEG
         for v in G1_TORSO_LEAN_GAIN_DEG_PER_M G1_TORSO_LEAN_DEADBAND_M G1_TORSO_LEAN_RATE_DPS G1_TORSO_LEAN_ACCEL_DPS2; do
             if [[ -n "${!v:-}" ]]; then export "${v?}"; fi
         done
-        torso_lean_msg="Inclinação do tronco: LIGADA, máx ${G1_TORSO_LEAN_MAX_DEG}° pitch/roll (yaw fixo), ganho ${G1_TORSO_LEAN_GAIN_DEG_PER_M:-66.7}°/m, zona morta ${G1_TORSO_LEAN_DEADBAND_M:-0.03} m, ${G1_TORSO_LEAN_RATE_DPS:-15}°/s; neutro = postura no r"
+        torso_lean_msg="Inclinação do tronco: LIGADA, máx ${G1_TORSO_LEAN_MAX_DEG}° pitch/roll (yaw fixo), ganho ${G1_TORSO_LEAN_GAIN_DEG_PER_M:-66.7}°/m, zona morta ${G1_TORSO_LEAN_DEADBAND_M:-0.03} m, ${G1_TORSO_LEAN_RATE_DPS:-60}°/s; neutro = postura no r"
         ;;
     *) echo "unsupported G1_TORSO_LEAN='$G1_TORSO_LEAN' (use 0|1)" >&2; exit 2 ;;
 esac

@@ -113,8 +113,17 @@ class Dex3LauncherTorsoPoseWebTest(unittest.TestCase):
         self.assertIn("Inclinação do tronco: LIGADA, máx 3° pitch/roll (yaw fixo)", r.stdout)
         self.assertIn("ENV G1_TORSO_LEAN=1 MAX=3", log)
 
-    def test_lean_max_above_10_or_bad_value_refused_before_anything_starts(self):
-        for env in ({"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "15"},
+    def test_lean_max_20_accepted_default_rate_60(self):
+        r, log = self.run_launcher(G1_TORSO_LEAN="1", G1_TORSO_LEAN_MAX_DEG="20")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Inclinação do tronco: LIGADA, máx 20° pitch/roll (yaw fixo)", r.stdout)
+        self.assertIn("60°/s", r.stdout)
+        self.assertIn("ENV G1_TORSO_LEAN=1 MAX=20", log)
+
+    def test_lean_max_above_20_or_bad_value_refused_before_anything_starts(self):
+        for env in ({"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "21"},
+                    {"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "20.5"},
+                    {"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "0"},
                     {"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "abc"},
                     {"G1_TORSO_LEAN": "yes"}, {"XR_POSE_WEB": "2"}):
             self.log.write_text("")

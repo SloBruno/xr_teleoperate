@@ -153,8 +153,10 @@ def test_saturation_10deg_all_directions_even_for_huge_input(fwd, left):
     assert abs(pitch) <= 3.0 * DEG + 1e-12 and abs(roll) <= 3.0 * DEG + 1e-12
 
 
-def test_max_deg_above_10_is_clamped_even_if_config_built_directly():
-    assert tl.TorsoLeanConfig(max_deg=45.0).max_rad == pytest.approx(10.0 * DEG)
+def test_max_deg_above_hard_ceiling_20_is_clamped_even_if_config_built_directly():
+    assert tl.HARD_MAX_LEAN_DEG == 20.0
+    assert tl.TorsoLeanConfig(max_deg=45.0).max_rad == pytest.approx(20.0 * DEG)
+    assert tl.TorsoLeanConfig(max_deg=20.0).max_rad == pytest.approx(20.0 * DEG)
 
 
 def test_nan_displacement_gives_zero():
@@ -243,28 +245,61 @@ def test_jump_is_ignored_and_reanchored():
 
 
 # ---------------------------------------------------- command shaping
-def test_rate_limit_lowpass_and_box():
+def test_command_has_no_lowpass_and_no_rate_limit_writer_is_the_single_limiter():
+    """Latency: the tracker no longer low-passes or rate-limits (the arm_sdk
+    writer slews at cfg.rate_dps, 250 Hz). The command only clamps to the box."""
     neutral = np.array([0.02, -0.01, 0.03])
+    assert CFG.lowpass_tau_s == 0.0 and CFG.accel_dps2 == 0.0
     cmd = tl.WaistLeanCommand(CFG, neutral, neutral, 0.0)
-    t, prev, ys = 0.0, cmd.cmd.copy(), []
-    for _ in range(300):
-        t += 1 / 30.0
-        q = cmd.step((1.0, -1.0), t)          # absurd target: clamped to +-10 deg
-        assert np.all(np.abs(q - prev) <= 15 * DEG / 30.0 + 1e-12)
-        assert q[0] == neutral[0]            # yaw stays at neutral
-        assert np.all(np.abs(q[1:] - neutral[1:]) <= 10 * DEG + 1e-12)
-        prev = q
-        ys.append(q)
-    np.testing.assert_allclose(ys[-1], neutral + [0, -10 * DEG, 10 * DEG], atol=1e-6)
-    # low-pass: a short blip barely moves the command
-    cmd2 = tl.WaistLeanCommand(CFG, neutral, neutral, 0.0)
-    cmd2.step((10 * DEG, 0), 1 / 30.0)
-    q = cmd2.step((0.0, 0.0), 2 / 30.0)
-    assert abs(q[2] - neutral[2]) < 1.0 * DEG
+    q = cmd.step((8 * DEG, -5 * DEG), 1 / 15.0)          # one cycle: no lag at all
+    np.testing.assert_allclose(q, neutral + [0, -5 * DEG, 8 * DEG], atol=1e-12)
+    q = cmd.step((1.0, -1.0), 2 / 15.0)                  # absurd target: clamped to +-max
+    np.testing.assert_allclose(q, neutral + [0, -10 * DEG, 10 * DEG], atol=1e-12)
+    assert q[0] == neutral[0]                             # yaw stays at neutral
+    q = cmd.step((0.0, 0.0), 3 / 15.0)                    # release: straight back, writer slews
+    np.testing.assert_allclose(q, neutral, atol=1e-12)
+
+
+def test_box_20deg_and_joint_limit_margin():
+    cfg = tl.TorsoLeanConfig(max_deg=20.0)
+    cmd = tl.WaistLeanCommand(cfg, np.zeros(3), np.zeros(3), 0.0)
+    np.testing.assert_allclose(cmd.upper[1:], [20 * DEG, 20 * DEG])
+    q = cmd.step((1.0, 1.0), 0.1)
+    np.testing.assert_allclose(q[1:], [20 * DEG, 20 * DEG])
+    # neutral close to the URDF limit: the lean box stops WAIST_LIMIT_MARGIN_RAD inside it
+    neutral = np.array([0.0, 0.30, -0.30])
+    cmd = tl.WaistLeanCommand(cfg, neutral, neutral, 0.0)
+    assert cmd.upper[1] == pytest.approx(tl.URDF_WAIST_UPPER[1] - tl.WAIST_LIMIT_MARGIN_RAD)
+    assert cmd.lower[2] == pytest.approx(tl.URDF_WAIST_LOWER[2] + tl.WAIST_LIMIT_MARGIN_RAD)
+    assert tl.WAIST_LIMIT_MARGIN_RAD >= 0.03
+    q = cmd.step((-1.0, 1.0), 0.1)
+    assert q[1] <= tl.URDF_WAIST_UPPER[1] - tl.WAIST_LIMIT_MARGIN_RAD + 1e-12
+    assert q[2] >= tl.URDF_WAIST_LOWER[2] + tl.WAIST_LIMIT_MARGIN_RAD - 1e-12
+
+
+def test_latency_20deg_step_through_single_writer_limiter():
+    """Head step -> written waist q: 20 deg in <= 0.40 s at the 10-15 Hz loop
+    measured on the robot (was ~2 s with tau 0.3 s + 15 deg/s twice)."""
+    cfg = tl.TorsoLeanConfig(max_deg=20.0)
+    neutral = np.zeros(3)
+    cmd = tl.WaistLeanCommand(cfg, neutral, neutral, 0.0)
+    rate = cfg.rate_dps * DEG
+    written, t, loop_dt, w_dt, next_loop, target_q = neutral.copy(), 0.0, 1 / 12.0, 1 / 250.0, 0.0, neutral
+    reached = None
+    while t < 1.0:
+        if t >= next_loop - 1e-12:
+            target_q = cmd.step((20 * DEG, 0.0), t + 1e-9)
+            next_loop += loop_dt
+        written = written + np.clip(target_q - written, -rate * w_dt, rate * w_dt)
+        t += w_dt
+        if reached is None and written[2] >= 20 * DEG - 1e-9:
+            reached = t
+    assert reached is not None and reached <= 0.40
 
 
 def test_accel_limit_optional():
-    cfg = tl.TorsoLeanConfig(accel_dps2=30.0)
+    # opt-in profile (default off), validated as before: with the 0.3 s low-pass
+    cfg = tl.TorsoLeanConfig(accel_dps2=30.0, rate_dps=15.0, lowpass_tau_s=0.3)
     cmd = tl.WaistLeanCommand(cfg, np.zeros(3), np.zeros(3), 0.0)
     t, v_prev, q_prev = 0.0, 0.0, 0.0
     dt = 1 / 30.0
@@ -272,7 +307,7 @@ def test_accel_limit_optional():
         t += dt
         q = cmd.step((10 * DEG, 0.0), t)[2]
         v = (q - q_prev) / dt
-        assert abs(v - v_prev) <= 30 * DEG * dt + 1e-9 and abs(v) <= 15 * DEG + 1e-9
+        assert abs(v - v_prev) <= 30 * DEG * dt + 1e-9 and abs(v) <= cfg.rate_dps * DEG + 1e-9
         v_prev, q_prev = v, q
     assert q_prev == pytest.approx(10 * DEG, abs=0.2 * DEG)
 
@@ -281,6 +316,7 @@ def test_urdf_limits_respected_when_neutral_near_limit():
     neutral = np.array([0.0, 0.50, -0.50])
     cmd = tl.WaistLeanCommand(CFG, neutral, neutral, 0.0)
     assert np.all(cmd.upper <= tl.URDF_WAIST_UPPER) and np.all(cmd.lower >= tl.URDF_WAIST_LOWER)
+    assert cmd.upper[1] == pytest.approx(0.50) and cmd.lower[2] == pytest.approx(-0.50)  # never deeper than start
     t = 0.0
     for _ in range(200):
         t += 0.033
@@ -366,7 +402,10 @@ def test_env_default_off_and_values():
     assert tl.config_from_env({}) is None
     assert tl.config_from_env({"G1_TORSO_LEAN": "0"}) is None
     cfg = tl.config_from_env({"G1_TORSO_LEAN": "1"})
-    assert cfg.max_deg == 10.0 and cfg.deadband_m == 0.03 and cfg.rate_dps == 15.0
+    assert cfg.max_deg == 10.0 and cfg.deadband_m == 0.03 and cfg.rate_dps == 60.0
+    assert cfg.lowpass_tau_s == 0.0
+    assert tl.config_from_env({"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "20"}).max_deg == 20.0
+    assert tl.config_from_env({"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_RATE_DPS": "90"}).rate_dps == 90.0
     assert cfg.gain_deg_per_m == pytest.approx(10.0 / 0.15)
     cfg = tl.config_from_env({"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "3", "G1_TORSO_LEAN_RATE_DPS": "5",
                               "G1_TORSO_LEAN_GAIN_DEG_PER_M": "40", "G1_TORSO_LEAN_DEADBAND_M": "0.05"})
@@ -374,9 +413,10 @@ def test_env_default_off_and_values():
     assert "LIGADA, máx 3°" in cfg.describe()
 
 
-@pytest.mark.parametrize("key,value", [("G1_TORSO_LEAN_MAX_DEG", "10.5"), ("G1_TORSO_LEAN_MAX_DEG", "30"),
+@pytest.mark.parametrize("key,value", [("G1_TORSO_LEAN_MAX_DEG", "20.5"), ("G1_TORSO_LEAN_MAX_DEG", "21"),
+                                       ("G1_TORSO_LEAN_MAX_DEG", "30"),
                                        ("G1_TORSO_LEAN_MAX_DEG", "0"), ("G1_TORSO_LEAN_MAX_DEG", "nan"),
-                                       ("G1_TORSO_LEAN_MAX_DEG", "abc"), ("G1_TORSO_LEAN_RATE_DPS", "100"),
+                                       ("G1_TORSO_LEAN_MAX_DEG", "abc"), ("G1_TORSO_LEAN_RATE_DPS", "91"),
                                        ("G1_TORSO_LEAN_GAIN_DEG_PER_M", "-1")])
 def test_env_out_of_range_rejected(key, value):
     with pytest.raises(tl.TorsoLeanConfigError):
@@ -625,6 +665,9 @@ def test_feature_on_writer_final_clamp_and_rate_limit_and_gains_unchanged():
         ctrl.set_waist_target([np.nan, 0, 0])
     with pytest.raises(ValueError):
         ctrl.configure_waist_command(hi, lo, 15 * DEG, neutral)
+    with pytest.raises(ValueError):                         # hard max rate also at the final writer
+        ctrl.configure_waist_command(lo, hi, 91 * DEG, neutral)
+    ctrl.configure_waist_command(lo, hi, 90 * DEG, neutral)
 
 
 # ------------------------------------------------- session / handover
@@ -657,7 +700,7 @@ def test_engage_neutral_is_held_command_and_refuses_far_or_stale_waist():
     assert isinstance(s, tl.TorsoLeanSession)
     np.testing.assert_allclose(arm.configured[3], arm.held)          # neutral = held, not re-sampled
     np.testing.assert_allclose(arm.configured[1] - arm.held, [0, 10 * DEG, 10 * DEG])
-    assert arm.configured[2] == pytest.approx(15 * DEG)
+    assert arm.configured[2] == pytest.approx(60 * DEG)       # the writer is the single rate limiter
     assert tl.TorsoLeanSession.try_engage(CFG, FakeWaistArm(meas=(0.0, 0.2, 0.0)), head(), 0.0) == tl.REFUSED
     assert tl.TorsoLeanSession.try_engage(CFG, FakeWaistArm(age=1.0), head(), 0.0) is None
     assert tl.TorsoLeanSession.try_engage(CFG, FakeWaistArm(), tl.FALLBACK_HEAD_POSE, 0.0) is None

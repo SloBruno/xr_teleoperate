@@ -13,9 +13,13 @@ Pipeline per cycle (30 Hz teleop loop)::
                                                       motion does not move it)
       -> horizontal displacement in the operator's NEUTRAL yaw frame (r)
       -> deadband + gain + HARD saturation           (lean_from_displacement)
-      -> low-pass + rate (+ optional accel) limit + final clamp
-                                                     (WaistLeanCommand)
+      -> box clamp (+ optional accel profile)        (WaistLeanCommand)
       -> waist q command [yaw, roll, pitch] = neutral(r) + [0, roll, pitch]
+      -> arm_sdk writer (250 Hz): box clamp + rate limit cfg.rate_dps
+         = the SINGLE authoritative rate limiter (robot_arm._next_waist_frame)
+
+Latency: no low-pass and no second rate limit in this module (they added
+~0.3 s + a 15 deg/s ramp on top of the writer ramp; docs/torso_lean.md).
 
 Sign convention (URDF ``assets/g1/g1_body29_hand14.urdf``; fixed by
 ``tests/test_torso_lean.py`` with pinocchio FK):
@@ -36,8 +40,8 @@ import numpy as np
 DEG = math.pi / 180.0
 
 # ---- hard limits (never configurable above these) --------------------------
-HARD_MAX_LEAN_DEG = 10.0          # operator requirement: <= 10 deg fwd/back/sides
-HARD_MAX_RATE_DPS = 30.0
+HARD_MAX_LEAN_DEG = 20.0          # operator-approved ceiling: <= 20 deg fwd/back/sides
+HARD_MAX_RATE_DPS = 90.0          # also enforced by the arm_sdk writer (robot_arm.py)
 HARD_MAX_ACCEL_DPS2 = 200.0
 HARD_MAX_GAIN_DEG_PER_M = 200.0
 HARD_MAX_DEADBAND_M = 0.20
@@ -46,9 +50,9 @@ HARD_MAX_DEADBAND_M = 0.20
 DEFAULT_MAX_LEAN_DEG = 10.0
 DEFAULT_DEADBAND_M = 0.03
 DEFAULT_GAIN_DEG_PER_M = 10.0 / 0.15     # 15 cm beyond the deadband = 10 deg
-DEFAULT_RATE_DPS = 15.0
+DEFAULT_RATE_DPS = 60.0                 # applied ONCE, by the 250 Hz arm_sdk writer
 DEFAULT_ACCEL_DPS2 = 0.0                 # 0 = acceleration limit off
-DEFAULT_LOWPASS_TAU_S = 0.3
+DEFAULT_LOWPASS_TAU_S = 0.0             # 0 = no low-pass (was 0.3 s: pure lag)
 DEFAULT_STALE_S = 0.2                    # head sample older than this: hold
 DEFAULT_DECAY_AFTER_S = 1.0              # loss longer than this: target -> 0
 DEFAULT_JUMP_M = 0.25                    # head step between frames = recentre
@@ -64,6 +68,11 @@ WAIST_TELEMETRY_MAX_AGE_S = 0.25
 # URDF waist limits (g1_body29_hand14.urdf): yaw +-2.618, roll/pitch +-0.52.
 URDF_WAIST_LOWER = np.array([-2.618, -0.52, -0.52])
 URDF_WAIST_UPPER = np.array([2.618, 0.52, 0.52])
+# The lean box never goes closer than this to the URDF roll/pitch limits
+# (0.52 - 0.05 = 0.47 rad = 26.9 deg >= neutral + 20 deg for a ~0 neutral).
+WAIST_LIMIT_MARGIN_RAD = 0.05
+_LEAN_LIMIT_LOWER = URDF_WAIST_LOWER + np.array([0.0, WAIST_LIMIT_MARGIN_RAD, WAIST_LIMIT_MARGIN_RAD])
+_LEAN_LIMIT_UPPER = URDF_WAIST_UPPER - np.array([0.0, WAIST_LIMIT_MARGIN_RAD, WAIST_LIMIT_MARGIN_RAD])
 WAIST_MOTOR_INDICES = (12, 13, 14)       # yaw, roll, pitch
 
 # Neck pivot -> eye centre, in the HEAD frame, robot basis (x fwd, z up).
@@ -294,7 +303,13 @@ class HeadLeanTracker:
 
 
 class WaistLeanCommand:
-    """Raw lean target -> smooth, limited absolute waist command [yaw, roll, pitch]."""
+    """Raw lean target -> limited absolute waist TARGET [yaw, roll, pitch].
+
+    No rate limit here: the arm_sdk writer slews the written q at
+    ``cfg.rate_dps`` (configure_waist_command), the single rate limiter. An
+    optional acceleration profile (``accel_dps2`` > 0, default off) and an
+    optional low-pass (``lowpass_tau_s`` > 0, default 0) remain for tests.
+    """
 
     def __init__(self, cfg, neutral_q, start_q, now):
         self.cfg = cfg
@@ -304,11 +319,12 @@ class WaistLeanCommand:
         # Lean box: neutral +- max (roll, pitch), yaw fixed at neutral. The
         # value the servos already hold at r (start, within HANDOVER_TOL of the
         # neutral) is included so the first written frame is continuous; the
-        # target itself is always inside neutral +- max. Then URDF limits.
-        lo = np.minimum(self.neutral - np.array([0.0, lim, lim]), start)
-        hi = np.maximum(self.neutral + np.array([0.0, lim, lim]), start)
-        self.lower = np.maximum(lo, URDF_WAIST_LOWER)
-        self.upper = np.minimum(hi, URDF_WAIST_UPPER)
+        # target itself is always inside neutral +- max and at least
+        # WAIST_LIMIT_MARGIN_RAD inside the URDF roll/pitch limits.
+        lo = np.maximum(self.neutral - np.array([0.0, lim, lim]), _LEAN_LIMIT_LOWER)
+        hi = np.minimum(self.neutral + np.array([0.0, lim, lim]), _LEAN_LIMIT_UPPER)
+        self.lower = np.maximum(np.minimum(lo, start), URDF_WAIST_LOWER)
+        self.upper = np.minimum(np.maximum(hi, start), URDF_WAIST_UPPER)
         self.cmd = np.clip(start, self.lower, self.upper)
         self.vel = np.zeros(3)
         self.filtered = np.zeros(2)        # (pitch, roll) after the low-pass
@@ -337,9 +353,10 @@ class WaistLeanCommand:
         self.filtered[1] += (roll_t - self.filtered[1]) * alpha
         desired = self.neutral + np.array([0.0, self.filtered[1], self.filtered[0]])
         desired = np.clip(desired, self.lower, self.upper)
-        max_step = self._rate * dt
         if self._accel > 0.0:
-            # velocity toward desired, bounded by rate and accel, and able to stop in time
+            # optional opt-in profile: velocity toward desired, bounded by
+            # rate and accel, and able to stop in time
+            max_step = self._rate * dt
             dist = desired - self.cmd
             v_stop = np.sqrt(2.0 * self._accel * np.abs(dist))
             v_des = np.sign(dist) * np.minimum(np.minimum(np.abs(dist) / dt, self._rate), v_stop)
@@ -347,7 +364,8 @@ class WaistLeanCommand:
             self.vel = np.clip(self.vel + dv, -self._rate, self._rate)
             delta = np.clip(self.vel * dt, -max_step, max_step)
         else:
-            delta = np.clip(desired - self.cmd, -max_step, max_step)
+            # default: no second rate limiter (the writer slews at cfg.rate_dps)
+            delta = desired - self.cmd
         self.cmd = np.clip(self.cmd + delta, self.lower, self.upper)
         return self.cmd.copy()
 
