@@ -45,10 +45,12 @@ Portado da `dev-inspire` (01ccdac) para a linha Dex3 (mão de 3 dedos,
   (−0,0040; 0; 0,044 m). **R vem exclusivamente da cintura medida em
   `rt/lowstate` (motores 12–14), nunca do comando.** Resultado: a mão fica onde
   o controle manda mesmo com o tronco inclinado (checado com FK do URDF completo).
-  Se `|cmd−medida|` de roll/pitch exceder 2° continuamente por >0,5 s, o
-  watchdog desativa novas inclinações, comanda retorno ao neutro e avisa no
-  terminal/`teleop-status.jsonl`. Telemetria ausente, antiga ou inválida também
-  falha para neutro, sem lançar exceção nem bloquear o loop. A transformação é
+  Se `|cmd−medida|` de roll/pitch exceder 2° continuamente por >0,5 s, o estado
+  vira `waist_tracking_degraded` e há um aviso limitado no terminal/
+  `teleop-status.jsonl`, com comando, medida, erro por eixo e duração. A
+  inclinação continua limitada por taxa e por ±10°: atraso finito persistente
+  **não** desativa nem comanda neutro. Telemetria ausente, antiga ou inválida
+  ainda falha para neutro, sem lançar exceção nem bloquear o loop. A transformação é
   aplicada dentro de `run_arm_tracking_cycle(target_transform=...)` **depois**
   do calibrador, do limitador cartesiano e do Cartesian hold, e antes do IK
   e do gate de resíduo (que compara com o alvo transformado). Gravidade do

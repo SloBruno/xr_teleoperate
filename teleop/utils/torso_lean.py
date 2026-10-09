@@ -437,8 +437,12 @@ class TorsoLeanSession:
         self._R_neutral_T = waist_rotation(command.neutral).T
         self._jumps_logged = 0
         self.enabled = True
-        self.watchdog_tripped = False
+        self.watchdog_tripped = False  # retained for backward-compatible status consumers; never set by lag.
         self._tracking_error_since = None
+        self._tracking_degraded = False
+        self._tracking_warning_logged = False
+        self._tracking_error = np.zeros(3)
+        self._tracking_duration_s = 0.0
         self._disable_logged = False
 
     @classmethod
@@ -497,11 +501,13 @@ class TorsoLeanSession:
                 pass
 
     def observe_measured_waist(self, measured_q, age, now):
-        """Validate feedback, run the tracking watchdog and return measured R.
+        """Validate feedback and classify tracking lag; return measured R.
 
         The returned rotation is derived exclusively from lowstate feedback.
         Invalid/stale feedback disables new lean and returns ``None`` without
-        raising, so telemetry failure cannot block the control loop.
+        raising, so telemetry failure cannot block the control loop. Persistent
+        finite command-vs-measured lag is diagnostic-only: it warns and marks
+        ``waist_tracking_degraded`` but deliberately keeps the limited command.
         """
         measured = None
         try:
@@ -521,19 +527,31 @@ class TorsoLeanSession:
             return None
         self.measured_waist = measured.copy()
         if self.enabled:
-            error = float(np.max(np.abs(self.waist_cmd[1:] - measured[1:])))
+            self._tracking_error = self.waist_cmd - measured
+            error = float(np.max(np.abs(self._tracking_error[1:])))
             if error > WAIST_TRACKING_ERROR_RAD:
                 if self._tracking_error_since is None:
                     self._tracking_error_since = now
-                elif now - self._tracking_error_since > WAIST_TRACKING_ERROR_DURATION_S:
-                    self.watchdog_tripped = True
-                    self._disable(
-                        "waist_watchdog_tripped",
-                        "[torso_lean] AVISO: cintura não acompanhou o comando (>2° por >0,5 s); "
-                        "inclinação desativada e retorno ao neutro",
-                    )
+                self._tracking_duration_s = max(0.0, now - self._tracking_error_since)
+                if self._tracking_duration_s > WAIST_TRACKING_ERROR_DURATION_S:
+                    self._tracking_degraded = True
+                    if not self._tracking_warning_logged:
+                        self._tracking_warning_logged = True
+                        if self.log is not None:
+                            try:
+                                self.log.warning(
+                                    "[torso_lean] AVISO: cintura não acompanhou o comando "
+                                    f"(cmd {np.round(self.waist_cmd, 3)}, medida {np.round(measured, 3)}, "
+                                    f"erro {np.round(self._tracking_error, 3)} rad por "
+                                    f"{self._tracking_duration_s:.2f}s); continuando limitada a ±{self.cfg.max_deg:g}°"
+                                )
+                            except BaseException:
+                                pass
             else:
                 self._tracking_error_since = None
+                self._tracking_duration_s = 0.0
+                self._tracking_degraded = False
+                self._tracking_warning_logged = False
         return self.torso_rotation(measured)
 
     def step(self, head_pose, now):
@@ -556,10 +574,13 @@ class TorsoLeanSession:
     def telemetry(self):
         pitch, roll = self.command.lean()
         tp, tr = self.tracker.target
+        status = "waist_tracking_degraded" if self._tracking_degraded else self.tracker.status
         return {"lean_pitch": pitch, "lean_roll": roll, "target_pitch": tp, "target_roll": tr,
                 "waist_cmd": self.waist_cmd, "waist_measured": self.measured_waist,
+                "waist_tracking_error": self._tracking_error.copy(),
+                "waist_tracking_duration_s": self._tracking_duration_s,
                 "enabled": self.enabled, "watchdog_tripped": self.watchdog_tripped,
-                "status": self.tracker.status}
+                "status": status}
 
 
 def status_telemetry(session):
@@ -568,7 +589,7 @@ def status_telemetry(session):
         return {"configured": False, "enabled": False, "status": "off"}
     try:
         tm = session.telemetry()
-        return {
+        status = {
             "configured": True,
             "enabled": bool(tm["enabled"]),
             "watchdog_tripped": bool(tm["watchdog_tripped"]),
@@ -576,8 +597,15 @@ def status_telemetry(session):
             "compensation_source": "measured_waist",
             "waist_command": [float(value) for value in tm["waist_cmd"]],
             "waist_measured": [float(value) for value in tm["waist_measured"]],
+            "waist_tracking": {
+                "commanded": [float(value) for value in tm["waist_cmd"]],
+                "measured": [float(value) for value in tm["waist_measured"]],
+                "error": [float(value) for value in tm["waist_tracking_error"]],
+                "duration_s": float(tm["waist_tracking_duration_s"]),
+            },
             "target_pitch_roll": [float(tm["target_pitch"]), float(tm["target_roll"])],
         }
+        return status
     except Exception:
         return {"configured": True, "enabled": False, "status": "telemetry_error"}
 

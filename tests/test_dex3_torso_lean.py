@@ -480,7 +480,7 @@ def test_dex3_feature_on_pitch_roll_only_yaw_fixed_and_neutral_before_weight_ram
     assert not np.allclose(state["ik_targets"][-1][0], W_LEFT)
 
 
-def test_nonfollowing_measured_waist_trips_watchdog_and_ik_never_uses_commanded_lean(monkeypatch):
+def test_nonfollowing_measured_waist_warns_degraded_but_keeps_limited_command_and_measured_compensation(monkeypatch):
     calls, state = _run_dex3(
         monkeypatch, {"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "3"},
         cycles_before_q=75, waist_follows=False,
@@ -493,8 +493,10 @@ def test_nonfollowing_measured_waist_trips_watchdog_and_ik_never_uses_commanded_
     assert state["gravity"] and all(np.allclose(R, np.eye(3)) for R in state["gravity"])
     assert state["ik_targets"] and all(np.allclose(pair[0], W_LEFT) for pair in state["ik_targets"])
     targets = np.asarray(state["waist_targets"])
-    assert np.max(np.abs(targets[:, 1:] - np.array([0.01, -0.02]))) > 0.2 * DEG
-    np.testing.assert_allclose(targets[-1], [0.0, 0.01, -0.02], atol=0.2 * DEG)
+    neutral = np.array([0.0, 0.01, -0.02])
+    assert np.max(np.abs(targets[:, 1:] - neutral[1:])) > 0.2 * DEG
+    assert np.max(np.abs(targets[:, 1:] - neutral[1:])) <= 3 * DEG + 1e-9
+    assert np.linalg.norm(targets[-1, 1:] - neutral[1:]) > 0.2 * DEG
 
 
 def test_dex3_feature_rejects_max_above_10_and_stays_off(monkeypatch):
