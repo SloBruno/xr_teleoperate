@@ -480,7 +480,7 @@ if __name__ == '__main__':
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
-    parser.add_argument('--walk-speed-cap', type=float, default=None, help='Walk cap m/s (default 0.3, hard max 0.6; env G1_WALK_SPEED_CAP)')
+    parser.add_argument('--walk-speed-cap', type=float, default=None, help='Walk cap m/s (default 0.3 when unset; run_g1_quest_dex3.sh passes 0.6; hard max 0.6; env G1_WALK_SPEED_CAP)')
     parser.add_argument('--loco-request-fsm', type=str, default='none', choices=['none', '500'], help='Opt-in: in the preflight only, request FSM 500 (SetFsmId) when the robot is in 501 and confirm by polling; never 801; default none = send nothing')
     parser.add_argument('--loco-backend', type=str, default='wirelesscontroller', choices=['setvelocity', 'wirelesscontroller'], help='Walking transport: wirelesscontroller (default: continuous 20 Hz rt/wirelesscontroller joystick state; fail-safe, no silent fallback) or setvelocity (legacy RPC 7105, only when forced)')
     parser.add_argument('--turn-rate-cap', type=float, default=None, help='Turn cap rad/s (default 0.3, hard max 1.0; env G1_TURN_RATE_CAP)')

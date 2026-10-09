@@ -88,7 +88,7 @@ class Dex3LauncherTorsoPoseWebTest(unittest.TestCase):
         self.assertEqual(
             self.teleop_line(log),
             "ARGV -s teleop_hand_and_arm.py --arm G1_29 --ee dex3 --input-mode hand --motion "
-            "--camera-layout vertical --walk-speed-cap 0.3 --turn-rate-cap 0.3 --loco-backend wirelesscontroller "
+            "--camera-layout vertical --walk-speed-cap 0.6 --turn-rate-cap 0.3 --loco-backend wirelesscontroller "
             "--loco-request-fsm none --video-plane-height auto")
 
     def test_launcher_installs_no_shell_trap(self):

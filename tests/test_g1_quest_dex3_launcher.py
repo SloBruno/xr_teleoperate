@@ -124,10 +124,12 @@ if __name__ == "__main__":
 class LauncherWalkCapTest(unittest.TestCase):
     source = LAUNCHER.read_text(encoding="utf-8")
 
-    def test_defaults_match_botbrain_frontend_with_env_override(self):
-        self.assertIn("walk_speed_cap=${G1_WALK_SPEED_CAP:-0.3}", self.source)
+    def test_defaults_native_walk_and_conservative_turn_with_env_override(self):
+        # Walk default = Python hard max 0.6 m/s (operator-approved native
+        # joystick velocity); turn stays at the conservative 0.3 rad/s.
+        self.assertIn("walk_speed_cap=${G1_WALK_SPEED_CAP:-0.6}", self.source)
         self.assertIn("turn_rate_cap=${G1_TURN_RATE_CAP:-0.3}", self.source)
-        self.assertIn("g1-r1.ts", self.source)
+        self.assertNotIn("G1_WALK_SPEED_CAP:-0.3", self.source)
 
     def test_caps_are_passed_explicitly_to_teleop(self):
         self.assertIn('--walk-speed-cap "$walk_speed_cap"', self.source)
@@ -139,7 +141,7 @@ class LauncherWalkCapTest(unittest.TestCase):
         script = "\n".join(lines) + '\necho "$walk_speed_cap $turn_rate_cap"'
         def run(env):
             return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=True).stdout.strip()
-        self.assertEqual(run({"PATH": "/usr/bin:/bin"}), "0.3 0.3")
+        self.assertEqual(run({"PATH": "/usr/bin:/bin"}), "0.6 0.3")
         self.assertEqual(run({"PATH": "/usr/bin:/bin", "G1_WALK_SPEED_CAP": "0.4", "G1_TURN_RATE_CAP": "0.2"}), "0.4 0.2")
 
     def test_python_hard_limits_unchanged(self):
