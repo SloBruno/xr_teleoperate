@@ -307,7 +307,7 @@ def test_ik_compensation_rotation_uses_measured_waist_never_commanded_waist():
     assert not np.allclose(rotation, tl.waist_rotation(session.waist_cmd))
 
 
-def test_persistent_roll_pitch_tracking_error_trips_watchdog_and_commands_neutral():
+def test_persistent_roll_pitch_tracking_error_warns_degraded_but_keeps_limited_tilt():
     logs = []
     session = _lean_session()
     session.log = types.SimpleNamespace(warning=logs.append)
@@ -320,13 +320,21 @@ def test_persistent_roll_pitch_tracking_error_trips_watchdog_and_commands_neutra
     assert session.observe_measured_waist(measured, age=0.01, now=1.49) is not None
     assert session.observe_measured_waist(measured, age=0.01, now=1.51) is not None
 
-    assert session.watchdog_tripped is True
-    assert session.enabled is False
+    assert session.watchdog_tripped is False
+    assert session.enabled is True
+    assert session.telemetry()["status"] == "waist_tracking_degraded"
     before = session.waist_cmd.copy()
-    after = session.step(head(pivot=(0.3, 0.0, 1.6)), 1.61)
-    assert np.all(np.abs(after[1:]) < np.abs(before[1:]))
-    assert session.tracker.target == (0.0, 0.0)
-    assert len(logs) == 1 and ">2" in logs[0] and "0,5" in logs[0]
+    after = session.step(head(pivot=(0.20, 0.0, 1.6)), 1.61)
+    assert np.all(np.abs(after[1:] - session.command.neutral[1:]) <= 10 * DEG + 1e-12)
+    assert np.any(np.abs(after[1:] - before[1:]) > 0.0)
+    assert session.tracker.target != (0.0, 0.0)
+    assert len(logs) == 1 and "não acompanhou" in logs[0] and "continuando" in logs[0]
+
+    status = tl.status_telemetry(session)
+    assert status["status"] == "waist_tracking_degraded"
+    assert status["enabled"] is True and status["watchdog_tripped"] is False
+    assert status["waist_tracking"]["duration_s"] == pytest.approx(0.51)
+    assert status["waist_tracking"]["error"][1:] == pytest.approx([4 * DEG, -4 * DEG])
 
 
 def test_invalid_or_stale_waist_telemetry_fails_neutral_without_raising():
