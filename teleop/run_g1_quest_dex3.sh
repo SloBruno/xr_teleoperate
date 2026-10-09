@@ -35,13 +35,13 @@ export PYTHONPATH=$repo:$repo/teleop/televuer/src:$repo/teleop/teleimager/src:$r
 export XR_TELEOP_CERT=${XR_TELEOP_CERT:-/home/unitree/.config/xr_teleoperate/cert.pem}
 export XR_TELEOP_KEY=${XR_TELEOP_KEY:-/home/unitree/.config/xr_teleoperate/key.pem}
 
-# Walking cap: operator-approved native joystick velocity, 0.6 m/s (= the
-# Python hard max); turn stays conservative at 0.3 rad/s. Passed explicitly
-# to the teleop; override with G1_WALK_SPEED_CAP / G1_TURN_RATE_CAP (e.g.
-# G1_WALK_SPEED_CAP=0.3 restores the previous default). The Python code keeps
-# its hard limits (0.6 m/s, 1.0 rad/s) and validation.
+# Locomotion caps: operator-approved native joystick velocity, walk 0.6 m/s
+# (= the Python hard max) and turn 0.6 rad/s. Passed explicitly to the
+# teleop; override with G1_WALK_SPEED_CAP / G1_TURN_RATE_CAP (e.g. 0.3 / 0.3
+# restores the previous defaults). The Python code keeps its hard limits
+# (0.6 m/s, 1.0 rad/s) and validation.
 walk_speed_cap=${G1_WALK_SPEED_CAP:-0.6}
-turn_rate_cap=${G1_TURN_RATE_CAP:-0.3}
+turn_rate_cap=${G1_TURN_RATE_CAP:-0.6}
 # Walking backend: rt/wirelesscontroller (continuous 20 Hz) by default;
 # G1_LOCO_BACKEND=setvelocity forces the legacy SetVelocity RPC.
 loco_backend=${G1_LOCO_BACKEND:-wirelesscontroller}
