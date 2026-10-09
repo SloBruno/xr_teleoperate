@@ -63,6 +63,89 @@ Portado da `dev-inspire` (01ccdac) para a linha Dex3 (mão de 3 dedos,
   idênticos aos do `ec07bcf` (teste byte a byte) e o IK recebe exatamente os
   alvos calibrados.
 
+### Feed-forward de gravidade da cintura (`G1_TORSO_LEAN_WAIST_FF`)
+
+**Problema (teste de 20°, `g1_handoff/torso_test_20deg/SUMMARY.md`):** o
+comando seguia o alvo a 0,06°, mas o pitch medido tinha viés constante para a
+**frente**: medido−comando +1,9° inclinando para frente, +4,4° para trás
+(cmd −19,9°, medido −15,8°), neutro inicial 1,0° com cmd 0,06°, e 3,9° parado
+por 27 s com cmd 0,06° após uma inclinação. Causa: o peso do tronco contra o PD
+da cintura (kp 300, kd 3, `tau = 0`) no writer `rt/arm_sdk` de 250 Hz — o
+servo só segura quando `kp·erro = torque de gravidade` (8 N·m / 300 = 1,5°).
+Não é o FSM 501.
+
+**Correção (causa raiz, por modelo):** `teleop/utils/waist_gravity_ff.py`
+calcula o torque estático da gravidade nas juntas roll (13) e pitch (14) com
+pinocchio `computeGeneralizedGravity` no **URDF completo**
+`assets/g1/g1_body29_hand14.urdf` (o mesmo da IK; base = pelve), com a cintura
+e os 14 braços **medidos** (`rt/lowstate`) e a gravidade no referencial da pelve
+a partir do quaternion do **IMU da pelve** (`rt/lowstate.imu_state`). ~3 µs por
+chamada, então é calculado **no próprio writer de 250 Hz**, do mesmo snapshot do
+lowstate, e vai só em `motor_cmd[13/14].tau`. Yaw `tau = 0`. **kp/kd não mudam.**
+
+Torque do modelo (braços em zero, pelve na vertical; N·m; sinal = torque que
+**segura** a postura; pitch+ = frente, roll+ = direita):
+
+| pitch | −20° | −10° | 0° | +10° | +20° |
+|---|---|---|---|---|---|
+| τ pitch | +0,26 | −3,96 | −8,05 | −11,90 | −15,39 |
+
+roll ±10° (pitch 0): τ roll ∓3,95 (≈ −3,95 em +10°, +4,00 em −10°), τ pitch −7,93.
+Braços estendidos à frente: τ pitch −12,0 (0°) e −25,4 (+20°). O sinal bate com
+o viés medido: o tronco cai para a frente, então o torque de sustentação é
+negativo (para trás) e cresce com a inclinação; a 300 N·m/rad, −8 N·m = 1,5° de
+queda evitada no neutro, −15 N·m ≈ 2,9° a +20°. Os números são do modelo
+(pinocchio 3.1 no ambiente local); conferir no `tv` do robô (script offline no
+fim desta seção).
+
+**Segurança (no writer final):**
+* só existe com `G1_TORSO_LEAN=1`, `--motion`, e só é configurado **depois** do
+  `r` (quando a sessão de inclinação assume a cintura); antes disso ou com a
+  função desligada os quadros são byte a byte os do `aeccc09`
+  (`test_lean_on_without_ff_writer_frames_identical_to_base_aeccc09`) e do `ec07bcf`;
+* teto por eixo **30 N·m** (pior caso do modelo com |inclinação| ≤ 20° em
+  qualquer pose de braço dentro dos limites: ~27,5 N·m) e teto absoluto
+  `HARD_CEILING_NM` = 30 N·m = 60 % do esforço de 50 N·m do URDF;
+* rampa de ganho 0→1 em **0,5 s** na ativação e após qualquer falha; no
+  shutdown, depois da cintura voltar ao neutro, rampa 1→0 em 0,5 s e espera
+  (≤ 1 s) o writer reportar zero **antes** da rampa do peso do `arm_sdk`;
+* `tau = 0` **imediato** (sem rampa) se o lowstate tiver > 0,1 s, IMU ausente/
+  inválido ou pelve inclinada > 35°, `motorstate ≠ 0` em 12–14, juntas não
+  finitas ou erro do modelo;
+* kill switch `G1_TORSO_LEAN_WAIST_FF=0` (padrão 1 com a inclinação ligada); o
+  launcher valida (só 0|1, senão sai com código 2) e imprime
+  `Feed-forward de gravidade da cintura: LIGADO|DESLIGADO`; valor inválido no
+  Python desliga só o feed-forward;
+* telemetria: `teleop-status.jsonl` → `torso_lean.waist_ff`
+  (`tau_nm` yaw/roll/pitch aplicados, `model_nm` do modelo, `gain`, `reason`).
+
+**Risco aberto:** não está verificado que o FSM 501 respeita `tau` da cintura
+via `rt/arm_sdk` (como não estava para `q`). A telemetria mostra: se com FF=1 o
+viés medido−comando não cair, o firmware está ignorando o `tau`. Se
+`reason` ficar `motor_fault` o tempo todo, a palavra `motorstate` do G1 não é 0
+em operação normal (verificar antes de mudar o gate).
+
+**Primeiro teste físico (NÃO executado):** robô **suspenso**, pórtico com
+**folga**, R3 na mão do segundo operador. Comparar a 10°, uma sessão de cada:
+```bash
+cd ~/xr_teleoperate_slo
+G1_TORSO_LEAN=1 G1_TORSO_LEAN_MAX_DEG=10 G1_TORSO_LEAN_WAIST_FF=0 XR_POSE_WEB=1 bash teleop/run_g1_quest_dex3.sh
+G1_TORSO_LEAN=1 G1_TORSO_LEAN_MAX_DEG=10 G1_TORSO_LEAN_WAIST_FF=1 XR_POSE_WEB=1 bash teleop/run_g1_quest_dex3.sh
+```
+Mesmo roteiro (neutro 10 s, frente 10°, neutro, trás 10°, neutro): com FF=1 o
+viés do neutro (hoje ~1–4°) e o medido−comando de pitch devem cair para perto
+de 0; `waist_ff.tau_nm.pitch` ≈ −8 a −12 N·m. Qualquer oscilação, tranco na
+ativação (rampa 0,5 s após o `r`) ou sentido errado → `q` e R3.
+
+Validação numérica offline no robô (sem DDS):
+```bash
+cd ~/xr_teleoperate_slo && PYTHONNOUSERSITE=1 /home/unitree/miniconda3/envs/tv/bin/python -c "
+import math; from teleop.utils.waist_gravity_ff import WaistGravityModel as M
+m=M(); z=[0.0]*14; d=math.radians
+for p in (-20,-10,0,10,20): print('pitch',p,m.waist_tau([0,0,d(p)],z,(1,0,0,0)))
+for r in (-10,10): print('roll',r,m.waist_tau([0,d(r),0],z,(1,0,0,0)))"
+```
+
 O restante deste documento é o texto original da `dev-inspire`
 (hand tracking); a matemática do comando (deslocamento do pivô do pescoço,
 zona morta, ganho, saturação, filtro, taxa, gates) é a mesma.

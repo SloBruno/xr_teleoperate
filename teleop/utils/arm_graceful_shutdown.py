@@ -17,6 +17,11 @@ Contract (terminal ``q`` / right-controller ``B`` / Ctrl+C / exception):
    procedure waits (bounded) until the WRITTEN waist command equals the
    neutral BEFORE the authority weight ramp. With the feature off nothing in
    this step runs and the sequence is byte-for-byte the previous one.
+4d. Waist gravity feed-forward (only if ``configure_waist_gravity_ff`` ran,
+   teleop/utils/waist_gravity_ff.py): after the waist is back at neutral the
+   feed-forward tau is ramped to 0 (``RAMP_S``) and the procedure waits
+   (bounded) for the writer to report it finished BEFORE the weight ramp, so
+   the vendor controller never receives the waist with a residual tau.
 4c. Dex3 close/hold at shutdown (``DEX3_SHUTDOWN_HAND=close|hold``, see
    teleop/utils/dex3_shutdown_hand.py): when ``close_hands`` is given it runs
    FIRST (before step 2): triggers lose authority and the hand ramps closed
@@ -57,6 +62,7 @@ DEFAULT_WRITER_MAX_AGE = 0.25           # s since the last successful arm write
 DEFAULT_WAIST_NEUTRAL_TOL = 1e-4        # rad, written waist command == neutral
 DEFAULT_WAIST_MEASURED_TOL = 0.05       # rad, measured waist near neutral (logged)
 DEFAULT_WAIST_EXTRA_TIMEOUT = 1.5       # s on top of distance / rate
+DEFAULT_WAIST_FF_RAMP_TIMEOUT = 1.0     # s for the waist feed-forward ramp-out (ramp 0.5 s)
 SMOOTHSTEP_PEAK_VELOCITY_FACTOR = 1.5   # max d/ds of 3s^2 - 2s^3
 
 
@@ -104,6 +110,7 @@ class GracefulShutdownResult:
     hand_summary: dict | None = None
     waist_return_requested: bool = False
     waist_neutral_reached: bool = False
+    waist_ff_zeroed: bool = False
     weight_released: bool = False
     release_confirmed: bool = False
     deactivated: bool = False
@@ -137,6 +144,7 @@ def run_graceful_arm_shutdown(
     writer_max_age=DEFAULT_WRITER_MAX_AGE,
     waist_neutral_tol=DEFAULT_WAIST_NEUTRAL_TOL,
     waist_extra_timeout=DEFAULT_WAIST_EXTRA_TIMEOUT,
+    waist_ff_ramp_timeout=DEFAULT_WAIST_FF_RAMP_TIMEOUT,
 ):
     """Run the graceful shutdown once; never raises, always ends deactivated.
 
@@ -331,6 +339,31 @@ def run_graceful_arm_shutdown(
                   measured_near_neutral=measured_ok)
         except BaseException as error:
             event("shutdown_error", phase="waist_wait", error=type(error).__name__)
+
+    # ---- Phase 1c: waist gravity feed-forward -> 0 before releasing authority
+    ff_getter = getattr(arm_ctrl, "get_waist_gravity_ff", None)
+    ff_status = None
+    if ff_getter is not None:
+        try:
+            ff_status = ff_getter()
+        except BaseException:
+            ff_status = None
+    if isinstance(ff_status, dict) and ff_status.get("configured"):
+        try:
+            if arm_ctrl.waist_gravity_ff_ramp_out():
+                event("shutdown_waist_ff_ramp_out_started", gain=float(ff_status.get("gain", 0.0)))
+                deadline = clock() + float(waist_ff_ramp_timeout)
+                while True:
+                    status = ff_getter()
+                    if isinstance(status, dict) and status.get("finished"):
+                        result.waist_ff_zeroed = True
+                        break
+                    if clock() >= deadline or not writer_alive():
+                        break
+                    sleep(waypoint_dt)
+                event("shutdown_waist_ff_ramp_out_finished", zeroed=result.waist_ff_zeroed)
+        except BaseException as error:
+            event("shutdown_error", phase="waist_ff_ramp_out", error=type(error).__name__)
 
     # ---- Phase 2: open Dex3 and stop its writer -------------------------
     if open_hands is not None and (close_hands is None or hands_close_failed):

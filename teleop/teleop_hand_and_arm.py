@@ -46,6 +46,7 @@ from teleop.utils.arm_graceful_shutdown import run_graceful_arm_shutdown
 from teleop.utils import dex3_shutdown_hand
 from teleop.utils.pose_stream import PoseStreamSender
 from teleop.utils import torso_lean
+from teleop.utils import waist_gravity_ff
 from teleop.utils.xr_video_plane import (
     describe_plane, plane_exceeds_headset, resolve_plane_height, validate_plane,
     DEFAULT_DISTANCE_M,
@@ -534,6 +535,19 @@ if __name__ == '__main__':
         logger_mp.error(f"[torso_lean] configuração rejeitada ({e}); inclinação do tronco DESLIGADA")
         lean_cfg = None
     logger_mp.info(lean_cfg.describe() if lean_cfg is not None else "Inclinação do tronco: DESLIGADA")
+    # Waist gravity feed-forward (docs/torso_lean.md, teleop/utils/waist_gravity_ff.py):
+    # only with torso lean on; kill switch G1_TORSO_LEAN_WAIST_FF=0. Invalid
+    # value -> feed-forward OFF (fail closed; the lean itself is unchanged).
+    waist_ff_enabled = False
+    waist_ff_model = None
+    if lean_cfg is not None:
+        try:
+            waist_ff_enabled = waist_gravity_ff.ff_enabled_from_env(os.environ)
+        except waist_gravity_ff.WaistFFConfigError as e:
+            logger_mp.error(f"[torso_lean] {e}; feed-forward de gravidade da cintura DESLIGADO")
+            waist_ff_enabled = False
+        logger_mp.info("[torso_lean] feed-forward de gravidade da cintura (modelo): "
+                       + ("LIGADO" if waist_ff_enabled else "DESLIGADO"))
     install_sigterm_handler()
     if args.ee == "dex3":
         _dex3_shutdown_mode, _dex3_shutdown_warning = dex3_shutdown_hand.resolve_mode(
@@ -652,6 +666,13 @@ if __name__ == '__main__':
             arm_ik = G1_29_ArmIK()
             arm_ctrl = G1_29_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
             arm_calibration = HumanCalibratedWristCalibrator(ControllerWristCalibrator())
+            if lean_cfg is not None and args.motion and waist_ff_enabled:
+                try:
+                    waist_ff_model = waist_gravity_ff.WaistGravityModel()
+                except Exception as e:
+                    logger_mp.error(f"[torso_lean] modelo de gravidade da cintura indisponível ({e!r}); "
+                                    "feed-forward DESLIGADO")
+                    waist_ff_model = None
         elif args.arm == "G1_23":
             arm_ik = G1_23_ArmIK()
             arm_ctrl = G1_23_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
@@ -1155,7 +1176,8 @@ if __name__ == '__main__':
                 stick=stick_log,
                 cameras=camera_status_for_layout(args.camera_layout, head_img, left_wrist_img),
                 dex3_pressure_timestamps=tracking_pressure_timestamps,
-                torso_lean=torso_lean.status_telemetry(lean_session),
+                torso_lean=waist_gravity_ff.status_block(
+                    torso_lean.status_telemetry(lean_session), arm_ctrl, waist_ff_enabled),
             )
 
             if _diag is not None: _diag.mark("telemetry")
@@ -1183,6 +1205,15 @@ if __name__ == '__main__':
             if lean_cfg is not None and lean_session is None:
                 lean_session = torso_lean.TorsoLeanSession.try_engage(
                     lean_cfg, arm_ctrl, getattr(tele_data, "head_pose", None), time.monotonic(), log=logger_mp)
+                if isinstance(lean_session, torso_lean.TorsoLeanSession) and waist_ff_model is not None:
+                    # The waist is ours now (after r): enable the model-based
+                    # gravity tau (writer ramps it in over 0.5 s).
+                    try:
+                        arm_ctrl.configure_waist_gravity_ff(waist_ff_model)
+                        logger_mp.info("[torso_lean] feed-forward de gravidade da cintura ativo (rampa 0,5 s, "
+                                       f"teto {waist_gravity_ff.TAU_CAP_NM:g} N·m por eixo)")
+                    except Exception as e:
+                        logger_mp.error(f"[torso_lean] feed-forward da cintura recusado ({e!r}); tau = 0")
             if isinstance(lean_session, torso_lean.TorsoLeanSession):
                 lean_now = time.monotonic()
                 try:

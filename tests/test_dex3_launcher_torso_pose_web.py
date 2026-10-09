@@ -24,6 +24,7 @@ case "$*" in
   *pose_compare_web*) echo "WEBSTART $$" >>"$FAKE_LOG"; trap 'echo WEBSTOP >>"$FAKE_LOG"; exit 0' INT; sleep 30 & wait; echo WEBEND >>"$FAKE_LOG";;
   *teleop_hand_and_arm*)
     echo "ENV G1_TORSO_LEAN=${G1_TORSO_LEAN:-unset} MAX=${G1_TORSO_LEAN_MAX_DEG:-unset} XR_POSE_STREAM=${XR_POSE_STREAM:-unset}" >>"$FAKE_LOG"
+echo "ENV G1_TORSO_LEAN_WAIST_FF=${G1_TORSO_LEAN_WAIST_FF:-unset}" >>"$FAKE_LOG"
     exit 0;;
 esac
 '''
@@ -129,6 +130,30 @@ class Dex3LauncherTorsoPoseWebTest(unittest.TestCase):
             self.log.write_text("")
             r, log = self.run_launcher(**env)
             self.assertEqual(r.returncode, 2, (env, r.stderr))
+            self.assertNotIn("teleop_hand_and_arm", log)
+
+    def test_waist_ff_default_on_with_lean_and_kill_switch(self):
+        r, log = self.run_launcher(G1_TORSO_LEAN="1", G1_TORSO_LEAN_MAX_DEG="10")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Feed-forward de gravidade da cintura: LIGADO", r.stdout)
+        self.assertIn("ENV G1_TORSO_LEAN_WAIST_FF=1", log)
+        self.log.write_text("")
+        r, log = self.run_launcher(G1_TORSO_LEAN="1", G1_TORSO_LEAN_MAX_DEG="10", G1_TORSO_LEAN_WAIST_FF="0")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Feed-forward de gravidade da cintura: DESLIGADO (G1_TORSO_LEAN_WAIST_FF=0)", r.stdout)
+        self.assertIn("ENV G1_TORSO_LEAN_WAIST_FF=0", log)
+
+    def test_waist_ff_not_exported_when_lean_off(self):
+        r, log = self.run_launcher(G1_TORSO_LEAN_WAIST_FF="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Feed-forward de gravidade", r.stdout)
+        self.assertIn("ENV G1_TORSO_LEAN_WAIST_FF=unset", log)
+
+    def test_waist_ff_bad_value_refused_before_anything_starts(self):
+        for value in ("2", "yes", "off"):
+            self.log.write_text("")
+            r, log = self.run_launcher(G1_TORSO_LEAN="1", G1_TORSO_LEAN_WAIST_FF=value)
+            self.assertEqual(r.returncode, 2, (value, r.stderr))
             self.assertNotIn("teleop_hand_and_arm", log)
 
     def test_pose_web_on_starts_web_exports_stream_and_stops_it(self):

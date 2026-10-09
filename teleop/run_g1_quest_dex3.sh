@@ -8,6 +8,9 @@
 #   G1_TORSO_LEAN_GAIN_DEG_PER_M=66.7 (15 cm past the deadband = 10 deg)
 #   G1_TORSO_LEAN_DEADBAND_M=0.03  G1_TORSO_LEAN_RATE_DPS=60 (max 90; single limiter = 250 Hz
 #   arm_sdk writer, no low-pass)  G1_TORSO_LEAN_ACCEL_DPS2=0 (off)
+#   G1_TORSO_LEAN_WAIST_FF=1 (default with the lean on; 0 = kill switch): model-based
+#   waist gravity feed-forward tau on roll/pitch (pinocchio, measured joints + pelvis
+#   IMU; cap 30 N.m/axis, 0.5 s ramp, 0 on stale/fault). Ignored/unset when the lean is off.
 #
 # Pose compare web (robot wrist FK x operator wrist/IK target, 2D/3D,
 # "Salvar tarefa"; see docs/pose_compare_web.md). Default OFF:
@@ -49,7 +52,7 @@ loco_backend=${G1_LOCO_BACKEND:-wirelesscontroller}
 # Torso lean: validated before anything starts and again in Python.
 G1_TORSO_LEAN=${G1_TORSO_LEAN:-0}
 case "$G1_TORSO_LEAN" in
-    0|"") G1_TORSO_LEAN=0; torso_lean_msg="Inclinação do tronco: DESLIGADA (G1_TORSO_LEAN=1 para ligar)" ;;
+    0|"") G1_TORSO_LEAN=0; unset G1_TORSO_LEAN_WAIST_FF; torso_lean_msg="Inclinação do tronco: DESLIGADA (G1_TORSO_LEAN=1 para ligar)" ;;
     1)
         G1_TORSO_LEAN_MAX_DEG=${G1_TORSO_LEAN_MAX_DEG:-10}
         if ! awk -v v="$G1_TORSO_LEAN_MAX_DEG" 'BEGIN { exit !(v ~ /^[0-9]+(\.[0-9]+)?$/ && v > 0 && v <= 20) }'; then
@@ -61,6 +64,15 @@ case "$G1_TORSO_LEAN" in
             if [[ -n "${!v:-}" ]]; then export "${v?}"; fi
         done
         torso_lean_msg="Inclinação do tronco: LIGADA, máx ${G1_TORSO_LEAN_MAX_DEG}° pitch/roll (yaw fixo), ganho ${G1_TORSO_LEAN_GAIN_DEG_PER_M:-66.7}°/m, zona morta ${G1_TORSO_LEAN_DEADBAND_M:-0.03} m, ${G1_TORSO_LEAN_RATE_DPS:-60}°/s; neutro = postura no r"
+        G1_TORSO_LEAN_WAIST_FF=${G1_TORSO_LEAN_WAIST_FF:-1}
+        case "$G1_TORSO_LEAN_WAIST_FF" in
+            1) torso_lean_msg="$torso_lean_msg
+Feed-forward de gravidade da cintura: LIGADO (modelo; teto 30 N·m/eixo, rampa 0,5 s; G1_TORSO_LEAN_WAIST_FF=0 desliga)" ;;
+            0) torso_lean_msg="$torso_lean_msg
+Feed-forward de gravidade da cintura: DESLIGADO (G1_TORSO_LEAN_WAIST_FF=0)" ;;
+            *) echo "G1_TORSO_LEAN_WAIST_FF='$G1_TORSO_LEAN_WAIST_FF' rejeitado (use 0|1); não iniciando." >&2; exit 2 ;;
+        esac
+        export G1_TORSO_LEAN_WAIST_FF
         ;;
     *) echo "unsupported G1_TORSO_LEAN='$G1_TORSO_LEAN' (use 0|1)" >&2; exit 2 ;;
 esac

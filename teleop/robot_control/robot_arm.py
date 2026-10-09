@@ -31,10 +31,12 @@ class MotorState:
     def __init__(self):
         self.q = None
         self.dq = None
+        self.motorstate = None   # driver status word (0 = ok); filled for G1_29 only
 
 class G1_29_LowState:
     def __init__(self):
         self.mode_machine = None
+        self.imu_quaternion = None   # pelvis IMU (w, x, y, z) from rt/lowstate
         self.motor_state = [MotorState() for _ in range(G1_29_Num_Motors)]
 
 class G1_23_LowState:
@@ -233,6 +235,9 @@ class G1_29_ArmController(_ArmPublicationMixin):
         self._waist_max_step = 0.0
         self._waist_max_rate = None
         self._waist_neutral = None
+        # Optional waist gravity feed-forward (teleop/utils/waist_gravity_ff.py,
+        # G1_TORSO_LEAN_WAIST_FF): None = tau of 12..14 stays exactly 0.
+        self._waist_ff = None
 
         logger_mp.info("Initialize G1_29_ArmController OK (passive pre-arm).")
 
@@ -295,6 +300,12 @@ class G1_29_ArmController(_ArmPublicationMixin):
                 for id in range(G1_29_Num_Motors):
                     lowstate.motor_state[id].q  = msg.motor_state[id].q
                     lowstate.motor_state[id].dq = msg.motor_state[id].dq
+                try:
+                    lowstate.imu_quaternion = tuple(float(v) for v in msg.imu_state.quaternion)
+                    for id in G1_29_WAIST_INDICES:
+                        lowstate.motor_state[id].motorstate = int(msg.motor_state[id].motorstate)
+                except Exception:
+                    pass   # missing fields: the waist feed-forward fails closed (tau 0)
                 self.lowstate_buffer.SetData(lowstate)
                 # Optional passive tap (balance telemetry): store-only, never raises.
                 observer = getattr(self, "lowstate_observer", None)
@@ -338,10 +349,11 @@ class G1_29_ArmController(_ArmPublicationMixin):
 
             waist_q = self._next_waist_frame()
             if waist_q is not None:
+                waist_tau = self._next_waist_ff_frame()
                 for idx, id in enumerate(G1_29_WAIST_INDICES):
                     self.msg.motor_cmd[id].q = float(waist_q[idx])
                     self.msg.motor_cmd[id].dq = 0
-                    self.msg.motor_cmd[id].tau = 0
+                    self.msg.motor_cmd[id].tau = 0 if waist_tau is None else float(waist_tau[idx])
 
             self.msg.crc = self.crc.Crc(self.msg)
             try:
@@ -399,6 +411,79 @@ class G1_29_ArmController(_ArmPublicationMixin):
         if q.shape != (3,) or not np.all(np.isfinite(q)):
             return last.copy()
         return q
+
+    # ---- optional waist gravity feed-forward (roll 13 / pitch 14 tau only)
+    def configure_waist_gravity_ff(self, model, cap_nm=None):
+        '''Enable the model-based waist gravity tau (after configure_waist_command).
+
+        ``model.waist_tau(waist_q, arm_q, pelvis_quat_wxyz) -> [roll, pitch]``
+        (teleop/utils/waist_gravity_ff.WaistGravityModel). The writer computes
+        it every frame from ONE lowstate snapshot; cap/ramp/fail-to-zero by
+        WaistFFShaper. kp/kd are never changed. Raises ValueError.
+        '''
+        from teleop.utils import waist_gravity_ff as wff
+        if not callable(getattr(model, "waist_tau", None)):
+            raise ValueError("waist gravity model must provide waist_tau()")
+        shaper = wff.WaistFFShaper() if cap_nm is None else wff.WaistFFShaper(cap_nm=cap_nm)
+        with self.ctrl_lock:
+            if not getattr(self, "_waist_enabled", False):
+                raise ValueError("waist command not configured; gravity feed-forward unavailable")
+            self._waist_ff = {"model": model, "shaper": shaper, "wff": wff, "last_t": None,
+                              "tau": np.zeros(3), "raw": np.zeros(3)}
+
+    def _next_waist_ff_frame(self):
+        '''Writer side: waist tau [yaw=0, roll, pitch] for this frame, None = not configured.'''
+        ff = getattr(self, "_waist_ff", None)
+        if ff is None:
+            return None
+        wff = ff["wff"]
+        now = time.monotonic()
+        dt = self.control_dt if ff["last_t"] is None else now - ff["last_t"]
+        ff["last_t"] = now
+        raw, reason = None, None
+        lowstate, stamp = self.lowstate_buffer.GetSnapshot()
+        age = now - stamp
+        if lowstate is None or not (0.0 <= age <= wff.STATE_MAX_AGE_S or -0.01 <= age < 0.0):
+            reason = "state_stale"
+        else:
+            words = [lowstate.motor_state[i].motorstate for i in G1_29_WAIST_INDICES]
+            if any(w is None or w != 0 for w in words):
+                reason = "motor_fault"
+            else:
+                try:
+                    waist = [lowstate.motor_state[i].q for i in G1_29_WAIST_INDICES]
+                    arms = [lowstate.motor_state[i].q for i in G1_29_JointArmIndex]
+                    raw = ff["model"].waist_tau(waist, arms, lowstate.imu_quaternion)
+                except Exception:
+                    raw, reason = None, "model_rejected"
+        with self.ctrl_lock:
+            out = ff["shaper"].step(raw, dt, reason=reason)
+            tau = np.array([0.0, float(out[0]), float(out[1])])
+            if not np.all(np.isfinite(tau)):
+                tau = np.zeros(3)
+            ff["tau"] = tau
+            ff["raw"] = np.array([0.0, *ff["shaper"].raw])
+        return tau
+
+    def get_waist_gravity_ff(self):
+        '''Telemetry snapshot of the waist feed-forward (copies; never the model).'''
+        with self.ctrl_lock:
+            ff = getattr(self, "_waist_ff", None)
+            if ff is None:
+                return {"configured": False}
+            shaper = ff["shaper"]
+            return {"configured": True, "gain": float(shaper.gain), "reason": shaper.reason,
+                    "tau_nm": ff["tau"].tolist(), "raw_nm": ff["raw"].tolist(),
+                    "finished": bool(shaper.finished), "cap_nm": float(shaper.cap)}
+
+    def waist_gravity_ff_ramp_out(self):
+        '''Ramp the waist tau to 0 over RAMP_S (graceful shutdown). False if not configured.'''
+        with self.ctrl_lock:
+            ff = getattr(self, "_waist_ff", None)
+            if ff is None:
+                return False
+            ff["shaper"].ramp_out()
+            return True
 
     def configure_waist_command(self, lower, upper, max_rate, initial_target):
         '''Take the waist (12..14) from the q currently in the message.

@@ -247,6 +247,26 @@ def _run_dex3(monkeypatch, env, *, keys=("r", "q"), cycles_before_q=30, head_fn=
             self.waist_target = self.waist_cfg[3].copy()
             return True
 
+        # waist gravity feed-forward API (G1_TORSO_LEAN_WAIST_FF, default on with the lean)
+        ff_model = None
+        ff_out = False
+
+        def configure_waist_gravity_ff(self, model):
+            assert self.waist_cfg is not None, "feed-forward before the waist was configured"
+            calls.append("ff_configure")
+            self.ff_model = model
+
+        def get_waist_gravity_ff(self):
+            if self.ff_model is None:
+                return {"configured": False}
+            return {"configured": True, "gain": 0.0 if self.ff_out else 1.0, "reason": "ok",
+                    "tau_nm": [0.0, -0.5, -8.0], "raw_nm": [0.0, -0.5, -8.0], "finished": self.ff_out}
+
+        def waist_gravity_ff_ramp_out(self):
+            calls.append("ff_ramp_out")
+            self.ff_out = True
+            return True
+
     class FakeIK:
         def __init__(self):
             self.last = (W_LEFT.copy(), W_RIGHT.copy())
@@ -393,6 +413,20 @@ def _run_dex3(monkeypatch, env, *, keys=("r", "q"), cycles_before_q=30, head_fn=
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(sys, "argv", ["teleop_hand_and_arm.py", "--motion", "--input-mode", "hand",
                                       "--camera-layout", "head", "--ipc", "--arm", "G1_29", "--ee", "dex3"])
+    import teleop.utils.waist_gravity_ff as wff_module
+
+    class FakeGravityModel:
+        def __init__(self, *a, **k):
+            calls.append("ff_model_load")
+
+        def waist_tau(self, waist_q, arm_q, quat):
+            return np.array([0.0, -8.0])
+
+    monkeypatch.setattr(wff_module, "WaistGravityModel", FakeGravityModel)
+    status_blocks = state.setdefault("status_torso", [])
+    real_status_block = wff_module.status_block
+    monkeypatch.setattr(wff_module, "status_block",
+                        lambda *a, **k: status_blocks.append(real_status_block(*a, **k)) or status_blocks[-1])
     import teleop.utils.arm_graceful_shutdown as shutdown_module
 
     class FakeClock:
@@ -519,3 +553,49 @@ def test_waist_yaw_has_no_path_from_head_yaw():
         q = cmd.step((10 * DEG, -10 * DEG), t)
         assert q[0] == 0.3
     assert cmd.lower[0] == cmd.upper[0] == 0.3          # yaw box has zero width
+
+
+# ------------------------------------------------- waist gravity feed-forward
+def _ff_calls(calls):
+    return [c for c in calls if isinstance(c, str) and c.startswith("ff_")]
+
+
+def test_waist_ff_off_when_torso_lean_off(monkeypatch):
+    calls, state = _run_dex3(monkeypatch, {"G1_TORSO_LEAN_WAIST_FF": "1"})
+    assert _ff_calls(calls) == []
+    assert all(b == {"configured": False, "enabled": False, "status": "off"} for b in state["status_torso"])
+
+
+def test_waist_ff_default_on_after_r_ramps_out_before_weight_release(monkeypatch):
+    calls, state = _run_dex3(
+        monkeypatch, {"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "3"}, cycles_before_q=40,
+        head_fn=lambda n: head(pivot=(min(max(n - 8, 0) * 0.01, 0.20), 0.0, 1.6)))
+    assert _ff_calls(calls) == ["ff_model_load", "ff_configure", "ff_ramp_out"]
+    assert calls.index("waist_configure") < calls.index("ff_configure")          # only after the waist is ours (r)
+    assert calls.index("hand_activate") < calls.index("ff_configure")
+    i_w0 = next(i for i, c in enumerate(calls) if isinstance(c, tuple) and c[0] == "weight")
+    assert calls.index("waist_neutral") < calls.index("ff_ramp_out") < i_w0 < calls.index("arm_deactivate")
+    tracked = [b for b in state["status_torso"] if b.get("configured") and "waist_ff" in b]
+    assert tracked and tracked[-1]["waist_ff"]["tau_nm"] == {"yaw": 0.0, "roll": -0.5, "pitch": -8.0}
+    assert any(isinstance(c, tuple) and c[0] == "info" and "feed-forward de gravidade da cintura ativo" in c[1]
+               for c in calls)
+
+
+def test_waist_ff_kill_switch_keeps_lean_and_never_configures_ff(monkeypatch):
+    on, _ = _run_dex3(monkeypatch, {"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "3"}, cycles_before_q=40)
+    off, state = _run_dex3(monkeypatch, {"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "3",
+                                         "G1_TORSO_LEAN_WAIST_FF": "0"}, cycles_before_q=40)
+    assert _ff_calls(off) == []
+    # lean behaviour identical apart from the feed-forward calls
+    strip = lambda cs: [c for c in _seq(cs) if c != "cmd" and not str(c).startswith("ff_")]
+    assert strip(on) == strip(off)
+    tracked = [b for b in state["status_torso"] if b.get("configured")]
+    assert tracked and all(b["waist_ff"] == {"enabled": False, "reason": "kill_switch"} for b in tracked)
+
+
+def test_waist_ff_invalid_kill_switch_value_fails_closed(monkeypatch):
+    calls, _ = _run_dex3(monkeypatch, {"G1_TORSO_LEAN": "1", "G1_TORSO_LEAN_MAX_DEG": "3",
+                                       "G1_TORSO_LEAN_WAIST_FF": "yes"}, cycles_before_q=30)
+    assert _ff_calls(calls) == []
+    assert "waist_configure" in calls                                              # the lean itself still runs
+    assert any(isinstance(c, tuple) and c[0] == "error" and "G1_TORSO_LEAN_WAIST_FF" in c[1] for c in calls)
