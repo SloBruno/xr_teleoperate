@@ -72,6 +72,7 @@ from teleop.utils.full_pose_telemetry import (
 )
 from teleop.utils.loop_diagnostics import LoopDiagnostics, ResourceSampler, GcWatcher
 from teleop.utils.dex3_telemetry import Dex3SlowFieldGate, collect_extended_payload
+from teleop.utils.prearm_smoke import run_sim_prearm_smoke
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -487,6 +488,8 @@ if __name__ == '__main__':
     parser.add_argument('--turn-rate-cap', type=float, default=None, help='Turn cap rad/s (default 0.3 when unset; run_g1_quest_dex3.sh passes 0.6; hard max 1.0; env G1_TURN_RATE_CAP)')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
+    parser.add_argument('--prearm-smoke', action='store_true',
+                        help='Sim-only passive startup probe; exits before every actuator publisher or motion path')
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
     # record mode and task info
@@ -498,6 +501,10 @@ if __name__ == '__main__':
     parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording at json file')
 
     args = parser.parse_args()
+    if args.prearm_smoke and not args.sim:
+        parser.error('--prearm-smoke requires --sim')
+    if args.prearm_smoke and args.motion:
+        parser.error('--prearm-smoke rejects --motion')
     walk_cap, turn_cap = resolve_speed_caps(args.walk_speed_cap, args.turn_rate_cap, os.environ)
     loco_ramp = LocomotionRamp()  # accel slew + pulse debounce; safety zero bypasses it
     logger_mp.debug(f"args: {args}")
@@ -562,6 +569,20 @@ if __name__ == '__main__':
             ChannelFactoryInitialize(1, networkInterface=args.network_interface)
         else:
             ChannelFactoryInitialize(0, networkInterface=args.network_interface)
+
+        if args.prearm_smoke:
+            # This is deliberately before keyboard/Vuer/motion setup, reset_pose
+            # publisher creation, and every activate() call.  It exercises the
+            # real config/JPEG and receive-only DDS startup path, then proves no
+            # command publisher or writer thread exists.
+            img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
+            prearm_controller = G1_29_ArmController(motion_mode=False, simulation_mode=True)
+            from teleop.robot_control.robot_hand_unitree import Dex3_1_Controller
+            prearm_hand_ctrl = Dex3_1_Controller(None, None, simulation_mode=True)
+            proof = run_sim_prearm_smoke(img_client, prearm_controller, prearm_hand_ctrl, args.camera_layout)
+            prearm_hand_ctrl.close_state_readers(timeout_s=1.0)
+            print(f"[prearm-smoke] PASS passive DDS + camera protocol; no outputs: {proof}", flush=True)
+            raise SystemExit(0)
 
         # ipc communication mode. client usage: see utils/ipc.py
         if args.ipc:
