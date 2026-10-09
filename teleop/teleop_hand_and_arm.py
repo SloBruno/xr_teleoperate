@@ -883,6 +883,8 @@ if __name__ == '__main__':
                 controller_sample_timestamp=ready_tele_data.controller_sample_timestamp,
                 head_pose_sample_timestamp=getattr(ready_tele_data, "head_pose_sample_timestamp", 0.0),
                 head_pose_is_fallback=getattr(ready_tele_data, "head_pose_is_fallback", True),
+                head_pose_source=getattr(ready_tele_data, "head_pose_source", None),
+                client_info=getattr(ready_tele_data, "client_info", None),
                 cameras=camera_status_for_layout(args.camera_layout, head_img, left_wrist_img),
                 dex3_pressure_timestamps=ready_pressure_timestamps,
             )
@@ -1146,6 +1148,8 @@ if __name__ == '__main__':
                 controller_sample_timestamp=tele_data.controller_sample_timestamp,
                 head_pose_sample_timestamp=getattr(tele_data, "head_pose_sample_timestamp", 0.0),
                 head_pose_is_fallback=getattr(tele_data, "head_pose_is_fallback", True),
+                head_pose_source=getattr(tele_data, "head_pose_source", None),
+                client_info=getattr(tele_data, "client_info", None),
                 motion_enabled=args.motion,
                 locomotion=locomotion,
                 stick=stick_log,

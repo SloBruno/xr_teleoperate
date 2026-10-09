@@ -102,7 +102,8 @@ class ShowIpTest(unittest.TestCase):
     def test_wifi_present_and_in_cert(self):
         out = self.run_announce(san=SAN_WITH_WIFI)
         self.assertIn("IP do robô na rede (Wi-Fi): 10.22.16.175", out)
-        self.assertIn("https://vuer.ai?ws=wss://10.22.16.175:8012&grid=False", out)
+        self.assertIn("URL recomendada (cliente local 0.0.60): https://10.22.16.175:8012?grid=False", out)
+        self.assertIn("Alternativa hospedada: https://vuer.ai?ws=wss://10.22.16.175:8012&grid=False", out)
         self.assertIn("100.126.188.19", out)
         self.assertIn("192.168.123.164", out)
         self.assertNotIn("172.17.0.1", out)

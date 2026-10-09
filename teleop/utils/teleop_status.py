@@ -204,6 +204,8 @@ class TeleopStatusMonitor:
         controller_sample_timestamp: float,
         head_pose_sample_timestamp: float = 0.0,
         head_pose_is_fallback: bool = True,
+        head_pose_source: str | None = None,
+        client_info: Mapping[str, object] | None = None,
         motion_enabled: bool = False,
         locomotion: Sequence[float] = (0.0, 0.0, 0.0),
         cameras: Mapping[str, object] | None = None,
@@ -276,6 +278,10 @@ class TeleopStatusMonitor:
                 "right_age_ms": _age_ms(right_pressure_timestamp, now),
             },
         }
+        if head_pose_source is not None:
+            status["head_pose"]["source"] = str(head_pose_source)
+        if isinstance(client_info, Mapping):
+            status["head_pose"]["client"] = dict(client_info)
         if isinstance(stick, Mapping):
             for key, value in stick.items():
                 if key != "command":  # command stays the dispatched value
