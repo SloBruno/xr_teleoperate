@@ -1524,6 +1524,14 @@ if __name__ == '__main__':
                 _log_best_effort("error", f"Failed to ctrl_dual_arm_go_home: {e}")
 
         stop_locomotion_best_effort(loco_wrapper, "shutdown_post_arm")
+        # Dex3 per-hand state readers: stop after the hand shutdown (close-on-q
+        # needs fresh state); bounded join, never raises.
+        try:
+            _close_dex3_readers = getattr(locals().get("hand_ctrl"), "close_state_readers", None)
+            if _close_dex3_readers is not None:
+                _close_dex3_readers(timeout_s=1.0)
+        except BaseException as e:
+            _log_best_effort("error", f"Failed to close Dex3 state readers: {e!r}")
         try:
             if robot_monitor is not None:
                 robot_monitor.close()

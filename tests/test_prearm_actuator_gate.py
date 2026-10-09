@@ -42,7 +42,7 @@ class PrearmActuatorGateTest(unittest.TestCase):
         activate_start = source.index("    def activate(self):", source.index("class Dex3_1_Controller"))
         deactivate_start = source.index("    def deactivate(self):", activate_start)
         activate = source[activate_start:deactivate_start]
-        deactivate_end = source.index("    def _subscribe_hand_state(self):", deactivate_start)
+        deactivate_end = source.index("    def _on_hand_state(self", deactivate_start)
         deactivate = source[deactivate_start:deactivate_end]
 
         self.assertIn("threading.Thread(", activate)

@@ -69,6 +69,49 @@ Dex3_Right_Closed_Pose = np.array([
 SHUTDOWN_FINAL_SQUEEZE_TOL_RAD = 0.15
 
 
+# One hand's state absent for this long (> the 0.5 s close-on-q stale rule)
+# triggers a terminal warning; repeated at most every DEX3_STATE_ABSENT_REPEAT_S.
+DEX3_STATE_ABSENT_WARN_S = 1.0
+DEX3_STATE_ABSENT_REPEAT_S = 5.0
+_SIDE_PT = {"left": "mão esquerda", "right": "mão direita"}
+
+
+class Dex3StateAbsenceWarner:
+    """Pure, clock-injected, rate-limited per-side warning text (never raises)."""
+
+    def __init__(self, side, warn_after_s=None, repeat_s=None):
+        self.side = side
+        self.warn_after_s = float(DEX3_STATE_ABSENT_WARN_S if warn_after_s is None else warn_after_s)
+        self.repeat_s = float(DEX3_STATE_ABSENT_REPEAT_S if repeat_s is None else repeat_s)
+        self._last_warn = None
+        self._absent_since = None
+
+    def update(self, now, last_ts, started_at=None):
+        try:
+            name = _SIDE_PT.get(self.side, self.side)
+            ref = last_ts
+            if ref is None or not np.isfinite(ref):
+                ref = started_at
+            if ref is None or not np.isfinite(ref) or not np.isfinite(now):
+                return None
+            age = float(now) - float(ref)
+            if age < self.warn_after_s:
+                if self._last_warn is not None:
+                    gap = (float(ref) - self._absent_since) if self._absent_since is not None else 0.0
+                    self._last_warn = self._absent_since = None
+                    return f"[Dex3] {name}: estado DDS recuperado (sem amostras por ~{max(0.0, gap):.1f} s)"
+                return None
+            if self._last_warn is not None and now - self._last_warn < self.repeat_s:
+                return None
+            if self._last_warn is None:
+                self._absent_since = float(ref)
+            self._last_warn = float(now)
+            return (f"[Dex3] {name} sem estado DDS há {age:.1f} s — driver da mão parado; "
+                    "reinicie o robô/mão")
+        except Exception:
+            return None
+
+
 class Dex3_1_Controller:
     def __init__(self, left_hand_array_in, right_hand_array_in, dual_hand_data_lock = None, dual_hand_state_array_out = None,
                        dual_hand_action_array_out = None, fps = 100.0, Unit_Test = False, simulation_mode = False, xr_motion_data_ready_in = None,
@@ -107,10 +150,6 @@ class Dex3_1_Controller:
         # child process only after activate() starts it.
         self.LeftHandCmb_publisher = None
         self.RightHandCmb_publisher = None
-        self.LeftHandState_subscriber = ChannelSubscriber(kTopicDex3LeftState, HandState_)
-        self.LeftHandState_subscriber.Init()
-        self.RightHandState_subscriber = ChannelSubscriber(kTopicDex3RightState, HandState_)
-        self.RightHandState_subscriber.Init()
 
         # Shared Arrays for hand states
         self.left_hand_state_array  = Array('d', Dex3_Num_Motors, lock=True)  
@@ -141,10 +180,13 @@ class Dex3_1_Controller:
         self._left_state_sampled = threading.Event()
         self._right_state_sampled = threading.Event()
 
-        # initialize subscribe thread
-        self.subscribe_state_thread = threading.Thread(target=self._subscribe_hand_state)
-        self.subscribe_state_thread.daemon = True
-        self.subscribe_state_thread.start()
+        # Per-hand state reception (incident fix): one hand going silent must
+        # never freeze the other. Each side gets its own SDK listener callback
+        # (ChannelSubscriber.Init(handler); it only drops the latest sample in
+        # a per-side mailbox, never blocks) and its own worker thread that
+        # ingests that side's sample under that side's locks. No blocking
+        # Read() anywhere. Receive-only: no publisher is created here.
+        self._start_state_readers()
 
         while True:
             if self._left_state_sampled.is_set() and self._right_state_sampled.is_set():
@@ -312,41 +354,105 @@ class Dex3_1_Controller:
         self.outputs_activated = False
         logger_mp.info("[Dex3_1_Controller] Dex3 DDS output deactivated.")
 
-    def _subscribe_hand_state(self):
-        while True:
-            left_hand_msg  = self.LeftHandState_subscriber.Read()
-            right_hand_msg = self.RightHandState_subscriber.Read()
-            if left_hand_msg is not None:
-                # Update left hand state
-                with self.left_hand_state_array.get_lock():
-                    for idx, id in enumerate(Dex3_1_Left_JointIndex):
-                        self.left_hand_state_array[idx] = left_hand_msg.motor_state[id].q
-                with self._telemetry_lock:
-                    self._left_state_valid = True
-                    self._left_state_timestamp = time.monotonic()
-                self._record_extended_state("left", left_hand_msg, Dex3_1_Left_JointIndex, time.monotonic())
-                self._record_protection_state("left", left_hand_msg, Dex3_1_Left_JointIndex, time.monotonic())
-                self._left_state_sampled.set()
-                with self.left_pressure.get_lock():
-                    self.left_pressure.value = extract_dex3_pressure(left_hand_msg)
-                with self.left_pressure_timestamp.get_lock():
-                    self.left_pressure_timestamp.value = time.monotonic()
-            if right_hand_msg is not None:
-                # Update right hand state
-                with self.right_hand_state_array.get_lock():
-                    for idx, id in enumerate(Dex3_1_Right_JointIndex):
-                        self.right_hand_state_array[idx] = right_hand_msg.motor_state[id].q
-                with self._telemetry_lock:
-                    self._right_state_valid = True
-                    self._right_state_timestamp = time.monotonic()
-                self._record_extended_state("right", right_hand_msg, Dex3_1_Right_JointIndex, time.monotonic())
-                self._record_protection_state("right", right_hand_msg, Dex3_1_Right_JointIndex, time.monotonic())
-                self._right_state_sampled.set()
-                with self.right_pressure.get_lock():
-                    self.right_pressure.value = extract_dex3_pressure(right_hand_msg)
-                with self.right_pressure_timestamp.get_lock():
-                    self.right_pressure_timestamp.value = time.monotonic()
-            time.sleep(0.002)
+    # ---- per-hand DDS state reception -------------------------------------
+    def _on_hand_state(self, side, hand_msg):
+        """SDK listener callback for one side: O(1), never blocks, never raises."""
+        try:
+            slots = self.__dict__.get("_state_slots") or {}
+            slot = slots.get(side)
+            stop = self.__dict__.get("_state_readers_stop")
+            if slot is None or stop is None or stop.is_set():
+                return
+            received = time.monotonic()
+            with slot["lock"]:
+                slot["msg"] = hand_msg          # latest-wins mailbox
+                slot["timestamp"] = received
+                slot["event"].set()
+        except Exception:
+            pass
+
+    def _start_state_readers(self):
+        self._state_readers_stop = threading.Event()
+        self._state_readers_closed = False
+        self._state_slots = {
+            side: {"lock": threading.Lock(), "event": threading.Event(), "msg": None, "timestamp": None}
+            for side in ("left", "right")
+        }
+        self._state_reader_threads = {}
+        for side in ("left", "right"):
+            thread = threading.Thread(target=self._state_reader_loop, args=(side,),
+                                      name=f"dex3_{side}_state", daemon=True)
+            self._state_reader_threads[side] = thread
+            thread.start()
+        self.LeftHandState_subscriber = ChannelSubscriber(kTopicDex3LeftState, HandState_)
+        self.LeftHandState_subscriber.Init(lambda msg: self._on_hand_state("left", msg), 0)
+        self.RightHandState_subscriber = ChannelSubscriber(kTopicDex3RightState, HandState_)
+        self.RightHandState_subscriber.Init(lambda msg: self._on_hand_state("right", msg), 0)
+
+    def _state_reader_loop(self, side):
+        """Ingest one side's latest sample; warn (rate-limited) while it is absent."""
+        slot = self._state_slots[side]
+        stop = self._state_readers_stop
+        started_at = time.monotonic()
+        warner = Dex3StateAbsenceWarner(side)
+        last_ts = None
+        while not stop.is_set():
+            slot["event"].wait(0.1)
+            with slot["lock"]:
+                hand_msg, received = slot["msg"], slot["timestamp"]
+                slot["msg"] = None
+                slot["event"].clear()
+            if hand_msg is not None and not stop.is_set():
+                try:
+                    if self._ingest_hand_state(side, hand_msg, received):
+                        last_ts = received
+                except Exception:
+                    self._note_extended_failure()
+            try:
+                message = warner.update(time.monotonic(), last_ts, started_at=started_at)
+                if message:
+                    logger_mp.warning(message)
+            except Exception:
+                pass
+
+    def _ingest_hand_state(self, side, hand_msg, timestamp):
+        """Write one side's sample; the q vector is extracted before any write."""
+        joint_ids = Dex3_1_Left_JointIndex if side == "left" else Dex3_1_Right_JointIndex
+        q = [float(hand_msg.motor_state[id].q) for id in joint_ids]
+        state_array = self.left_hand_state_array if side == "left" else self.right_hand_state_array
+        with state_array.get_lock():
+            for idx, value in enumerate(q):
+                state_array[idx] = value
+        with self._telemetry_lock:
+            setattr(self, f"_{side}_state_valid", True)
+            setattr(self, f"_{side}_state_timestamp", timestamp)
+        self._record_extended_state(side, hand_msg, joint_ids, timestamp)
+        self._record_protection_state(side, hand_msg, joint_ids, timestamp)
+        (self._left_state_sampled if side == "left" else self._right_state_sampled).set()
+        pressure = self.left_pressure if side == "left" else self.right_pressure
+        pressure_ts = self.left_pressure_timestamp if side == "left" else self.right_pressure_timestamp
+        with pressure.get_lock():
+            pressure.value = extract_dex3_pressure(hand_msg)
+        with pressure_ts.get_lock():
+            pressure_ts.value = timestamp
+        return True
+
+    def close_state_readers(self, timeout_s=1.0):
+        """Stop both state readers (bounded join); idempotent, never raises."""
+        if self.__dict__.get("_state_readers_closed", True):
+            return
+        self._state_readers_closed = True
+        self._state_readers_stop.set()
+        for name in ("LeftHandState_subscriber", "RightHandState_subscriber"):
+            try:
+                subscriber = self.__dict__.get(name)
+                if subscriber is not None:
+                    subscriber.Close()
+            except Exception:
+                pass
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        for thread in self.__dict__.get("_state_reader_threads", {}).values():
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
     extended_telemetry_failure_count = 0
 
