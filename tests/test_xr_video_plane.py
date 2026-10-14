@@ -1,6 +1,9 @@
 """Geometry of the XR video plane: how many degrees of the headset it covers."""
+import ast
 import importlib.util
+import inspect
 import math
+import sys
 from pathlib import Path
 
 MODULE = Path(__file__).parents[1] / "teleop" / "utils" / "xr_video_plane.py"
@@ -74,3 +77,21 @@ def test_describe_mentions_degrees():
     m = load()
     txt = m.describe_plane(1.0, 1.0, 1.05)
     assert "53" in txt and "°" in txt
+
+
+def test_launcher_plane_keywords_match_the_deployed_televuer_wrapper():
+    repo = Path(__file__).parents[1]
+    sys.path.insert(0, str(repo / "teleop" / "televuer" / "src"))
+    try:
+        from televuer.tv_wrapper import TeleVuerWrapper
+        accepted = set(inspect.signature(TeleVuerWrapper.__init__).parameters)
+    finally:
+        sys.path.pop(0)
+
+    tree = ast.parse((repo / "teleop" / "teleop_hand_and_arm.py").read_text())
+    calls = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "TeleVuerWrapper"]
+    assert len(calls) == 1
+    passed = {keyword.arg for keyword in calls[0].keywords if keyword.arg}
+    unsupported = passed - accepted
+    assert not unsupported, f"launcher passes unsupported TeleVuerWrapper keywords: {unsupported}"

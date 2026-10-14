@@ -528,7 +528,7 @@ if __name__ == '__main__':
             logger_mp.warning("XR video plane exceeds ~90° of the headset FOV; edges may be cut off")
 
         # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
-        tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand", 
+        tv_wrapper = TeleVuerWrapper(use_hand_tracking=False,
                                      binocular=display_binocular,
                                      img_shape=display_img_shape,
                                      # maybe should decrease fps for better performance?
@@ -538,9 +538,8 @@ if __name__ == '__main__':
                                      zmq=camera_config['head_camera']['enable_zmq'],
                                      webrtc=camera_config['head_camera']['enable_webrtc'],
                                      webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
-                                     arm_pose_source="controller",
-                                     video_plane_height=video_plane_height,
-                                     video_plane_distance=video_plane_distance
+                                     distance_to_camera=video_plane_distance,
+                                     image_height=video_plane_height
                                      )
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)

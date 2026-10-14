@@ -18,7 +18,10 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         ]
         self.assertEqual(len(wrapper_calls), 1)
         keywords = {keyword.arg: keyword.value for keyword in wrapper_calls[0].keywords}
-        self.assertEqual(keywords["arm_pose_source"].value, "controller")
+        self.assertNotIn("arm_pose_source", keywords)
+        use_hand_tracking = keywords["use_hand_tracking"]
+        self.assertIsInstance(use_hand_tracking, ast.Constant)
+        self.assertIs(use_hand_tracking.value, False)
 
     def test_prearm_requires_a_strictly_post_r_controller_sample(self):
         source = SCRIPT.read_text(encoding="utf-8")
