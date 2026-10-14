@@ -76,6 +76,16 @@ DEX3_STATE_ABSENT_REPEAT_S = 5.0
 _SIDE_PT = {"left": "mão esquerda", "right": "mão direita"}
 
 
+def dex3_active_hand_sides(raw=None):
+    """Return explicitly enabled Dex3 sides; invalid configuration is safe."""
+    value = os.environ.get("DEX3_ACTIVE_HANDS", "both") if raw is None else raw
+    normalized = str(value).strip().lower()
+    aliases = {"both": {"left", "right"}, "left": {"left"}, "right": {"right"}}
+    if normalized not in aliases:
+        raise ValueError("DEX3_ACTIVE_HANDS must be one of: both, left, right")
+    return aliases[normalized]
+
+
 class Dex3StateAbsenceWarner:
     """Pure, clock-injected, rate-limited per-side warning text (never raises)."""
 
@@ -142,6 +152,9 @@ class Dex3_1_Controller:
         self.fps = fps
         self.Unit_Test = Unit_Test
         self.simulation_mode = simulation_mode
+        self._active_hand_sides = dex3_active_hand_sides()
+        logger_mp.warning("[Dex3] lados ativos: " + ", ".join(sorted(self._active_hand_sides))
+                          + "; lado inativo não será armado nem receberá comandos")
 
         # Dex3 joint targets are controller-trigger owned; no hand-retargeting
         # object is constructed for this controller.
@@ -188,11 +201,17 @@ class Dex3_1_Controller:
         # Read() anywhere. Receive-only: no publisher is created here.
         self._start_state_readers()
 
+        required_samples = {
+            "left": self._left_state_sampled,
+            "right": self._right_state_sampled,
+        }
         while True:
-            if self._left_state_sampled.is_set() and self._right_state_sampled.is_set():
+            if all(required_samples[side].is_set() for side in self._active_hand_sides):
                 break
             time.sleep(0.01)
-            logger_mp.warning("[Dex3_1_Controller] Waiting to subscribe dds...")
+            waiting = ", ".join(sorted(side for side in self._active_hand_sides
+                                        if not required_samples[side].is_set()))
+            logger_mp.warning(f"[Dex3_1_Controller] Waiting to subscribe DDS ({waiting})...")
         logger_mp.info("[Dex3_1_Controller] Subscribe dds ok.")
 
         # Save the command-loop arguments, but keep the process absent until
@@ -714,19 +733,21 @@ class Dex3_1_Controller:
                        left_sample_timestamp=0.0, right_sample_timestamp=0.0,
                        left_enable=None, right_enable=None):
         """Publish already-authorized targets; authority is decided in control_step."""
-        for idx, id in enumerate(Dex3_1_Left_JointIndex):
-            self.left_msg.motor_cmd[id].q = left_q_target[idx]
-            if left_enable is not None:
-                self._set_gains(self.left_msg.motor_cmd[id], left_enable[idx])
-        self.LeftHandCmb_publisher.Write(self.left_msg)
-        self._record_published_command("left", self.left_msg, Dex3_1_Left_JointIndex)
+        if "left" in self._active_hand_sides:
+            for idx, id in enumerate(Dex3_1_Left_JointIndex):
+                self.left_msg.motor_cmd[id].q = left_q_target[idx]
+                if left_enable is not None:
+                    self._set_gains(self.left_msg.motor_cmd[id], left_enable[idx])
+            self.LeftHandCmb_publisher.Write(self.left_msg)
+            self._record_published_command("left", self.left_msg, Dex3_1_Left_JointIndex)
 
-        for idx, id in enumerate(Dex3_1_Right_JointIndex):
-            self.right_msg.motor_cmd[id].q = right_q_target[idx]
-            if right_enable is not None:
-                self._set_gains(self.right_msg.motor_cmd[id], right_enable[idx])
-        self.RightHandCmb_publisher.Write(self.right_msg)
-        self._record_published_command("right", self.right_msg, Dex3_1_Right_JointIndex)
+        if "right" in self._active_hand_sides:
+            for idx, id in enumerate(Dex3_1_Right_JointIndex):
+                self.right_msg.motor_cmd[id].q = right_q_target[idx]
+                if right_enable is not None:
+                    self._set_gains(self.right_msg.motor_cmd[id], right_enable[idx])
+            self.RightHandCmb_publisher.Write(self.right_msg)
+            self._record_published_command("right", self.right_msg, Dex3_1_Right_JointIndex)
 
     def control_step(self, left_hand_array_in, right_hand_array_in,
                      left_ctrl_trigger_in=None, right_ctrl_trigger_in=None,
@@ -859,10 +880,12 @@ class Dex3_1_Controller:
 
         # DDS is already initialized in this process; construct publishers only
         # after the explicit terminal-r activation gate.
-        self.LeftHandCmb_publisher = ChannelPublisher(kTopicDex3LeftCommand, HandCmd_)
-        self.LeftHandCmb_publisher.Init()
-        self.RightHandCmb_publisher = ChannelPublisher(kTopicDex3RightCommand, HandCmd_)
-        self.RightHandCmb_publisher.Init()
+        if "left" in self._active_hand_sides:
+            self.LeftHandCmb_publisher = ChannelPublisher(kTopicDex3LeftCommand, HandCmd_)
+            self.LeftHandCmb_publisher.Init()
+        if "right" in self._active_hand_sides:
+            self.RightHandCmb_publisher = ChannelPublisher(kTopicDex3RightCommand, HandCmd_)
+            self.RightHandCmb_publisher.Init()
 
         left_q_target  = np.full(Dex3_Num_Motors, 0)
         right_q_target = np.full(Dex3_Num_Motors, 0)

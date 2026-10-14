@@ -86,6 +86,17 @@ case "$DEX3_SHUTDOWN_HAND" in
     *) echo "DEX3_SHUTDOWN_HAND='$DEX3_SHUTDOWN_HAND' não suportado (use close|open|hold); não iniciando." >&2; exit 2 ;;
 esac
 export DEX3_SHUTDOWN_HAND
+# Degraded Dex3 mode: default to the healthy left hand only. The inactive side
+# receives no command publisher and is not required for the passive DDS pre-arm.
+# Set DEX3_ACTIVE_HANDS=both only after both state streams are demonstrably fresh.
+DEX3_ACTIVE_HANDS=${DEX3_ACTIVE_HANDS:-left}
+case "$DEX3_ACTIVE_HANDS" in
+    left) dex3_active_msg="Dex3 degradada: somente mão ESQUERDA ativa; a direita não será armada nem comandada" ;;
+    right) dex3_active_msg="Dex3 degradada: somente mão DIREITA ativa; a esquerda não será armada nem comandada" ;;
+    both) dex3_active_msg="Dex3: duas mãos ativas; exige DDS fresco nas duas" ;;
+    *) echo "DEX3_ACTIVE_HANDS='$DEX3_ACTIVE_HANDS' não suportado (use left|right|both); não iniciando." >&2; exit 2 ;;
+esac
+export DEX3_ACTIVE_HANDS
 # Pose compare web (8093): validated here, started right before the teleop.
 XR_POSE_WEB=${XR_POSE_WEB:-0}
 case "$XR_POSE_WEB" in
@@ -373,6 +384,7 @@ fi
 exec 9>&-
 echo "$torso_lean_msg"
 echo "$dex3_shutdown_msg"
+echo "$dex3_active_msg"
 if [[ "$XR_POSE_WEB" == 1 ]]; then
     echo "Página de comparação (XR_POSE_WEB=1): LIGADA, porta ${POSE_WEB_PORT}, XR_POSE_STREAM=1"
 else
