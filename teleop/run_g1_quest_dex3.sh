@@ -86,10 +86,9 @@ case "$DEX3_SHUTDOWN_HAND" in
     *) echo "DEX3_SHUTDOWN_HAND='$DEX3_SHUTDOWN_HAND' não suportado (use close|open|hold); não iniciando." >&2; exit 2 ;;
 esac
 export DEX3_SHUTDOWN_HAND
-# Degraded Dex3 mode: default to the healthy left hand only. The inactive side
-# receives no command publisher and is not required for the passive DDS pre-arm.
-# Set DEX3_ACTIVE_HANDS=both only after both state streams are demonstrably fresh.
-DEX3_ACTIVE_HANDS=${DEX3_ACTIVE_HANDS:-left}
+# Optional degraded Dex3 mode. Default keeps both hands active; use
+# DEX3_ACTIVE_HANDS=left only when deliberately operating with the left hand.
+DEX3_ACTIVE_HANDS=${DEX3_ACTIVE_HANDS:-both}
 case "$DEX3_ACTIVE_HANDS" in
     left) dex3_active_msg="Dex3 degradada: somente mão ESQUERDA ativa; a direita não será armada nem comandada" ;;
     right) dex3_active_msg="Dex3 degradada: somente mão DIREITA ativa; a esquerda não será armada nem comandada" ;;
