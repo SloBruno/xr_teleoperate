@@ -53,6 +53,17 @@ O launcher é separado de `run_g1_quest_dex3.sh`; não modifique nem reutilize o
 perfil G1. Ele fixa DDS em `enP2p1s0` por padrão. Para outra interface, use
 `G1D_DDS_INTERFACE=<interface> bash run_g1d_quest_dex3.sh`.
 
+Argumentos extras são repassados à teleop, após as flags fixas (para testes A/B
+sem redeploy):
+
+```bash
+bash run_g1d_quest_dex3.sh --display-mode pass-through   # sem vídeo no headset
+bash run_g1d_quest_dex3.sh --camera-scale 0.3            # vídeo menor
+```
+
+O launcher recusa (exit 2) `--motion`, `--arm`, `--ee`, `--input-mode` e
+`--network-interface` (também na forma `--flag=valor`).
+
 O processo invocado pelo launcher recebe:
 
 ```text

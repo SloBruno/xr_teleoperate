@@ -2,6 +2,17 @@
 # G1D operator launcher: requires two remote camera streams; r/q stays in Python.
 set -euo pipefail
 
+# Extra arguments are forwarded to teleop (appended after the fixed safety flags).
+# Refuse anything that could change the validated G1D profile or enable motion.
+for g1d_extra_arg in "$@"; do
+    case "$g1d_extra_arg" in
+        --motion|--motion=*|--arm|--arm=*|--ee|--ee=*|--input-mode|--input-mode=*|--network-interface|--network-interface=*)
+            echo "G1D launcher: forwarded argument refused: $g1d_extra_arg (--motion, --arm, --ee, --input-mode and --network-interface are fixed by this launcher)." >&2
+            exit 2
+            ;;
+    esac
+done
+
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 export PYTHONNOUSERSITE=1
 export LD_LIBRARY_PATH=/home/unitree/cyclonedds/build/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
@@ -103,4 +114,5 @@ exec "$teleimager_python" -s teleop_hand_and_arm.py \
   --input-mode hand \
   --camera-layout vertical \
   --img-server-ip "$teleimager_host" \
-  --network-interface "$g1d_dds_interface"
+  --network-interface "$g1d_dds_interface" \
+  "$@"

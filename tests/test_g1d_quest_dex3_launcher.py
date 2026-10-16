@@ -135,3 +135,65 @@ def test_g1d_launcher_rejects_an_unreadable_tls_pair_before_teleimager_import():
     assert result.returncode != 0
     assert "G1D TLS preflight failed" in output
     assert "G1D Teleimager preflight failed" not in output
+
+
+def _fake_python(root):
+    fake = root / "fakepy"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "${2:-}" == teleop_hand_and_arm.py ]]; then printf "ARGV:%s\\n" "$*"; exit 0; fi\n'
+        "cat >/dev/null; exit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    return fake
+
+
+def _run_launcher(tmp_path, *args):
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    cert.write_text("x", encoding="utf-8")
+    key.write_text("x", encoding="utf-8")
+    env = os.environ | {
+        "XR_TELEOP_CERT": str(cert),
+        "XR_TELEOP_KEY": str(key),
+        "TELEIMAGER_PYTHON": str(_fake_python(tmp_path)),
+    }
+    env.pop("G1D_LAUNCHER_SKIP_TELEOP", None)
+    return subprocess.run(
+        ["bash", str(G1D_LAUNCHER), *args], env=env, capture_output=True, text=True, timeout=20
+    )
+
+
+def test_g1d_launcher_forwards_extra_args_after_fixed_safety_flags(tmp_path):
+    result = _run_launcher(tmp_path, "--display-mode", "pass-through", "--camera-scale", "0.3")
+    assert result.returncode == 0, result.stderr
+    argv = next(l for l in result.stdout.splitlines() if l.startswith("ARGV:"))
+    assert "--arm G1D --g1d-ik-geometry-assumption --ee dex3 --input-mode hand" in argv
+    assert argv.endswith("--display-mode pass-through --camera-scale 0.3")
+
+
+def test_g1d_launcher_refuses_motion_and_profile_overrides_before_anything_else(tmp_path):
+    for forbidden in (
+        ["--motion"],
+        ["--display-mode", "pass-through", "--motion"],
+        ["--arm", "G1_29"],
+        ["--arm=G1_29"],
+        ["--ee=dex1"],
+        ["--ee", "inspire"],
+        ["--input-mode", "controller"],
+        ["--input-mode=controller"],
+        ["--network-interface", "eth0"],
+        ["--network-interface=eth0"],
+    ):
+        result = _run_launcher(tmp_path, *forbidden)
+        output = result.stdout + result.stderr
+        assert result.returncode != 0, forbidden
+        assert "ARGV:" not in output, forbidden
+        assert "forwarded argument refused" in output, forbidden
+
+
+def test_g1d_launcher_source_has_guard_and_appends_args_last():
+    text = G1D_LAUNCHER.read_text(encoding="utf-8")
+    assert text.index("forwarded argument refused") < text.index("xr_net_announce_url_only")
+    assert text.rstrip().endswith('"$@"')
