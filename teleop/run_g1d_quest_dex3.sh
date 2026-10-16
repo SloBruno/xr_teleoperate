@@ -18,7 +18,7 @@ export XR_TELEOP_KEY=${XR_TELEOP_KEY:-/home/unitree/.config/xr_teleoperate/key.p
 # stops, detects USB devices for, or otherwise manages that remote service.
 G1D_TELEIMAGER_HOST=${G1D_TELEIMAGER_HOST:-192.168.123.164}
 teleimager_host=$G1D_TELEIMAGER_HOST
-teleimager_python=${TELEIMAGER_PYTHON:-/home/unitree/miniconda3/envs/tv/bin/python}
+teleimager_python=${TELEIMAGER_PYTHON:-/home/unitree/.local/envs/xr-g1d/bin/python}
 G1D_TELEIMAGER_PREFLIGHT_TIMEOUT_S=${G1D_TELEIMAGER_PREFLIGHT_TIMEOUT_S:-12}
 
 preflight_remote_two_camera_streams() {
