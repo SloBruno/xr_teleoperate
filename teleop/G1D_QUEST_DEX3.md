@@ -32,6 +32,14 @@ nem para `head`/`any`: sem fallback.
 Se qualquer fluxo não estiver saudável, o perfil falha fechado e não inicia a
 teleoperação.
 
+## Runtime isolado G1D
+
+O ambiente Python do G1D fixa `numpy==1.26.4`, necessário para o conjunto
+Pinocchio/IK, e `pyarrow==20.0.0` para `rerun-sdk==0.20.1`. Não atualize NumPy
+para a série 2: versões recentes de PyArrow podem exigir NumPy 2, enquanto
+PyArrow 20 possui wheel CPython 3.12 ARM e permanece compatível com este runtime.
+Reinstale estes pins a partir de `requirements.txt` ao preparar um release.
+
 ## Comando de operador
 
 No Jetson/PC2, com o Teleimager e o ambiente Quest já preparados, execute a

@@ -1,4 +1,6 @@
 matplotlib==3.7.5
+numpy==1.26.4
+pyarrow==20.0.0
 rerun-sdk==0.20.1
 meshcat==0.3.2
 sshkeyboard==2.3.1
