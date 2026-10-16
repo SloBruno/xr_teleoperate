@@ -744,26 +744,47 @@ if __name__ == '__main__':
 
         # Match the original launcher behavior: connecting the arm motors moves
         # the arms to the all-zero preparation pose immediately, before r.
-        # The same lock makes an early terminal q win over output activation.
+        # G1D ports that same G1 home path verbatim, except that its prep runs
+        # outside the lifecycle lock so terminal q can cancel it immediately.
         # Dex3 remains passive until the later post-r gate.
-        with LIFECYCLE_LOCK:
-            if STOP:
-                logger_mp.info("Launcher cancelled before arm preparation.")
-                raise KeyboardInterrupt
-            # G1_29 remains the legacy home-preparation contract.  G1D begins
-            # by holding its measured pose; it never performs an automatic home.
-            if args.arm == "G1_29":
+        if args.arm == "G1D":
+            with LIFECYCLE_LOCK:
+                if STOP:
+                    logger_mp.info("Launcher cancelled before arm preparation.")
+                    raise KeyboardInterrupt
                 arm_ctrl.activate()
                 outputs_activated = True
-                if not arm_ctrl.ctrl_dual_arm_go_home():
-                    # Do not retry the failed motion at shutdown; the finally
-                    # block only releases arm_sdk authority and deactivates.
-                    shutdown_return_home = False
-                    raise RuntimeError("Arm preparation pose was not reached; refusing tracking.")
-            elif args.arm == "G1D":
-                arm_ctrl.activate()
-                outputs_activated = True
-            PREPARATION_COMPLETE = True
+            if not arm_ctrl.ctrl_dual_arm_go_home(cancelled=lambda: STOP, require_fresh_lowstate=True):
+                preparation_status = getattr(arm_ctrl, "last_preparation_status", "preparation_failed")
+                with LIFECYCLE_LOCK:
+                    if STOP:
+                        LIFECYCLE_EVENTS.append("preparation_cancelled")
+                        logger_mp.info("G1D arm preparation cancelled before r.")
+                        raise KeyboardInterrupt
+                    LIFECYCLE_EVENTS.append(preparation_status)
+                shutdown_return_home = False
+                raise RuntimeError(f"G1D arm preparation failed: {preparation_status}; refusing tracking.")
+            with LIFECYCLE_LOCK:
+                if STOP:
+                    LIFECYCLE_EVENTS.append("preparation_cancelled")
+                    logger_mp.info("G1D arm preparation cancelled before r.")
+                    raise KeyboardInterrupt
+                PREPARATION_COMPLETE = True
+        else:
+            with LIFECYCLE_LOCK:
+                if STOP:
+                    logger_mp.info("Launcher cancelled before arm preparation.")
+                    raise KeyboardInterrupt
+                # G1_29 remains the legacy home-preparation contract.
+                if args.arm == "G1_29":
+                    arm_ctrl.activate()
+                    outputs_activated = True
+                    if not arm_ctrl.ctrl_dual_arm_go_home():
+                        # Do not retry the failed motion at shutdown; the finally
+                        # block only releases arm_sdk authority and deactivates.
+                        shutdown_return_home = False
+                        raise RuntimeError("Arm preparation pose was not reached; refusing tracking.")
+                PREPARATION_COMPLETE = True
         _safe_emit_lifecycle_event(pose_telemetry_sink, "preparation_ready")
 
         # Initialize before the pre-arm loop: some display modes intentionally do

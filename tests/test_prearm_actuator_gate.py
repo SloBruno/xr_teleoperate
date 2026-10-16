@@ -75,20 +75,18 @@ class PrearmActuatorGateTest(unittest.TestCase):
         self.assertLess(activate, prearm)
         self.assertLess(prepare, prearm)
 
-    def test_launcher_releases_r_only_after_confirmed_preparation_pose(self):
+    def test_launcher_releases_r_only_after_normal_g1_home_arrival_for_g1d(self):
         source = TELEOP.read_text(encoding="utf-8")
         prepare = source[source.index("Match the original launcher behavior"):source.index("# Initialize before the pre-arm loop")]
-        g1_29_start = prepare.index('if args.arm == "G1_29":')
-        g1d_start = prepare.index('elif args.arm == "G1D":')
-        g1_29_prepare = prepare[g1_29_start:g1d_start]
-        g1d_prepare = prepare[g1d_start:]
-        self.assertIn("arm_ctrl.ctrl_dual_arm_go_home()", g1_29_prepare)
-        self.assertLess(g1_29_start, g1_29_prepare.index("arm_ctrl.activate()") + g1_29_start)
+        g1d_start = prepare.index('if args.arm == "G1D":')
+        g1d_prepare = prepare[g1d_start:prepare.index("        else:", g1d_start)]
+        g1_29_prepare = prepare[prepare.index('if args.arm == "G1_29":'):]
+        self.assertIn("arm_ctrl.ctrl_dual_arm_go_home(cancelled=lambda: STOP, require_fresh_lowstate=True)", g1d_prepare)
         self.assertIn("if not arm_ctrl.ctrl_dual_arm_go_home():", g1_29_prepare)
-        self.assertNotIn("ctrl_dual_arm_go_home", g1d_prepare)
-        self.assertLess(g1_29_prepare.index("if not arm_ctrl.ctrl_dual_arm_go_home():"), prepare.index("PREPARATION_COMPLETE = True"))
+        self.assertLess(g1d_prepare.index("arm_ctrl.activate()"), g1d_prepare.index("ctrl_dual_arm_go_home"))
+        self.assertLess(g1d_prepare.index("ctrl_dual_arm_go_home"), g1d_prepare.index("PREPARATION_COMPLETE = True"))
         arm_source = ARM.read_text(encoding="utf-8")
-        home_start = arm_source.index("    def ctrl_dual_arm_go_home(self, release_motion_authority=False):")
+        home_start = arm_source.index("    def ctrl_dual_arm_go_home(")
         home = arm_source[home_start:arm_source.index("    def speed_gradual_max", home_start)]
         self.assertIn("if self.motion_mode and release_motion_authority:", home)
         self.assertIn("return True", home)
@@ -98,13 +96,14 @@ class PrearmActuatorGateTest(unittest.TestCase):
         shutdown = source[source.index("    finally:"):]
         self.assertNotIn("arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)", shutdown)
 
-    def test_g1d_prearm_activation_is_initial_measured_hold_not_quest_tracking_or_dex3_output(self):
+    def test_g1d_prearm_ports_normal_home_without_quest_tracking_or_dex3_output(self):
         source = TELEOP.read_text(encoding="utf-8")
         prepare = source[source.index("Match the original launcher behavior"):source.index("# Initialize before the pre-arm loop")]
-        g1d_prepare = prepare[prepare.index('elif args.arm == "G1D":'):]
+        g1d_prepare = prepare[prepare.index('if args.arm == "G1D":'):prepare.index("        else:", prepare.index('if args.arm == "G1D":'))]
         self.assertIn("arm_ctrl.activate()", g1d_prepare)
-        self.assertNotIn("ctrl_dual_arm_go_home", g1d_prepare)
+        self.assertIn("ctrl_dual_arm_go_home(cancelled=lambda: STOP, require_fresh_lowstate=True)", g1d_prepare)
         self.assertNotIn("hand_ctrl.activate()", g1d_prepare)
+        self.assertIn("preparation_cancelled", g1d_prepare)
 
         activate = class_method(ARM, "G1_29_ArmController", "activate")
         activate_source = ast.get_source_segment(ARM.read_text(encoding="utf-8"), activate)
@@ -130,7 +129,10 @@ class PrearmActuatorGateTest(unittest.TestCase):
         prepare = source[source.index("Match the original launcher behavior"):source.index("# Initialize before the pre-arm loop")]
         self.assertIn("with LIFECYCLE_LOCK:", prepare)
         self.assertLess(prepare.index("if STOP:"), prepare.index("arm_ctrl.activate()"))
-        self.assertLess(prepare.index("arm_ctrl.ctrl_dual_arm_go_home()"), prepare.index("PREPARATION_COMPLETE = True"))
+        self.assertLess(
+            prepare.index("ctrl_dual_arm_go_home(cancelled=lambda: STOP, require_fresh_lowstate=True)"),
+            prepare.index("PREPARATION_COMPLETE = True"),
+        )
 
     def test_dex3_activates_only_after_the_post_r_controller_gate(self):
         source = TELEOP.read_text(encoding="utf-8")
@@ -215,16 +217,17 @@ class PrearmActuatorGateTest(unittest.TestCase):
                     f"{node.name} must {'define' if node.name == 'G1_29_ArmController' else 'not define'} {method}",
                 )
 
-    def test_alternate_arm_profiles_skip_the_g1_29_lifecycle_gate(self):
+    def test_g1d_and_g1_29_use_the_shared_lifecycle_gate(self):
         source = TELEOP.read_text(encoding="utf-8")
         prep = source[source.index("Match the original launcher behavior"):source.index("# Initialize before the pre-arm loop")]
+        g1d_guard = prep.index('if args.arm == "G1D":')
         g1_29_guard = prep.index('if args.arm == "G1_29":')
-        activate = prep.index("arm_ctrl.activate()")
-        # activate()/deactivate() belong to the G1_29 lifecycle contract only;
-        # they must never run for the legacy arm profiles.
-        self.assertLess(g1_29_guard, activate)
-        self.assertNotIn("arm_ctrl.activate()", prep[:g1_29_guard])
-        self.assertNotIn("arm_ctrl.deactivate()", prep[:g1_29_guard])
+        g1d_home = prep.index("ctrl_dual_arm_go_home(cancelled=lambda: STOP, require_fresh_lowstate=True)")
+        g1_29_home = prep.index("if not arm_ctrl.ctrl_dual_arm_go_home():")
+        self.assertLess(g1d_guard, g1d_home)
+        self.assertLess(g1d_home, g1_29_guard)
+        self.assertLess(g1_29_guard, g1_29_home)
+        self.assertNotIn("arm_ctrl.deactivate()", prep)
 
     def test_legacy_arm_profiles_retain_shutdown_home_motion(self):
         source = TELEOP.read_text(encoding="utf-8")

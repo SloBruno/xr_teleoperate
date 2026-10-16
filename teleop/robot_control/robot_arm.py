@@ -416,27 +416,41 @@ class G1_29_ArmController(_ArmPublicationMixin):
         '''Return current state dq of the left and right arm motors.'''
         return np.array([self.lowstate_buffer.GetData().motor_state[id].dq for id in G1_29_JointArmIndex])
 
-    def ctrl_dual_arm_go_home(self, release_motion_authority=False):
+    def ctrl_dual_arm_go_home(self, release_motion_authority=False, cancelled=None, require_fresh_lowstate=False):
         '''Move both arms home; release rt/arm_sdk authority only during shutdown.'''
         logger_mp.info("[G1_29_ArmController] ctrl_dual_arm_go_home start...")
         max_attempts = 100
         current_attempts = 0
+        self.last_preparation_status = "preparation_started"
         with self.ctrl_lock:
             self.q_target = np.zeros(14)
             # self.tauff_target = np.zeros(14)
         tolerance = 0.05  # Tolerance threshold for joint angles to determine "close to zero", can be adjusted based on your motor's precision requirements
         while current_attempts < max_attempts:
-            current_q = self.get_current_dual_arm_q()
+            if cancelled is not None and cancelled():
+                self.last_preparation_status = "preparation_cancelled"
+                logger_mp.info("[G1_29_ArmController] arm preparation cancelled.")
+                return False
+            if require_fresh_lowstate:
+                current_q, sample_age = self.get_dual_arm_q_snapshot()
+                if current_q is None or sample_age > 0.1:
+                    self.last_preparation_status = "preparation_lowstate_stale"
+                    logger_mp.error("[G1_29_ArmController] LowState is stale during arm preparation.")
+                    return False
+            else:
+                current_q = self.get_current_dual_arm_q()
             if np.all(np.abs(current_q) <= tolerance):
                 if self.motion_mode and release_motion_authority:
                     # The writer publishes this weight every frame.
                     for weight in np.linspace(1, 0, num=101):
                         self.set_motion_authority_weight(weight)
                         time.sleep(0.02)
+                self.last_preparation_status = "preparation_ready"
                 logger_mp.info("[G1_29_ArmController] both arms have reached the home position.")
                 return True
             current_attempts += 1
             time.sleep(0.05)
+        self.last_preparation_status = "preparation_timeout"
         logger_mp.error("[G1_29_ArmController] timed out waiting for arms to reach home position.")
         return False
 
