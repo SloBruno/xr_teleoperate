@@ -74,6 +74,8 @@ def test_g1d_operator_command_is_arm_only_and_acknowledges_ik_assumption():
     assert "--motion" not in guide
 
 
-def test_g1d_lifecycle_is_exclusively_terminal_r_q():
+def test_g1d_lifecycle_accepts_terminal_r_q_and_quest_a_start_without_profile_gate():
     source = TELEOP.read_text()
-    assert source.count('if args.arm != "G1D":\n                right_a_was_pressed, right_b_was_pressed = poll_controller_lifecycle(') == 2
+    assert 'if args.arm != "G1D":\n                right_a_was_pressed' not in source
+    assert source.count("right_a_was_pressed, right_b_was_pressed = poll_controller_lifecycle(") == 2
+    assert "if key == 'r':\n            _request_start_locked()" in source

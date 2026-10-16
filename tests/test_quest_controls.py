@@ -583,3 +583,104 @@ def test_stick_snapshot_includes_wrapper_move_code_when_available():
     snap = quest_controls.stick_snapshot((0, -1), (0, 0), loco_wrapper=wrapper)
     assert snap["last_move_code"] == 3104 and snap["nonzero_move_codes"] == 7
     assert quest_controls.stick_snapshot((0, -1), (0, 0))["last_move_code"] is None
+
+
+def _import_lifecycle_module(monkeypatch):
+    stubs = {
+        "logging_mp": types.ModuleType("logging_mp"),
+        "unitree_sdk2py": types.ModuleType("unitree_sdk2py"),
+        "unitree_sdk2py.core": types.ModuleType("unitree_sdk2py.core"),
+        "unitree_sdk2py.core.channel": types.ModuleType("unitree_sdk2py.core.channel"),
+        "televuer": types.ModuleType("televuer"),
+        "teleimager": types.ModuleType("teleimager"),
+        "teleimager.image_client": types.ModuleType("teleimager.image_client"),
+        "sshkeyboard": types.ModuleType("sshkeyboard"),
+        "teleop.robot_control.robot_arm": types.ModuleType("teleop.robot_control.robot_arm"),
+        "teleop.robot_control.robot_arm_ik": types.ModuleType("teleop.robot_control.robot_arm_ik"),
+        "teleop.utils.episode_writer": types.ModuleType("teleop.utils.episode_writer"),
+        "teleop.utils.ipc": types.ModuleType("teleop.utils.ipc"),
+        "teleop.utils.motion_switcher": types.ModuleType("teleop.utils.motion_switcher"),
+        "unitree_sdk2py.idl": types.ModuleType("unitree_sdk2py.idl"),
+        "unitree_sdk2py.idl.std_msgs": types.ModuleType("unitree_sdk2py.idl.std_msgs"),
+        "unitree_sdk2py.idl.std_msgs.msg": types.ModuleType("unitree_sdk2py.idl.std_msgs.msg"),
+        "unitree_sdk2py.idl.std_msgs.msg.dds_": types.ModuleType("unitree_sdk2py.idl.std_msgs.msg.dds_"),
+    }
+    for name, module in stubs.items():
+        monkeypatch.setitem(sys.modules, name, module)
+        module.__getattr__ = lambda name: object
+    stubs["logging_mp"].basicConfig = lambda **kwargs: None
+    stubs["logging_mp"].getLogger = lambda name: types.SimpleNamespace(warning=lambda message: None)
+    stubs["logging_mp"].INFO = 20
+    stubs["unitree_sdk2py.core.channel"].ChannelFactoryInitialize = object
+    stubs["unitree_sdk2py.core.channel"].ChannelPublisher = object
+    stubs["unitree_sdk2py.idl.std_msgs.msg.dds_"].String_ = object
+    stubs["sshkeyboard"].listen_keyboard = object
+    stubs["sshkeyboard"].stop_listening = object
+
+    return importlib.reload(importlib.import_module("teleop.teleop_hand_and_arm"))
+
+
+def _load_real_tv_wrapper(monkeypatch):
+    src = Path(__file__).resolve().parents[1] / "teleop" / "televuer" / "src"
+    for name in [n for n in sys.modules if n == "televuer" or n.startswith("televuer.")]:
+        monkeypatch.delitem(sys.modules, name)
+    fake = types.ModuleType("televuer.televuer")
+    fake.TeleVuer = object
+    monkeypatch.syspath_prepend(str(src))
+    monkeypatch.setitem(sys.modules, "televuer.televuer", fake)
+    return importlib.import_module("televuer.tv_wrapper")
+
+
+def test_right_a_in_hand_mode_flows_wrapper_to_teledata_to_g1d_start(monkeypatch):
+    import numpy as np
+    tv = _load_real_tv_wrapper(monkeypatch)
+    now = time.monotonic()
+    eye = np.eye(4)
+    fake = types.SimpleNamespace(
+        head_pose=eye, hand_pose_sample=(eye, eye, now),
+        controller_pose_sample=(eye, eye, now), motion_data_ready=True,
+        left_hand_positions=np.zeros((25, 3)), right_hand_positions=np.zeros((25, 3)),
+        left_hand_pinch=False, left_hand_pinchValue=0.0, left_hand_squeeze=False, left_hand_squeezeValue=0.0,
+        right_hand_pinch=False, right_hand_pinchValue=0.0, right_hand_squeeze=False, right_hand_squeezeValue=0.0,
+        left_ctrl_trigger=False, left_ctrl_triggerValue=0.0, right_ctrl_trigger=False, right_ctrl_triggerValue=0.0,
+        left_ctrl_thumbstick=False, left_ctrl_thumbstickValue=[0.0, 0.0],
+        right_ctrl_thumbstick=False, right_ctrl_thumbstickValue=[0.0, 0.0],
+        left_ctrl_aButton=False, left_ctrl_bButton=False,
+        right_ctrl_aButton=True, right_ctrl_bButton=False,
+    )
+    wrapper = object.__new__(tv.TeleVuerWrapper)
+    wrapper.tvuer = fake
+    wrapper.use_hand_tracking = True
+    wrapper.return_hand_rot_data = False
+    wrapper.arm_reference_mode = "head_yaw"
+    wrapper.arm_pose_source = "hand"
+    data = wrapper.get_tele_data()
+    assert data.right_ctrl_aButton is True and data.left_ctrl_aButton is False
+
+    module = _import_lifecycle_module(monkeypatch)
+    module.START = module.STOP = False
+    module.PREPARATION_COMPLETE = False
+    module.poll_controller_lifecycle(data, False, False)
+    assert module.START is False  # preparation gate, same as terminal r
+    module.PREPARATION_COMPLETE = True
+    module.poll_controller_lifecycle(data, False, False)
+    assert module.START is True
+
+
+def test_g1d_main_loop_polls_controller_lifecycle_without_profile_gate():
+    source = (Path(__file__).resolve().parents[1] / "teleop" / "teleop_hand_and_arm.py").read_text()
+    assert 'args.arm != "G1D":\n                right_a_was_pressed' not in source
+    assert source.count("poll_controller_lifecycle(") == 3  # def + ready loop + tracking loop
+
+
+def test_g1d_quest_a_starts_but_b_never_stops(monkeypatch):
+    module = _import_lifecycle_module(monkeypatch)
+    module.START = module.STOP = False
+    module.PREPARATION_COMPLETE = True
+    ts = time.monotonic()
+    sample = types.SimpleNamespace(right_ctrl_aButton=False, right_ctrl_bButton=True, controller_sample_timestamp=ts)
+    module.poll_controller_lifecycle(sample, False, False, allow_stop=False)
+    assert (module.START, module.STOP) == (False, False)
+    sample = types.SimpleNamespace(right_ctrl_aButton=True, right_ctrl_bButton=True, controller_sample_timestamp=ts)
+    module.poll_controller_lifecycle(sample, False, True, allow_stop=False)
+    assert (module.START, module.STOP) == (True, False)
