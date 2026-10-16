@@ -12,19 +12,43 @@ explícita abaixo. Isso não é validação em hardware: valide a geometria, lim
 orientações de punho e a transformação controlador→punho em bancada antes de
 armar perto do robô.
 
+## Câmeras e preflight obrigatório
+
+No Teleimager, os caminhos de imagem são representados no
+`cam_config_server.yaml` por `head_camera`, `left_wrist_camera` e
+`right_wrist_camera`. O campo `binocular` descreve se aquele caminho entrega um
+par estereoscópico; `enable_zmq` e a porta ZMQ definem se o fluxo é publicado.
+
+O perfil G1D exige especificamente dois caminhos físicos/configurados:
+`head_camera` e `left_wrist_camera`. Antes de iniciar, o launcher verifica os
+dois dispositivos RealSense esperados, as duas seções configuradas com
+`enable_zmq=true`, seus seriais e os dois frames ZMQ. Não existe fallback para
+uma câmera, para a câmera de pulso publicada como cabeça, nem para `head`/`any`:
+sem fallback.
+Se qualquer fluxo não estiver saudável, o perfil falha fechado e não inicia a
+teleoperação.
+
 ## Comando de operador
 
-Depois de iniciar o Teleimager compatível e configurar o ambiente DDS/Quest,
-execute a partir de `teleop/`:
+No Jetson/PC2, com o Teleimager e o ambiente Quest já preparados, execute a
+partir de `teleop/`:
 
 ```bash
-python teleop_hand_and_arm.py \
-  --arm G1D \
-  --g1d-ik-geometry-assumption \
-  --ee dex3 \
-  --input-mode hand \
-  --camera-layout vertical
+bash run_g1d_quest_dex3.sh
 ```
+
+O launcher é separado de `run_g1_quest_dex3.sh`; não modifique nem reutilize o
+perfil G1. Ele fixa DDS em `enP2p1s0` por padrão. Para outra interface, use
+`G1D_DDS_INTERFACE=<interface> bash run_g1d_quest_dex3.sh`.
+
+O processo invocado pelo launcher recebe:
+
+```text
+--arm G1D --g1d-ik-geometry-assumption --ee dex3 --input-mode hand
+--camera-layout vertical
+```
+
+Ele não habilita controle de movimento: G1D é somente braços.
 
 `--input-mode hand` mantém o caminho híbrido existente do Quest: poses dos
 controladores alimentam os braços via calibração controlador→punho, e cada
