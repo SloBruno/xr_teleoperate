@@ -55,6 +55,8 @@ def test_g1d_launcher_fails_closed_for_two_configured_physical_camera_paths():
     assert "head_camera" in source
     assert "enable_zmq" in source
     assert "get_left_wrist_frame" in source
+    # ImageClient owns background ZMQ threads; normal interpreter teardown can abort.
+    assert "os._exit(0)" in source
     assert "refusing to start" in source
     for forbidden in ("TELEIMAGER_CAMERA_MODE=${TELEIMAGER_CAMERA_MODE:-auto}", "mode == \"any\"", "CÂMERA ÚNICA"):
         assert forbidden not in source

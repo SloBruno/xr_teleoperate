@@ -23,6 +23,7 @@ G1D_TELEIMAGER_PREFLIGHT_TIMEOUT_S=${G1D_TELEIMAGER_PREFLIGHT_TIMEOUT_S:-12}
 
 preflight_remote_two_camera_streams() {
     if ! timeout -k 2 "$G1D_TELEIMAGER_PREFLIGHT_TIMEOUT_S" "$teleimager_python" -s - "$teleimager_host" <<'PY'
+import os
 import socket
 import sys
 import time
@@ -54,9 +55,11 @@ while time.monotonic() < deadline:
         and bgr.nbytes > 0
         for frame in frames
     ):
-        raise SystemExit(0)
+        # ImageClient owns background ZMQ threads; normal interpreter teardown
+        # can abort. The preflight is read-only, so exit directly after success.
+        os._exit(0)
     time.sleep(0.05)
-raise RuntimeError("did not decode both required camera streams")
+os._exit(2)
 PY
     then
         echo "G1D Teleimager preflight failed for remote host $teleimager_host; refusing to start." >&2
