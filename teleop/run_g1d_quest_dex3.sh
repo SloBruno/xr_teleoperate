@@ -21,6 +21,12 @@ teleimager_host=$G1D_TELEIMAGER_HOST
 teleimager_python=${TELEIMAGER_PYTHON:-/home/unitree/.local/envs/xr-g1d/bin/python}
 G1D_TELEIMAGER_PREFLIGHT_TIMEOUT_S=${G1D_TELEIMAGER_PREFLIGHT_TIMEOUT_S:-12}
 
+# Print the Quest URL before any Python/DDS preflight.  Unlike the G1 helper,
+# this only observes routing and never regenerates TLS material or writes state.
+# shellcheck source=lib/vuer_network.sh
+source "$repo/teleop/lib/vuer_network.sh"
+xr_net_announce_url_only
+
 preflight_tls() {
     if [[ ! -r "$XR_TELEOP_CERT" || ! -r "$XR_TELEOP_KEY" ]]; then
         echo "G1D TLS preflight failed: certificate/key must exist and be readable; refusing to import teleop or DDS." >&2

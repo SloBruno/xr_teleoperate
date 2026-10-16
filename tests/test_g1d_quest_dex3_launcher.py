@@ -36,6 +36,50 @@ def test_g1d_launcher_uses_configurable_remote_teleimager_host_without_starting_
         assert forbidden not in source
 
 
+def test_g1d_launcher_announces_a_quest_url_from_default_route_or_explicit_override(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ip = fake_bin / "ip"
+    fake_ip.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ $1 == -4 && $2 == route ]]; then echo '1.1.1.1 via 10.0.0.1 dev wlan0 src 10.0.0.42'; fi\n"
+        "if [[ $1 == -4 && $2 == -o ]]; then echo '2: wlan0    inet 10.0.0.42/24 brd 10.0.0.255 scope global wlan0'; fi\n",
+        encoding="utf-8",
+    )
+    fake_ip.chmod(0o755)
+    shell = (
+        f"PATH={fake_bin}:$PATH; "
+        f"source {ROOT / 'teleop' / 'lib' / 'vuer_network.sh'}; "
+        "xr_net_announce_url_only"
+    )
+    detected = subprocess.run(["bash", "-c", shell], capture_output=True, text=True, check=False)
+    assert detected.returncode == 0
+    assert "Interface/IP Quest: wlan0 / 10.0.0.42" in detected.stdout
+    assert "https://vuer.ai?grid=False&ws=wss://10.0.0.42:8012" in detected.stdout
+
+    overridden = subprocess.run(
+        ["bash", "-c", shell],
+        env=os.environ | {"PATH": f"{fake_bin}:{os.environ['PATH']}", "XR_TELEOP_VUER_IP": "192.168.50.8"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert overridden.returncode == 0
+    assert "Interface/IP Quest: XR_TELEOP_VUER_IP / 192.168.50.8" in overridden.stdout
+    assert "https://vuer.ai?grid=False&ws=wss://192.168.50.8:8012" in overridden.stdout
+
+    fake_ip.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    no_route = subprocess.run(["bash", "-c", shell], capture_output=True, text=True, check=False)
+    assert no_route.returncode == 0
+    assert "não foi possível descobrir IPv4/interface pela rota default" in no_route.stderr
+    assert "XR_TELEOP_VUER_IP=<IPv4 acessível ao Quest>" in no_route.stderr
+
+    source = G1D_LAUNCHER.read_text(encoding="utf-8")
+    announce = source.index("xr_net_announce_url_only")
+    tls = source.index("preflight_tls")
+    assert announce < tls
+
+
 def test_g1d_launcher_is_arm_only_and_preserves_terminal_r_q_lifecycle():
     source = G1D_LAUNCHER.read_text(encoding="utf-8")
     assert "--arm G1D" in source

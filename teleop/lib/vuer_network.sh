@@ -27,6 +27,39 @@ xr_net_list_ipv4() {
         awk '$1 != "lo" && $1 !~ /^(docker|br-|veth|virbr)/'
 }
 
+# Print the Quest connection address without touching certificates, state files,
+# or network configuration.  This is safe to run before a launcher imports DDS.
+# An explicit override is useful on hosts whose default route is not Quest-reachable.
+xr_net_announce_url_only() {
+    local route iface="" ip="" label=""
+
+    if [[ -n ${XR_TELEOP_VUER_IP:-} ]]; then
+        if xr_net_valid_ipv4 "$XR_TELEOP_VUER_IP"; then
+            iface="XR_TELEOP_VUER_IP"
+            ip=$XR_TELEOP_VUER_IP
+            label="override"
+        else
+            echo "AVISO: XR_TELEOP_VUER_IP='$XR_TELEOP_VUER_IP' inválido; tentando a rota default." >&2
+        fi
+    fi
+    if [[ -z $ip ]]; then
+        route=$(xr_net_default_route)
+        if [[ -n $route ]]; then
+            read -r iface ip <<<"$route"
+            label="rota default"
+        fi
+    fi
+
+    if [[ -n $ip ]]; then
+        echo "Interface/IP Quest: $iface / $ip ($label)"
+        echo "URL para colar no Quest: https://vuer.ai?grid=False&ws=wss://$ip:$XR_NET_PORT"
+    else
+        echo "AVISO: não foi possível descobrir IPv4/interface pela rota default; seguindo sem URL do Quest." >&2
+        echo "       Defina XR_TELEOP_VUER_IP=<IPv4 acessível ao Quest> para imprimir a URL." >&2
+    fi
+    return 0
+}
+
 xr_net_cert_sans() {  # prints "IP:x" / "DNS:y" per line
     openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null |
         grep -oE '(IP Address|DNS):[^,[:space:]]+' | sed 's/^IP Address:/IP:/'
