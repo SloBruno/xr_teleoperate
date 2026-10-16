@@ -87,7 +87,8 @@ def test_g1d_launcher_is_arm_only_and_preserves_terminal_r_q_lifecycle():
     assert "--ee dex3" in source
     assert "--input-mode hand" in source
     assert "--camera-layout vertical" in source
-    assert "--motion" not in source
+    # The only allowed mention is the refusal guard; the exec line must not enable it.
+    assert "--motion" not in source[source.index("exec "):]
     doc = G1D_DOC.read_text(encoding="utf-8")
     assert "`r`" in doc and "`q`" in doc
 

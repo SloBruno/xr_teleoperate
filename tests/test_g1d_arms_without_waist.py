@@ -71,7 +71,8 @@ def test_g1d_operator_command_is_arm_only_and_acknowledges_ik_assumption():
     assert "--ee dex3" in guide
     assert "--input-mode hand" in guide
     assert "--g1d-ik-geometry-assumption" in guide
-    assert "--motion" not in guide
+    # Only allowed as documentation that the launcher refuses it.
+    assert all("--motion" not in l or "recusa" in l or "(exit 2)" in l for l in guide.splitlines())
 
 
 def test_g1d_lifecycle_accepts_terminal_r_q_and_quest_a_start_without_profile_gate():
