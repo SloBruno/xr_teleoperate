@@ -19,12 +19,16 @@ No Teleimager, os caminhos de imagem são representados no
 `right_wrist_camera`. O campo `binocular` descreve se aquele caminho entrega um
 par estereoscópico; `enable_zmq` e a porta ZMQ definem se o fluxo é publicado.
 
-O perfil G1D exige especificamente dois caminhos físicos/configurados:
-`head_camera` e `left_wrist_camera`. Antes de iniciar, o launcher verifica os
-dois dispositivos RealSense esperados, as duas seções configuradas com
-`enable_zmq=true`, seus seriais e os dois frames ZMQ. Não existe fallback para
-uma câmera, para a câmera de pulso publicada como cabeça, nem para `head`/`any`:
-sem fallback.
+O perfil G1D consome o Teleimager remoto em `192.168.123.164` por padrão
+(configurável por `G1D_TELEIMAGER_HOST`). Ele exige especificamente dois
+caminhos físicos/configurados: `head_camera` na porta TCP/ZMQ `55555` e
+`left_wrist_camera` na porta `55556`; a configuração também precisa declarar
+`binocular` para cada caminho. Antes de iniciar a teleoperação, o launcher
+confere as portas TCP `60000`, `55555` e `55556`, as duas seções com
+`enable_zmq=true` e porta correta, e decodifica um frame BGR real de cada fluxo.
+O launcher não inicia, para ou gerencia Teleimager/Realsense localmente. Não
+existe fallback para uma câmera, para a câmera de pulso publicada como cabeça,
+nem para `head`/`any`: sem fallback.
 Se qualquer fluxo não estiver saudável, o perfil falha fechado e não inicia a
 teleoperação.
 

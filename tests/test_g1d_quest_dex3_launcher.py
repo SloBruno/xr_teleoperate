@@ -24,6 +24,14 @@ def test_g1d_launcher_defaults_to_jetson_g1d_dds_interface_with_override():
     assert '--network-interface "$g1d_dds_interface"' in source
 
 
+def test_g1d_launcher_uses_configurable_remote_teleimager_host_without_starting_services():
+    source = G1D_LAUNCHER.read_text(encoding="utf-8")
+    assert "G1D_TELEIMAGER_HOST=${G1D_TELEIMAGER_HOST:-192.168.123.164}" in source
+    assert "teleimager_host=$G1D_TELEIMAGER_HOST" in source
+    for forbidden in ("--detect", "pyrealsense2", "teleimager.image_server", "setsid nohup", "teleimager_dir="):
+        assert forbidden not in source
+
+
 def test_g1d_launcher_is_arm_only_and_preserves_terminal_r_q_lifecycle():
     source = G1D_LAUNCHER.read_text(encoding="utf-8")
     assert "--arm G1D" in source
@@ -38,13 +46,12 @@ def test_g1d_launcher_is_arm_only_and_preserves_terminal_r_q_lifecycle():
 
 def test_g1d_launcher_fails_closed_for_two_configured_physical_camera_paths():
     source = G1D_LAUNCHER.read_text(encoding="utf-8")
-    assert "TELEIMAGER_CAMERA_MODE=both" in source
-    assert "--detect" in source
-    assert '[[ "$detected_source" == "head" ]]' in source
-    assert '[[ "$detected_serial" == "$G1D_HEAD_CAMERA_SERIAL" ]]' in source
-    assert '[[ "$detected_count" == "both" ]]' in source
+    assert "G1D_TELEIMAGER_HOST" in source
+    for port in ("60000", "55555", "55556"):
+        assert port in source
     assert "left_wrist_camera" in source
     assert "head_camera" in source
+    assert "enable_zmq" in source
     assert "get_left_wrist_frame" in source
     assert "refusing to start" in source
     for forbidden in ("TELEIMAGER_CAMERA_MODE=${TELEIMAGER_CAMERA_MODE:-auto}", "mode == \"any\"", "CÂMERA ÚNICA"):
