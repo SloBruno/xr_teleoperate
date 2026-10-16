@@ -25,7 +25,18 @@ sys.path.append(parent_dir)
 
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize # dds 
 from televuer import TeleVuerWrapper
-from teleop.robot_control.robot_arm import G1_29_ArmController, G1_23_ArmController, H1_2_ArmController, H1_ArmController, H2_ArmController
+import importlib
+
+robot_arm_module = importlib.import_module("teleop.robot_control.robot_arm")
+
+G1_29_ArmController = robot_arm_module.G1_29_ArmController
+G1_23_ArmController = robot_arm_module.G1_23_ArmController
+H1_2_ArmController = robot_arm_module.H1_2_ArmController
+H1_ArmController = robot_arm_module.H1_ArmController
+H2_ArmController = robot_arm_module.H2_ArmController
+# Keep legacy test/simulation harnesses importable while never substituting a
+# G1_29 writer for a requested G1D profile in production.
+G1D_ArmController = getattr(robot_arm_module, "G1D_ArmController", None)
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK, H2_ArmIK
 from teleimager.image_client import ImageClient
 from teleop.utils.episode_writer import EpisodeWriter
@@ -86,7 +97,8 @@ RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
 # Serializes r/q lifecycle decisions with the one-way output activation gate.
 LIFECYCLE_LOCK = threading.Lock()
-arm_calibration = None  # G1_29-only controller-to-wrist calibration state.
+arm_calibration = None  # G1 7-DoF controller-to-wrist calibration state.
+G1_ARM_7DOF_PROFILES = ("G1_29", "G1D")
 LIFECYCLE_EVENTS = []
 # Optional pre-arm, read-only operator calibration. It is unavailable once
 # tracking has been requested.
@@ -226,7 +238,7 @@ def enforce_l_pose_start_gate(calibrator, tele_data, arm_ctrl, arm_ik, sink):
 
 
 def graceful_g1_29_shutdown(arm_ctrl, *, arm_ik=None, hand_ctrl=None, sink=None,
-                            attempt_return=True, clock=time.monotonic, sleep=time.sleep):
+                            attempt_return=True, open_hands=True, clock=time.monotonic, sleep=time.sleep):
     """Terminal q/B, Ctrl+C or exception: return home, open Dex3, release arms.
 
     Tracking must already have stopped. Bounded (worst case ~17 s) and never
@@ -245,17 +257,19 @@ def graceful_g1_29_shutdown(arm_ctrl, *, arm_ik=None, hand_ctrl=None, sink=None,
         _log_best_effort("info", f"[shutdown] {event} {detail}")
 
     gravity = getattr(arm_ik, "gravity_tauff", None) if arm_ik is not None else None
-    open_hands = None
+    hand_shutdown = None
     if hand_ctrl is not None:
-        open_hand_method = getattr(hand_ctrl, "open_and_deactivate", None)
-        open_hands = open_hand_method if open_hand_method is not None else hand_ctrl.deactivate
+        if open_hands:
+            hand_shutdown = getattr(hand_ctrl, "open_and_deactivate", None)
+        if hand_shutdown is None:
+            hand_shutdown = hand_ctrl.deactivate
     try:
         result = run_graceful_arm_shutdown(
             arm_ctrl,
             clock=clock,
             sleep=sleep,
             emit=emit,
-            open_hands=open_hands,
+            open_hands=hand_shutdown,
             gravity_tauff=gravity,
             attempt_return=attempt_return,
         )
@@ -420,7 +434,8 @@ if __name__ == '__main__':
     parser.add_argument('--frequency', type = float, default = 30.0, help = 'control and record \'s frequency')
     parser.add_argument('--input-mode', type=str, choices=['hand', 'controller'], default='hand', help='Select XR device input tracking source')
     parser.add_argument('--display-mode', type=str, choices=['immersive', 'ego', 'pass-through'], default='immersive', help='Select XR device display mode')
-    parser.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1', 'H2'], default='G1_29', help='Select arm controller')
+    parser.add_argument('--arm', type=str, choices=['G1_29', 'G1D', 'G1_23', 'H1_2', 'H1', 'H2'], default='G1_29', help='Select arm controller')
+    parser.add_argument("--g1d-ik-geometry-assumption", action="store_true", help="Required for G1D: explicitly acknowledge that G1_29 arm IK geometry has not been hardware-validated for G1D")
     parser.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco'], help='Select end effector controller')
     parser.add_argument('--camera-layout', type=str, choices=['head', 'vertical'], default='vertical', help='XR camera layout: head camera only, or head above left-wrist camera')
     parser.add_argument('--camera-scale', type=float, default=0.5, help='Scale used for each camera in the vertical XR layout (default: 0.5)')
@@ -451,6 +466,10 @@ if __name__ == '__main__':
     parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording at json file')
 
     args = parser.parse_args()
+    if args.arm == "G1D" and args.motion:
+        parser.error("G1D is arm-only; --motion is not supported.")
+    if args.arm == "G1D" and not args.g1d_ik_geometry_assumption:
+        parser.error("G1D reuses G1_29 arm IK geometry without G1D hardware validation; pass --g1d-ik-geometry-assumption only after validating the geometry.")
     walk_cap, turn_cap = resolve_speed_caps(args.walk_speed_cap, args.turn_rate_cap, os.environ)
     loco_ramp = LocomotionRamp()  # accel slew + pulse debounce; safety zero bypasses it
     logger_mp.debug(f"args: {args}")
@@ -575,6 +594,14 @@ if __name__ == '__main__':
         if args.arm == "G1_29":
             arm_ik = G1_29_ArmIK()
             arm_ctrl = G1_29_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+            arm_calibration = HumanCalibratedWristCalibrator(ControllerWristCalibrator())
+        elif args.arm == "G1D":
+            # G1D has the same 14 arm motor slots (15..28), but its waist is
+            # never commanded by G1D_ArmController.
+            if G1D_ArmController is None:
+                raise RuntimeError("G1D profile is unavailable in this robot_arm module.")
+            arm_ik = G1_29_ArmIK()
+            arm_ctrl = G1D_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
             arm_calibration = HumanCalibratedWristCalibrator(ControllerWristCalibrator())
         elif args.arm == "G1_23":
             arm_ik = G1_23_ArmIK()
@@ -723,19 +750,19 @@ if __name__ == '__main__':
             if STOP:
                 logger_mp.info("Launcher cancelled before arm preparation.")
                 raise KeyboardInterrupt
-            # G1_29 is the only lifecycle-gated arm profile: activating the arm
-            # output at launcher time and confirming all-zero arrival before r.
-            # The other selectable arm profiles publish continuously from
-            # construction, so no activate()/deactivate() call is made for them.
+            # G1_29 remains the legacy home-preparation contract.  G1D begins
+            # by holding its measured pose; it never performs an automatic home.
             if args.arm == "G1_29":
                 arm_ctrl.activate()
                 outputs_activated = True
-                preparation_confirmed = arm_ctrl.ctrl_dual_arm_go_home()
-                if not preparation_confirmed:
+                if not arm_ctrl.ctrl_dual_arm_go_home():
                     # Do not retry the failed motion at shutdown; the finally
                     # block only releases arm_sdk authority and deactivates.
                     shutdown_return_home = False
                     raise RuntimeError("Arm preparation pose was not reached; refusing tracking.")
+            elif args.arm == "G1D":
+                arm_ctrl.activate()
+                outputs_activated = True
             PREPARATION_COMPLETE = True
         _safe_emit_lifecycle_event(pose_telemetry_sink, "preparation_ready")
 
@@ -751,14 +778,14 @@ if __name__ == '__main__':
         else:
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
-        if args.arm == "G1_29":
+        if args.arm in G1_ARM_7DOF_PROFILES:
             logger_mp.info("🟣 Optional: [c] or left-controller X starts a 3 s straight-arm sweep before [r].")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True                  # now ready to (1) enter START state
         right_a_was_pressed = False
         right_b_was_pressed = False
         left_x_was_pressed = False
-        human_arm_sweep = HumanArmSweep() if args.arm == "G1_29" else None
+        human_arm_sweep = HumanArmSweep() if args.arm in G1_ARM_7DOF_PROFILES else None
         first_controller_targets = None
         # Pressing r is only an arm request. Keep the robot pre-armed until a
         # current controller-pose sample exists; zero-initialized pose buffers
@@ -778,8 +805,9 @@ if __name__ == '__main__':
                 elif head_img.bgr is not None:
                     tv_wrapper.render_to_xr(head_img.bgr)
             ready_tele_data = tv_wrapper.get_tele_data()
-            right_a_was_pressed, right_b_was_pressed = poll_controller_lifecycle(
-                ready_tele_data, right_a_was_pressed, right_b_was_pressed)
+            if args.arm != "G1D":
+                right_a_was_pressed, right_b_was_pressed = poll_controller_lifecycle(
+                    ready_tele_data, right_a_was_pressed, right_b_was_pressed)
             if human_arm_sweep is not None:
                 left_x_was_pressed = poll_human_sweep_button(ready_tele_data, left_x_was_pressed)
                 service_human_arm_sweep(
@@ -851,13 +879,13 @@ if __name__ == '__main__':
                 and controller_sample_is_fresh(ready_tele_data.controller_sample_timestamp)
             ):
                 if (
-                    args.arm == "G1_29"
+                    args.arm in G1_ARM_7DOF_PROFILES
                     and not arm_calibration.calibrated
                     and not enforce_l_pose_start_gate(
                         arm_calibration, ready_tele_data, arm_ctrl, arm_ik, pose_telemetry_sink)
                 ):
                     continue
-                if args.arm == "G1_29" and not arm_calibration.calibrated:
+                if args.arm in G1_ARM_7DOF_PROFILES and not arm_calibration.calibrated:
                     measured_lr_arm_q = arm_ctrl.get_current_dual_arm_q()
                     measured_wrist_poses = arm_ik.forward_kinematics(measured_lr_arm_q)
                     calibrated = arm_calibration.calibrate(
@@ -898,7 +926,7 @@ if __name__ == '__main__':
         # stay owned by that branch.
         arm_rate_limiter = None
         arm_enable_ramp = None
-        if args.arm == "G1_29":
+        if args.arm in G1_ARM_7DOF_PROFILES:
             arm_ik.reset_warm_start()
             arm_rate_limiter = DualEePoseRateLimiter(G1_29_EE_RATE_LIMITER_CONFIG)
             arm_enable_ramp = ArmEnableRamp(duration_s=DEFAULT_ENABLE_RAMP_S)
@@ -948,8 +976,9 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
-            right_a_was_pressed, right_b_was_pressed = poll_controller_lifecycle(
-                tele_data, right_a_was_pressed, right_b_was_pressed)
+            if args.arm != "G1D":
+                right_a_was_pressed, right_b_was_pressed = poll_controller_lifecycle(
+                    tele_data, right_a_was_pressed, right_b_was_pressed)
             if _diag is not None: _diag.mark("controller")
 
             if args.ee in ("inspire_ftp", "inspire_dfx", "brainco") and args.input_mode == "hand":
@@ -1067,9 +1096,9 @@ if __name__ == '__main__':
                 com_monitor.update(current_lr_arm_q)  # warn-only; never publishes
             if _diag is not None: _diag.mark("state_read")
             candidate_targets = None
-            calibration = arm_calibration if args.arm == "G1_29" else None
-            first_target = first_controller_targets if args.arm == "G1_29" else None
-            if args.arm != "G1_29" and controller_pose_is_fresh:
+            calibration = arm_calibration if args.arm in G1_ARM_7DOF_PROFILES else None
+            first_target = first_controller_targets if args.arm in G1_ARM_7DOF_PROFILES else None
+            if args.arm not in G1_ARM_7DOF_PROFILES and controller_pose_is_fresh:
                 candidate_targets = (tele_data.left_wrist_pose, tele_data.right_wrist_pose)
             time_ik_start = time.time()
             cycle = run_arm_tracking_cycle(
@@ -1334,12 +1363,8 @@ if __name__ == '__main__':
         if getattr(loco_wrapper, "stop_move_sender", None) is not None:
             loco_wrapper.stop_move_sender()
         stop_locomotion_best_effort(loco_wrapper, shutdown_cause or "shutdown")
-        # G1_29 graceful shutdown (q/B, Ctrl+C, exception): tracking has
-        # already stopped; return to the all-zero preparation pose with a
-        # velocity-limited trajectory, open Dex3, ramp the arm_sdk authority
-        # weight 1 -> 0 so the Unitree controller takes the arms back, then
-        # deactivate the writer. Invalid/stale state or a dead writer skips
-        # the motion (release/deactivate only). Every phase is time-bounded.
+        # G1D keeps its declared stable pose: no automatic arm home and no
+        # automatic Dex3 open/close motion at q.
         if args.arm == "G1_29":
             if outputs_activated:
                 graceful_g1_29_shutdown(
@@ -1348,6 +1373,22 @@ if __name__ == '__main__':
                     hand_ctrl=hand_ctrl if hand_outputs_activated else None,
                     sink=pose_telemetry_sink,
                     attempt_return=shutdown_return_home,
+                )
+                _log_best_effort("info", "Arm output released; exiting.")
+            elif hand_outputs_activated:
+                try:
+                    hand_ctrl.deactivate()
+                except Exception as e:
+                    _log_best_effort("error", f"Failed to deactivate Dex3 output: {e}")
+        elif args.arm == "G1D":
+            if outputs_activated:
+                graceful_g1_29_shutdown(
+                    arm_ctrl,
+                    arm_ik=arm_ik,
+                    hand_ctrl=hand_ctrl if hand_outputs_activated else None,
+                    sink=pose_telemetry_sink,
+                    attempt_return=False,
+                    open_hands=False,
                 )
                 _log_best_effort("info", "Arm output released; exiting.")
             elif hand_outputs_activated:

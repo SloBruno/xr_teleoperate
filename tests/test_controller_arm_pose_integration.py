@@ -55,7 +55,7 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
 
     def test_arm_ik_is_never_called_until_calibration_has_succeeded(self):
         source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("calibration = arm_calibration if args.arm == \"G1_29\" else None", source)
+        self.assertIn("calibration = arm_calibration if args.arm in G1_ARM_7DOF_PROFILES else None", source)
         self.assertIn("calibrator=calibration", source)
 
     def test_invalid_controller_target_holds_measured_q_without_new_ik_or_arm_write(self):
@@ -63,11 +63,12 @@ class ControllerArmPoseIntegrationTest(unittest.TestCase):
         self.assertIn("target_accepted=target is not None", (Path(__file__).parents[1] / "teleop/utils/arm_tracking_orchestration.py").read_text())
         self.assertIn("calibrator.targets(controller_poses, sample_timestamp", (Path(__file__).parents[1] / "teleop/utils/arm_tracking_orchestration.py").read_text())
 
-    def test_alternate_arm_profiles_do_not_use_controller_wrist_calibration(self):
+    def test_only_g1_7dof_profiles_use_controller_wrist_calibration(self):
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn('if args.arm == "G1_29":', source)
-        self.assertIn('if args.arm == "G1_29" and not arm_calibration.calibrated:', source)
-        self.assertIn('if args.arm != "G1_29" and controller_pose_is_fresh:', source)
+        self.assertIn('elif args.arm == "G1D":', source)
+        self.assertIn('if args.arm in G1_ARM_7DOF_PROFILES and not arm_calibration.calibrated:', source)
+        self.assertIn('if args.arm not in G1_ARM_7DOF_PROFILES and controller_pose_is_fresh:', source)
 
     def test_prearm_sample_is_carried_into_first_tracking_command(self):
         source = SCRIPT.read_text(encoding="utf-8")

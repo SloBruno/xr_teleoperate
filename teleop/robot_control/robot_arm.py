@@ -165,6 +165,10 @@ class _ArmPublicationMixin:
 
 class G1_29_ArmController(_ArmPublicationMixin):
     arm_joint_split = (7, 7)
+    command_waist = True
+    prepare_to_zero = True
+    motor_count = 35
+    motor_indices = tuple(range(motor_count))
 
     def __init__(self, motion_mode = False, simulation_mode = False):
         logger_mp.info("Initialize G1_29_ArmController...")
@@ -241,24 +245,10 @@ class G1_29_ArmController(_ArmPublicationMixin):
         self.msg = unitree_hg_msg_dds__LowCmd_()
         self.msg.mode_pr = 0
         self.msg.mode_machine = lowstate.mode_machine
-        self.all_motor_q = np.array([lowstate.motor_state[id].q for id in G1_29_JointIndex])
+        self.all_motor_q = np.array([lowstate.motor_state[id].q for id in self.motor_indices])
         arm_indices = set(member.value for member in G1_29_JointArmIndex)
-        for id in G1_29_JointIndex:
-            self.msg.motor_cmd[id].mode = 1
-            if id.value in arm_indices:
-                if self._Is_wrist_motor(id):
-                    self.msg.motor_cmd[id].kp = self.kp_wrist
-                    self.msg.motor_cmd[id].kd = self.kd_wrist
-                else:
-                    self.msg.motor_cmd[id].kp = self.kp_low
-                    self.msg.motor_cmd[id].kd = self.kd_low
-            elif self._Is_weak_motor(id):
-                self.msg.motor_cmd[id].kp = self.kp_low
-                self.msg.motor_cmd[id].kd = self.kd_low
-            else:
-                self.msg.motor_cmd[id].kp = self.kp_high
-                self.msg.motor_cmd[id].kd = self.kd_high
-            self.msg.motor_cmd[id].q = self.all_motor_q[id]
+        for id in self.motor_indices:
+            self._configure_joint_command(id, self.all_motor_q[id], arm_indices)
         # First arm command is the same fresh measured configuration.
         with self.ctrl_lock:
             self.q_target = np.array([
@@ -268,6 +258,41 @@ class G1_29_ArmController(_ArmPublicationMixin):
         self.outputs_activated = True
         self.publish_thread.start()
         logger_mp.info("[G1_29_ArmController] Arm DDS output activated.")
+
+    def _configure_joint_command(self, joint_id, measured_q, arm_indices):
+        """Initialize one LowCmd slot without giving G1D waist authority.
+
+        LowCmd carries every slot, so the G1D profile cannot omit waist fields.
+        It publishes their measured position with zero kp/kd/tau instead, while
+        joint-space authority remains restricted to the 14 arm joints.
+        """
+        cmd = self.msg.motor_cmd[joint_id]
+        cmd.mode = 1
+        cmd.q = measured_q
+        cmd.dq = 0.0
+        cmd.tau = 0.0
+        joint_value = int(joint_id)
+        waist_joints = {
+            G1_29_JointIndex.kWaistYaw.value,
+            G1_29_JointIndex.kWaistRoll.value,
+            G1_29_JointIndex.kWaistPitch.value,
+        }
+        if not self.command_waist and joint_value in waist_joints:
+            cmd.kp = 0.0
+            cmd.kd = 0.0
+        elif joint_value in arm_indices:
+            if self._Is_wrist_motor(joint_id):
+                cmd.kp = self.kp_wrist
+                cmd.kd = self.kd_wrist
+            else:
+                cmd.kp = self.kp_low
+                cmd.kd = self.kd_low
+        elif self._Is_weak_motor(joint_id):
+            cmd.kp = self.kp_low
+            cmd.kd = self.kd_low
+        else:
+            cmd.kp = self.kp_high
+            cmd.kd = self.kd_high
 
     def deactivate(self):
         """Stop the arm write loop immediately when terminal q is processed."""
@@ -280,7 +305,7 @@ class G1_29_ArmController(_ArmPublicationMixin):
             if msg is not None:
                 lowstate = G1_29_LowState()
                 lowstate.mode_machine = msg.mode_machine
-                for id in range(G1_29_Num_Motors):
+                for id in range(self.motor_count):
                     lowstate.motor_state[id].q  = msg.motor_state[id].q
                     lowstate.motor_state[id].dq = msg.motor_state[id].dq
                 self.lowstate_buffer.SetData(lowstate)
@@ -381,7 +406,7 @@ class G1_29_ArmController(_ArmPublicationMixin):
     
     def get_current_motor_q(self):
         '''Return current state q of all body motors.'''
-        return np.array([self.lowstate_buffer.GetData().motor_state[id].q for id in G1_29_JointIndex])
+        return np.array([self.lowstate_buffer.GetData().motor_state[id].q for id in self.motor_indices])
     
     def get_current_dual_arm_q(self):
         '''Return current state q of the left and right arm motors.'''
@@ -440,7 +465,7 @@ class G1_29_ArmController(_ArmPublicationMixin):
             G1_29_JointIndex.kRightShoulderYaw.value,
             G1_29_JointIndex.kRightElbow.value,
         ]
-        return motor_index.value in weak_motors
+        return int(motor_index) in weak_motors
     
     def _Is_wrist_motor(self, motor_index):
         wrist_motors = [
@@ -451,7 +476,7 @@ class G1_29_ArmController(_ArmPublicationMixin):
             G1_29_JointIndex.kRightWristPitch.value,
             G1_29_JointIndex.kRightWristYaw.value,
         ]
-        return motor_index.value in wrist_motors
+        return int(motor_index) in wrist_motors
 
 class G1_29_JointArmIndex(IntEnum):
     # Left arm
@@ -518,6 +543,21 @@ class G1_29_JointIndex(IntEnum):
     kNotUsedJoint3 = 32
     kNotUsedJoint4 = 33
     kNotUsedJoint5 = 34
+
+class G1D_ArmController(G1_29_ArmController):
+    """G1D upper-body profile: Quest tracks 14 arm joints, never the waist."""
+    command_waist = False
+    prepare_to_zero = False
+    motor_count = 29
+    motor_indices = tuple(range(29))
+
+    def __init__(self, motion_mode=False, simulation_mode=False):
+        # G1D LowCmd has slots 0..28 only.  The G1_29 motion-authority slot
+        # (29) does not exist, so accepting --motion would be unsafe.
+        if motion_mode:
+            raise ValueError("G1D motion_mode is unsupported: this profile controls arms only.")
+        super().__init__(motion_mode=False, simulation_mode=simulation_mode)
+
 
 class G1_23_ArmController(_ArmPublicationMixin):
     arm_joint_split = (5, 5)

@@ -22,7 +22,7 @@ class G1QuestDex3LauncherTest(unittest.TestCase):
         self.assertIn('repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)', source)
         self.assertIn('teleimager_dir="$repo/teleop/teleimager"', source)
         self.assertNotIn("/home/unitree/xr_teleoperate_slo", source)
-        self.assertLess(source.index("ensure_teleimager\nexec 9>&-"), source.index('exec "$teleimager_python"'))
+        self.assertLess(source.index("if ! ensure_teleimager;"), source.index('exec "$teleimager_python"'))
 
     def test_teleimager_start_is_persistent_and_uses_state_files(self):
         source = LAUNCHER.read_text(encoding="utf-8")
@@ -53,7 +53,7 @@ class G1QuestDex3LauncherTest(unittest.TestCase):
         source = LAUNCHER.read_text(encoding="utf-8")
         self.assertIn("TELEIMAGER_TIMEOUT_S", source)
         self.assertIn("teleimager did not become healthy", source)
-        self.assertLess(source.index("ensure_teleimager\nexec 9>&-"), source.index('exec "$teleimager_python"'))
+        self.assertLess(source.index("if ! ensure_teleimager;"), source.index('exec "$teleimager_python"'))
 
 
 class HeadOnlyModeLauncherTest(unittest.TestCase):

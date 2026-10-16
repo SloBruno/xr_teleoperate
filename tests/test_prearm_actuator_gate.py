@@ -78,11 +78,15 @@ class PrearmActuatorGateTest(unittest.TestCase):
     def test_launcher_releases_r_only_after_confirmed_preparation_pose(self):
         source = TELEOP.read_text(encoding="utf-8")
         prepare = source[source.index("Match the original launcher behavior"):source.index("# Initialize before the pre-arm loop")]
-        self.assertIn("preparation_confirmed = arm_ctrl.ctrl_dual_arm_go_home()", prepare)
-        self.assertIn('if args.arm == "G1_29":', prepare)
-        self.assertLess(prepare.index('if args.arm == "G1_29":'), prepare.index("arm_ctrl.activate()"))
-        self.assertIn("if not preparation_confirmed:", prepare)
-        self.assertLess(prepare.index("if not preparation_confirmed:"), prepare.index("PREPARATION_COMPLETE = True"))
+        g1_29_start = prepare.index('if args.arm == "G1_29":')
+        g1d_start = prepare.index('elif args.arm == "G1D":')
+        g1_29_prepare = prepare[g1_29_start:g1d_start]
+        g1d_prepare = prepare[g1d_start:]
+        self.assertIn("arm_ctrl.ctrl_dual_arm_go_home()", g1_29_prepare)
+        self.assertLess(g1_29_start, g1_29_prepare.index("arm_ctrl.activate()") + g1_29_start)
+        self.assertIn("if not arm_ctrl.ctrl_dual_arm_go_home():", g1_29_prepare)
+        self.assertNotIn("ctrl_dual_arm_go_home", g1d_prepare)
+        self.assertLess(g1_29_prepare.index("if not arm_ctrl.ctrl_dual_arm_go_home():"), prepare.index("PREPARATION_COMPLETE = True"))
         arm_source = ARM.read_text(encoding="utf-8")
         home_start = arm_source.index("    def ctrl_dual_arm_go_home(self, release_motion_authority=False):")
         home = arm_source[home_start:arm_source.index("    def speed_gradual_max", home_start)]
