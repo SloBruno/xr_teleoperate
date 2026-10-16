@@ -27,7 +27,7 @@ def test_g1d_uses_the_normal_g1_home_method_with_the_same_target_timeout_and_arr
     assert "time.sleep(0.05)" in normal
     assert "np.all(np.abs(current_q) <= tolerance)" in normal
     launcher = TELEOP.read_text(encoding="utf-8")
-    assert "ctrl_dual_arm_go_home(cancelled=lambda: STOP, require_fresh_lowstate=True)" in launcher
+    assert "ctrl_dual_arm_go_home(cancelled=lambda: STOP or _quest_b_stop_during_preparation(tv_wrapper, _prep_b_state), require_fresh_lowstate=True)" in launcher
     assert "def ctrl_dual_arm_go_home" in g1d  # hardened override, same zero target/tolerance
     assert "np.zeros(14)" in g1d and "prep_tolerance = 0.08" in g1d
 

@@ -348,7 +348,7 @@ def on_press(key):
             logger_mp.warning(f"[on_press] {key} was pressed, but no action is defined for this key.")
 
 
-def poll_controller_lifecycle(controller_sample, right_a_was_pressed, right_b_was_pressed, allow_stop=True):
+def poll_controller_lifecycle(controller_sample, right_a_was_pressed, right_b_was_pressed):
     """Apply fresh right-controller A/B rising edges through the terminal gates."""
     if not controller_sample_is_fresh(controller_sample.controller_sample_timestamp):
         return right_a_was_pressed, right_b_was_pressed
@@ -358,9 +358,21 @@ def poll_controller_lifecycle(controller_sample, right_a_was_pressed, right_b_wa
     with LIFECYCLE_LOCK:
         if right_a_pressed and not right_a_was_pressed:
             _request_start_locked()
-        if allow_stop and right_b_pressed and not right_b_was_pressed:
+        if right_b_pressed and not right_b_was_pressed:
             _request_stop_locked()
     return right_a_pressed, right_b_pressed
+
+
+def _quest_b_stop_during_preparation(wrapper, state):
+    """Cancel poll for G1D arm preparation: right B rising edge == terminal q."""
+    if wrapper is None:
+        return STOP
+    try:
+        sample = wrapper.get_tele_data()
+        _, state["b"] = poll_controller_lifecycle(sample, False, state.get("b", False))
+    except Exception as error:
+        _log_best_effort("warning", f"Quest B poll during preparation failed: {type(error).__name__}")
+    return STOP
 
 
 def _publish_arm_target_if_authorized(arm_ctrl, q_target, tauff_target, target_accepted, sample_fresh):
@@ -771,7 +783,8 @@ if __name__ == '__main__':
                 _safe_emit_lifecycle_event(pose_telemetry_sink, event, cause=text)
 
             arm_ctrl.preparation_progress = _prep_progress
-            if not arm_ctrl.ctrl_dual_arm_go_home(cancelled=lambda: STOP, require_fresh_lowstate=True):
+            _prep_b_state = {"b": False}
+            if not arm_ctrl.ctrl_dual_arm_go_home(cancelled=lambda: STOP or _quest_b_stop_during_preparation(tv_wrapper, _prep_b_state), require_fresh_lowstate=True):
                 preparation_status = getattr(arm_ctrl, "last_preparation_status", "preparation_failed")
                 with LIFECYCLE_LOCK:
                     if STOP:
@@ -844,8 +857,7 @@ if __name__ == '__main__':
                     tv_wrapper.render_to_xr(head_img.bgr)
             ready_tele_data = tv_wrapper.get_tele_data()
             right_a_was_pressed, right_b_was_pressed = poll_controller_lifecycle(
-                ready_tele_data, right_a_was_pressed, right_b_was_pressed,
-                allow_stop=args.arm != "G1D")
+                ready_tele_data, right_a_was_pressed, right_b_was_pressed)
             if human_arm_sweep is not None:
                 left_x_was_pressed = poll_human_sweep_button(ready_tele_data, left_x_was_pressed)
                 service_human_arm_sweep(
@@ -1015,8 +1027,7 @@ if __name__ == '__main__':
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
             right_a_was_pressed, right_b_was_pressed = poll_controller_lifecycle(
-                tele_data, right_a_was_pressed, right_b_was_pressed,
-                allow_stop=args.arm != "G1D")
+                tele_data, right_a_was_pressed, right_b_was_pressed)
             if _diag is not None: _diag.mark("controller")
 
             if args.ee in ("inspire_ftp", "inspire_dfx", "brainco") and args.input_mode == "hand":

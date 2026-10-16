@@ -81,7 +81,7 @@ class PrearmActuatorGateTest(unittest.TestCase):
         g1d_start = prepare.index('if args.arm == "G1D":')
         g1d_prepare = prepare[g1d_start:prepare.index("        else:", g1d_start)]
         g1_29_prepare = prepare[prepare.index('if args.arm == "G1_29":'):]
-        self.assertIn("arm_ctrl.ctrl_dual_arm_go_home(cancelled=lambda: STOP, require_fresh_lowstate=True)", g1d_prepare)
+        self.assertIn("arm_ctrl.ctrl_dual_arm_go_home(cancelled=lambda: STOP or _quest_b_stop_during_preparation(tv_wrapper, _prep_b_state), require_fresh_lowstate=True)", g1d_prepare)
         self.assertIn("if not arm_ctrl.ctrl_dual_arm_go_home():", g1_29_prepare)
         self.assertLess(g1d_prepare.index("arm_ctrl.activate()"), g1d_prepare.index("ctrl_dual_arm_go_home"))
         self.assertLess(g1d_prepare.index("ctrl_dual_arm_go_home"), g1d_prepare.index("PREPARATION_COMPLETE = True"))
@@ -101,7 +101,7 @@ class PrearmActuatorGateTest(unittest.TestCase):
         prepare = source[source.index("Match the original launcher behavior"):source.index("# Initialize before the pre-arm loop")]
         g1d_prepare = prepare[prepare.index('if args.arm == "G1D":'):prepare.index("        else:", prepare.index('if args.arm == "G1D":'))]
         self.assertIn("arm_ctrl.activate()", g1d_prepare)
-        self.assertIn("ctrl_dual_arm_go_home(cancelled=lambda: STOP, require_fresh_lowstate=True)", g1d_prepare)
+        self.assertIn("ctrl_dual_arm_go_home(cancelled=lambda: STOP or _quest_b_stop_during_preparation(tv_wrapper, _prep_b_state), require_fresh_lowstate=True)", g1d_prepare)
         self.assertNotIn("hand_ctrl.activate()", g1d_prepare)
         self.assertIn("preparation_cancelled", g1d_prepare)
 
@@ -130,7 +130,7 @@ class PrearmActuatorGateTest(unittest.TestCase):
         self.assertIn("with LIFECYCLE_LOCK:", prepare)
         self.assertLess(prepare.index("if STOP:"), prepare.index("arm_ctrl.activate()"))
         self.assertLess(
-            prepare.index("ctrl_dual_arm_go_home(cancelled=lambda: STOP, require_fresh_lowstate=True)"),
+            prepare.index("ctrl_dual_arm_go_home(cancelled=lambda: STOP or _quest_b_stop_during_preparation(tv_wrapper, _prep_b_state), require_fresh_lowstate=True)"),
             prepare.index("PREPARATION_COMPLETE = True"),
         )
 
@@ -222,7 +222,7 @@ class PrearmActuatorGateTest(unittest.TestCase):
         prep = source[source.index("Match the original launcher behavior"):source.index("# Initialize before the pre-arm loop")]
         g1d_guard = prep.index('if args.arm == "G1D":')
         g1_29_guard = prep.index('if args.arm == "G1_29":')
-        g1d_home = prep.index("ctrl_dual_arm_go_home(cancelled=lambda: STOP, require_fresh_lowstate=True)")
+        g1d_home = prep.index("ctrl_dual_arm_go_home(cancelled=lambda: STOP or _quest_b_stop_during_preparation(tv_wrapper, _prep_b_state), require_fresh_lowstate=True)")
         g1_29_home = prep.index("if not arm_ctrl.ctrl_dual_arm_go_home():")
         self.assertLess(g1d_guard, g1d_home)
         self.assertLess(g1d_home, g1_29_guard)

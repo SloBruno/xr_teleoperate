@@ -670,17 +670,79 @@ def test_right_a_in_hand_mode_flows_wrapper_to_teledata_to_g1d_start(monkeypatch
 def test_g1d_main_loop_polls_controller_lifecycle_without_profile_gate():
     source = (Path(__file__).resolve().parents[1] / "teleop" / "teleop_hand_and_arm.py").read_text()
     assert 'args.arm != "G1D":\n                right_a_was_pressed' not in source
-    assert source.count("poll_controller_lifecycle(") == 3  # def + ready loop + tracking loop
+    assert source.count("poll_controller_lifecycle(") == 4  # def + prep helper + ready loop + tracking loop
 
 
-def test_g1d_quest_a_starts_but_b_never_stops(monkeypatch):
+def test_g1d_quest_a_starts_and_b_stops_like_q(monkeypatch):
     module = _import_lifecycle_module(monkeypatch)
     module.START = module.STOP = False
     module.PREPARATION_COMPLETE = True
     ts = time.monotonic()
+    # B alone: stop (unconditional helper, same as terminal q), START cleared.
     sample = types.SimpleNamespace(right_ctrl_aButton=False, right_ctrl_bButton=True, controller_sample_timestamp=ts)
-    module.poll_controller_lifecycle(sample, False, False, allow_stop=False)
-    assert (module.START, module.STOP) == (False, False)
-    sample = types.SimpleNamespace(right_ctrl_aButton=True, right_ctrl_bButton=True, controller_sample_timestamp=ts)
-    module.poll_controller_lifecycle(sample, False, True, allow_stop=False)
+    module.poll_controller_lifecycle(sample, False, False)
+    assert (module.START, module.STOP) == (False, True)
+    # idempotent on repeated edge
+    module.poll_controller_lifecycle(sample, False, False)
+    assert (module.START, module.STOP) == (False, True)
+    # B also stops before preparation completes (no preparation gate)
+    module.START = module.STOP = False
+    module.PREPARATION_COMPLETE = False
+    module.poll_controller_lifecycle(sample, False, False)
+    assert module.STOP is True
+    # A still starts only after preparation
+    module.START = module.STOP = False
+    module.PREPARATION_COMPLETE = True
+    sample = types.SimpleNamespace(right_ctrl_aButton=True, right_ctrl_bButton=False, controller_sample_timestamp=ts)
+    module.poll_controller_lifecycle(sample, False, False)
     assert (module.START, module.STOP) == (True, False)
+
+
+def test_g1d_polls_never_disable_b_stop_and_prep_polls_b():
+    source = (Path(__file__).resolve().parents[1] / "teleop" / "teleop_hand_and_arm.py").read_text()
+    assert "allow_stop" not in source
+    assert "_quest_b_stop_during_preparation(tv_wrapper" in source
+
+
+def test_g1d_preparation_cancel_poll_b_requests_stop(monkeypatch):
+    module = _import_lifecycle_module(monkeypatch)
+    module.START = module.STOP = False
+    ts = time.monotonic()
+    pressed = types.SimpleNamespace(right_ctrl_aButton=False, right_ctrl_bButton=True, controller_sample_timestamp=ts)
+    wrapper = types.SimpleNamespace(get_tele_data=lambda: pressed)
+    state = {"b": False}
+    assert module._quest_b_stop_during_preparation(wrapper, state) is True
+    assert module.STOP is True
+
+
+def test_right_b_in_hand_mode_flows_wrapper_to_teledata_to_g1d_stop(monkeypatch):
+    import numpy as np
+    tv = _load_real_tv_wrapper(monkeypatch)
+    now = time.monotonic()
+    eye = np.eye(4)
+    fake = types.SimpleNamespace(
+        head_pose=eye, hand_pose_sample=(eye, eye, now),
+        controller_pose_sample=(eye, eye, now), motion_data_ready=True,
+        left_hand_positions=np.zeros((25, 3)), right_hand_positions=np.zeros((25, 3)),
+        left_hand_pinch=False, left_hand_pinchValue=0.0, left_hand_squeeze=False, left_hand_squeezeValue=0.0,
+        right_hand_pinch=False, right_hand_pinchValue=0.0, right_hand_squeeze=False, right_hand_squeezeValue=0.0,
+        left_ctrl_trigger=False, left_ctrl_triggerValue=0.0, right_ctrl_trigger=False, right_ctrl_triggerValue=0.0,
+        left_ctrl_thumbstick=False, left_ctrl_thumbstickValue=[0.0, 0.0],
+        right_ctrl_thumbstick=False, right_ctrl_thumbstickValue=[0.0, 0.0],
+        left_ctrl_aButton=False, left_ctrl_bButton=False,
+        right_ctrl_aButton=False, right_ctrl_bButton=True,
+    )
+    wrapper = object.__new__(tv.TeleVuerWrapper)
+    wrapper.tvuer = fake
+    wrapper.use_hand_tracking = True
+    wrapper.return_hand_rot_data = False
+    wrapper.arm_reference_mode = "head_yaw"
+    wrapper.arm_pose_source = "hand"
+    data = wrapper.get_tele_data()
+    assert data.right_ctrl_bButton is True and data.left_ctrl_bButton is False
+
+    module = _import_lifecycle_module(monkeypatch)
+    module.START = module.STOP = False
+    module.PREPARATION_COMPLETE = False  # no preparation gate for stop
+    module.poll_controller_lifecycle(data, False, False)
+    assert (module.START, module.STOP) == (False, True)
