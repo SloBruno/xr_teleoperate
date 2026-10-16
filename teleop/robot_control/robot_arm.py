@@ -572,6 +572,127 @@ class G1D_ArmController(G1_29_ArmController):
             raise ValueError("G1D motion_mode is unsupported: this profile controls arms only.")
         super().__init__(motion_mode=False, simulation_mode=simulation_mode)
 
+    # --- G1D preparation hardening (G1_29 normal path is untouched) -------
+    prep_min_timeout_s = 10.0
+    prep_nominal_speed = 2.1      # rad/s, used only to scale the timeout
+    prep_timeout_factor = 3.0
+    prep_stable_window_s = 0.3
+    prep_log_period_s = 1.0
+    prep_tolerance = 0.05         # same tolerance as the normal G1 home path
+    prep_hold_seconds = 3.0
+    prep_hold_kp = 40.0
+    prep_hold_kd = 1.5            # official example wrist/arm damping
+    last_preparation_report = ""
+
+    def _preparation_report(self, q, label):
+        err = np.asarray(q, dtype=float) - 0.0
+        names = [member.name for member in G1_29_JointArmIndex]
+        worst = int(np.argmax(np.abs(err)))
+        per_joint = " ".join(
+            f"{int(member.value)}:{names[i]}={err[i]:+.3f}" for i, member in enumerate(G1_29_JointArmIndex))
+        q_text = ",".join(f"{value:+.3f}" for value in np.asarray(q, dtype=float))
+        return (f"{label} worst_joint={int(list(G1_29_JointArmIndex)[worst].value)}:{names[worst]} "
+                f"max_abs_err={abs(err[worst]):.3f} errors[{per_joint}] q_measured=[{q_text}]")
+
+    def _hold_measured_q_then_deactivate(self, q_hold):
+        """Hold the measured pose with low gains for a few seconds, then release.
+
+        Waist slots keep kp=kd=tau=0; only the 14 arm slots are touched.
+        """
+        try:
+            if q_hold is None or not self.output_enabled.is_set():
+                logger_mp.error("[G1D_ArmController] no measured q to hold; releasing output.")
+            else:
+                for joint in G1_29_JointArmIndex:
+                    cmd = self.msg.motor_cmd[joint]
+                    cmd.kp = min(float(cmd.kp), self.prep_hold_kp)
+                    cmd.kd = self.prep_hold_kd
+                with self.ctrl_lock:
+                    self.q_target = np.asarray(q_hold, dtype=float).copy()
+                    self.tauff_target = np.zeros(14)
+                    self._command_request_id += 1
+                logger_mp.warning("[G1D_ArmController] holding measured q for %.1fs before release.",
+                                  self.prep_hold_seconds)
+                deadline = time.monotonic() + self.prep_hold_seconds
+                while time.monotonic() < deadline:
+                    time.sleep(0.05)
+        finally:
+            self.deactivate()
+
+    def ctrl_dual_arm_go_home(self, release_motion_authority=False, cancelled=None,
+                              require_fresh_lowstate=False, progress=None):
+        '''G1D preparation: same zero target/tolerance as G1; hardened failure handling.'''
+        logger_mp.info("[G1D_ArmController] ctrl_dual_arm_go_home start...")
+        self.last_preparation_status = "preparation_started"
+        if progress is None:
+            progress = getattr(self, "preparation_progress", None)
+        with self.ctrl_lock:
+            self.q_target = np.zeros(14)
+        tolerance = self.prep_tolerance
+        last_good_q = None
+        timeout_s = None
+        start = time.monotonic()
+        last_log = None
+        stable_since = None
+
+        def report(label, q):
+            text = self._preparation_report(q, label)
+            self.last_preparation_report = text
+            return text
+
+        def fail(status, message, q):
+            self.last_preparation_status = status
+            if q is not None:
+                text = report(status, q)
+                logger_mp.error("[G1D_ArmController] %s %s", message, text)
+                if progress is not None:
+                    try:
+                        progress(status, text)
+                    except Exception:
+                        pass
+            else:
+                logger_mp.error("[G1D_ArmController] %s", message)
+            self._hold_measured_q_then_deactivate(q)
+            return False
+
+        while True:
+            now = time.monotonic()
+            if cancelled is not None and cancelled():
+                return fail("preparation_cancelled", "arm preparation cancelled.", last_good_q)
+            if require_fresh_lowstate:
+                current_q, sample_age = self.get_dual_arm_q_snapshot()
+                if current_q is None or sample_age > 0.1:
+                    return fail("preparation_lowstate_stale", "LowState is stale during arm preparation.", last_good_q)
+            else:
+                current_q = self.get_current_dual_arm_q()
+            last_good_q = np.asarray(current_q, dtype=float).copy()
+            if timeout_s is None:
+                timeout_s = max(self.prep_min_timeout_s,
+                                self.prep_timeout_factor * float(np.max(np.abs(last_good_q))) / self.prep_nominal_speed)
+                logger_mp.info("[G1D_ArmController] preparation timeout %.1fs.", timeout_s)
+            if last_log is None or now - last_log >= self.prep_log_period_s:
+                last_log = now
+                text = report("preparation_progress", last_good_q)
+                logger_mp.info("[G1D_ArmController] %s", text)
+                if progress is not None:
+                    try:
+                        progress("preparation_progress", text)
+                    except Exception:
+                        pass
+            if np.all(np.abs(last_good_q) <= tolerance):
+                if stable_since is None:
+                    stable_since = now
+                if now - stable_since >= self.prep_stable_window_s:
+                    self.last_preparation_status = "preparation_ready"
+                    logger_mp.info("[G1D_ArmController] both arms have reached the home position.")
+                    return True
+            else:
+                stable_since = None
+            if now - start >= timeout_s:
+                return fail("preparation_timeout",
+                            "timed out waiting for arms to reach home position.", last_good_q)
+            time.sleep(0.05)
+
 
 class G1_23_ArmController(_ArmPublicationMixin):
     arm_joint_split = (5, 5)

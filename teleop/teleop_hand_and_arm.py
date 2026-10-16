@@ -754,6 +754,10 @@ if __name__ == '__main__':
                     raise KeyboardInterrupt
                 arm_ctrl.activate()
                 outputs_activated = True
+            def _prep_progress(event, text):
+                _safe_emit_lifecycle_event(pose_telemetry_sink, event, cause=text)
+
+            arm_ctrl.preparation_progress = _prep_progress
             if not arm_ctrl.ctrl_dual_arm_go_home(cancelled=lambda: STOP, require_fresh_lowstate=True):
                 preparation_status = getattr(arm_ctrl, "last_preparation_status", "preparation_failed")
                 with LIFECYCLE_LOCK:
