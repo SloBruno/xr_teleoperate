@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# G1D operator launcher: requires two remote camera streams; r/q stays in Python.
+# G1D operator launcher: video disabled by default (pass-through); G1D_VIDEO=1 requires two remote camera streams. r/q stays in Python.
 set -euo pipefail
 
 # Extra arguments are forwarded to teleop (appended after the fixed safety flags).
@@ -103,16 +103,32 @@ PY
 }
 
 preflight_tls
-preflight_remote_two_camera_streams
+if [[ "${G1D_VIDEO:-0}" == 1 ]]; then
+    preflight_remote_two_camera_streams
+    [[ "${G1D_LAUNCHER_SKIP_TELEOP:-0}" == 1 ]] && exit 0
+    cd "$repo/teleop"
+    echo "G1D arm-only: remote Teleimager $teleimager_host has two verified streams; press r to arm tracking; q to release and exit."
+    exec "$teleimager_python" -s teleop_hand_and_arm.py \
+      --arm G1D \
+      --g1d-ik-geometry-assumption \
+      --ee dex3 \
+      --input-mode hand \
+      --camera-layout vertical \
+      --img-server-ip "$teleimager_host" \
+      --network-interface "$g1d_dds_interface" \
+      "$@"
+fi
+
+echo "G1D video DISABLED (pass-through, no camera preflight, no ImageClient); set G1D_VIDEO=1 to re-enable the two-camera video flow."
 [[ "${G1D_LAUNCHER_SKIP_TELEOP:-0}" == 1 ]] && exit 0
 cd "$repo/teleop"
-echo "G1D arm-only: remote Teleimager $teleimager_host has two verified streams; press r to arm tracking; q to release and exit."
+echo "G1D arm-only (no video): press r or right A to arm tracking; right B or q to release and exit."
 exec "$teleimager_python" -s teleop_hand_and_arm.py \
   --arm G1D \
   --g1d-ik-geometry-assumption \
   --ee dex3 \
   --input-mode hand \
-  --camera-layout vertical \
-  --img-server-ip "$teleimager_host" \
+  --display-mode pass-through \
+  --no-video \
   --network-interface "$g1d_dds_interface" \
   "$@"

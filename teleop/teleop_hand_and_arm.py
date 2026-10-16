@@ -461,6 +461,7 @@ if __name__ == '__main__':
     parser.add_argument('--arm', type=str, choices=['G1_29', 'G1D', 'G1_23', 'H1_2', 'H1', 'H2'], default='G1_29', help='Select arm controller')
     parser.add_argument("--g1d-ik-geometry-assumption", action="store_true", help="Required for G1D: explicitly acknowledge that G1_29 arm IK geometry has not been hardware-validated for G1D")
     parser.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco'], help='Select end effector controller')
+    parser.add_argument('--no-video', action='store_true', help='Disable the whole video flow (no ImageClient, no render_to_xr); use with --display-mode pass-through')
     parser.add_argument('--camera-layout', type=str, choices=['head', 'vertical'], default='vertical', help='XR camera layout: head camera only, or head above left-wrist camera')
     parser.add_argument('--camera-scale', type=float, default=0.5, help='Scale used for each camera in the vertical XR layout (default: 0.5)')
     parser.add_argument('--head-crop-bottom', type=float, default=0.89, help='Fraction of the head-camera height retained before the seam')
@@ -490,6 +491,10 @@ if __name__ == '__main__':
     parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording at json file')
 
     args = parser.parse_args()
+    if args.no_video and args.record:
+        parser.error("--record cannot be combined with --no-video (no camera frames).")
+    if args.no_video and args.display_mode != 'pass-through':
+        parser.error("--no-video requires --display-mode pass-through.")
     if args.arm == "G1D" and args.motion:
         parser.error("G1D is arm-only; --motion is not supported.")
     if args.arm == "G1D" and not args.g1d_ik_geometry_assumption:
@@ -507,6 +512,9 @@ if __name__ == '__main__':
     loop_diag = None
     com_monitor = None
     img_client = None
+    camera_config = None
+    xr_need_local_img = False
+    vertical_camera_stack = False
     tv_wrapper = None
     shutdown_cause = None
     loco_wrapper = None
@@ -518,7 +526,7 @@ if __name__ == '__main__':
         # listens). TeleVuer forks its Vuer Process in __init__; forking after DDS/keyboard/ZMQ
         # threads exist can hand the child a locked mutex. Pass-through needs no image shape or
         # transport, so fork the Vuer process FIRST, while this process is still single-threaded.
-        if args.display_mode == 'pass-through':
+        if args.display_mode == 'pass-through' or args.no_video:
             tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand",
                                          binocular=False,
                                          img_shape=(480, 640),
@@ -545,62 +553,63 @@ if __name__ == '__main__':
                                                       daemon=True)
             listen_keyboard_thread.start()
 
-        # image client
-        img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
-        camera_config = img_client.get_cam_config()
-        logger_mp.debug(f"Camera config: {camera_config}")
-        vertical_camera_stack = args.camera_layout == 'vertical'
-        xr_use_webrtc, xr_need_local_img = resolve_xr_image_transport(
-            args.display_mode, camera_config['head_camera'], vertical_camera_stack)
-        if vertical_camera_stack and not camera_config['left_wrist_camera']['enable_zmq']:
-            raise RuntimeError("Vertical camera layout requires left_wrist_camera.enable_zmq=true")
-        if not 0 < args.camera_scale <= 1:
-            raise ValueError("--camera-scale must be greater than 0 and at most 1")
-        if not 0 < args.head_crop_bottom <= 1:
-            raise ValueError("--head-crop-bottom must be greater than 0 and at most 1")
-        if not 0 <= args.wrist_crop_top < 1:
-            raise ValueError("--wrist-crop-top must be at least 0 and less than 1")
-        if args.camera_divider_px < 0:
-            raise ValueError("--camera-divider-px cannot be negative")
+        if not args.no_video:
+            # image client
+            img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
+            camera_config = img_client.get_cam_config()
+            logger_mp.debug(f"Camera config: {camera_config}")
+            vertical_camera_stack = args.camera_layout == 'vertical'
+            xr_use_webrtc, xr_need_local_img = resolve_xr_image_transport(
+                args.display_mode, camera_config['head_camera'], vertical_camera_stack)
+            if vertical_camera_stack and not camera_config['left_wrist_camera']['enable_zmq']:
+                raise RuntimeError("Vertical camera layout requires left_wrist_camera.enable_zmq=true")
+            if not 0 < args.camera_scale <= 1:
+                raise ValueError("--camera-scale must be greater than 0 and at most 1")
+            if not 0 < args.head_crop_bottom <= 1:
+                raise ValueError("--head-crop-bottom must be greater than 0 and at most 1")
+            if not 0 <= args.wrist_crop_top < 1:
+                raise ValueError("--wrist-crop-top must be at least 0 and less than 1")
+            if args.camera_divider_px < 0:
+                raise ValueError("--camera-divider-px cannot be negative")
 
-        display_img_shape = camera_config['head_camera']['image_shape']
-        display_binocular = camera_config['head_camera']['binocular']
-        if vertical_camera_stack:
-            head_height, head_width = camera_config['head_camera']['image_shape']
-            wrist_height, wrist_width = camera_config['left_wrist_camera']['image_shape']
-            target_width = max(1, round(head_width * args.camera_scale))
-            cropped_head_height = max(1, round(head_height * args.head_crop_bottom))
-            cropped_wrist_height = max(1, wrist_height - round(wrist_height * args.wrist_crop_top))
-            scaled_head_height = max(1, round(cropped_head_height * target_width / head_width))
-            scaled_wrist_height = max(1, round(cropped_wrist_height * target_width / wrist_width))
-            display_img_shape = [scaled_head_height + args.camera_divider_px + scaled_wrist_height, target_width]
-            display_binocular = False
-            logger_mp.info(f"XR vertical camera layout enabled: display shape {display_img_shape}")
+            display_img_shape = camera_config['head_camera']['image_shape']
+            display_binocular = camera_config['head_camera']['binocular']
+            if vertical_camera_stack:
+                head_height, head_width = camera_config['head_camera']['image_shape']
+                wrist_height, wrist_width = camera_config['left_wrist_camera']['image_shape']
+                target_width = max(1, round(head_width * args.camera_scale))
+                cropped_head_height = max(1, round(head_height * args.head_crop_bottom))
+                cropped_wrist_height = max(1, wrist_height - round(wrist_height * args.wrist_crop_top))
+                scaled_head_height = max(1, round(cropped_head_height * target_width / head_width))
+                scaled_wrist_height = max(1, round(cropped_wrist_height * target_width / wrist_width))
+                display_img_shape = [scaled_head_height + args.camera_divider_px + scaled_wrist_height, target_width]
+                display_binocular = False
+                logger_mp.info(f"XR vertical camera layout enabled: display shape {display_img_shape}")
 
-        _plane_aspect = display_img_shape[1] / display_img_shape[0]
-        _plane_distance = DEFAULT_DISTANCE_M if args.video_plane_distance is None else args.video_plane_distance
-        video_plane_height, video_plane_distance = validate_plane(
-            resolve_plane_height(args.video_plane_height, _plane_aspect, _plane_distance), _plane_distance)
-        logger_mp.info(describe_plane(video_plane_height, video_plane_distance, _plane_aspect))
-        if plane_exceeds_headset(video_plane_height, video_plane_distance, _plane_aspect):
-            logger_mp.warning("XR video plane exceeds ~90° of the headset FOV; edges may be cut off")
+            _plane_aspect = display_img_shape[1] / display_img_shape[0]
+            _plane_distance = DEFAULT_DISTANCE_M if args.video_plane_distance is None else args.video_plane_distance
+            video_plane_height, video_plane_distance = validate_plane(
+                resolve_plane_height(args.video_plane_height, _plane_aspect, _plane_distance), _plane_distance)
+            logger_mp.info(describe_plane(video_plane_height, video_plane_distance, _plane_aspect))
+            if plane_exceeds_headset(video_plane_height, video_plane_distance, _plane_aspect):
+                logger_mp.warning("XR video plane exceeds ~90° of the headset FOV; edges may be cut off")
 
-        # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
-        if tv_wrapper is None:
-          tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand",
-                                     binocular=display_binocular,
-                                     img_shape=display_img_shape,
-                                     # maybe should decrease fps for better performance?
-                                     # https://github.com/unitreerobotics/xr_teleoperate/issues/172
-                                     # display_fps=camera_config['head_camera']['fps'] ? args.frequency? 30.0?
-                                     display_mode=args.display_mode,
-                                     zmq=camera_config['head_camera']['enable_zmq'],
-                                     webrtc=xr_use_webrtc,
-                                     webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
-                                     arm_pose_source="controller",
-                                     video_plane_height=video_plane_height,
-                                     video_plane_distance=video_plane_distance
-                                     )
+            # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
+            if tv_wrapper is None:
+              tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand",
+                                         binocular=display_binocular,
+                                         img_shape=display_img_shape,
+                                         # maybe should decrease fps for better performance?
+                                         # https://github.com/unitreerobotics/xr_teleoperate/issues/172
+                                         # display_fps=camera_config['head_camera']['fps'] ? args.frequency? 30.0?
+                                         display_mode=args.display_mode,
+                                         zmq=camera_config['head_camera']['enable_zmq'],
+                                         webrtc=xr_use_webrtc,
+                                         webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
+                                         arm_pose_source="controller",
+                                         video_plane_height=video_plane_height,
+                                         video_plane_distance=video_plane_distance
+                                         )
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
         if args.motion:
@@ -859,7 +868,7 @@ if __name__ == '__main__':
         while not STOP:
             time.sleep(0.033)
             _emit_lifecycle_events(pose_telemetry_sink)
-            if camera_config['head_camera']['enable_zmq'] and xr_need_local_img:
+            if camera_config is not None and camera_config['head_camera']['enable_zmq'] and xr_need_local_img:
                 head_img = img_client.get_head_frame()
                 if vertical_camera_stack:
                     left_wrist_img = img_client.get_left_wrist_frame()
@@ -1002,10 +1011,10 @@ if __name__ == '__main__':
             _diag = loop_diag
             if _diag is not None: _diag.begin()
             # get image
-            if camera_config['head_camera']['enable_zmq']:
+            if camera_config is not None and camera_config['head_camera']['enable_zmq']:
                 if args.record or xr_need_local_img:
                     head_img = img_client.get_head_frame()
-            if camera_config['left_wrist_camera']['enable_zmq']:
+            if camera_config is not None and camera_config['left_wrist_camera']['enable_zmq']:
                 if args.record or (xr_need_local_img and vertical_camera_stack):
                     left_wrist_img = img_client.get_left_wrist_frame()
             if _diag is not None: _diag.mark("camera")
@@ -1021,7 +1030,7 @@ if __name__ == '__main__':
                     tv_wrapper.render_to_xr(head_img.bgr)
                     if _diag is not None: _diag.record_video(head_img.bgr)
             if _diag is not None: _diag.mark("render")
-            if camera_config['right_wrist_camera']['enable_zmq']:
+            if camera_config is not None and camera_config['right_wrist_camera']['enable_zmq']:
                 if args.record:
                     right_wrist_img = img_client.get_right_wrist_frame()
 
