@@ -417,6 +417,18 @@ def stack_camera_frames_vertical(top_frame, bottom_frame, scale=0.5,
     return np.vstack((top_frame, bottom_frame))
 
 
+def resolve_xr_image_transport(display_mode, head_camera_config, vertical_camera_stack):
+    """Return (use_webrtc, xr_need_local_img) for the headset image path.
+
+    The vertical layout is composed locally from two ZMQ streams, so WebRTC
+    (head camera only, robot-LAN URL) must be off even if the image server
+    advertises enable_webrtc; otherwise no frame is ever rendered.
+    """
+    use_webrtc = bool(head_camera_config['enable_webrtc']) and not (
+        vertical_camera_stack and head_camera_config['enable_zmq'])
+    return use_webrtc, not (display_mode == 'pass-through' or use_webrtc)
+
+
 def stack_camera_images_vertical(top_image, bottom_image, scale=0.5,
                                  top_crop_bottom=0.89, bottom_crop_top=0.11,
                                  divider_px=4):
@@ -511,8 +523,9 @@ if __name__ == '__main__':
         img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
         camera_config = img_client.get_cam_config()
         logger_mp.debug(f"Camera config: {camera_config}")
-        xr_need_local_img = not (args.display_mode == 'pass-through' or camera_config['head_camera']['enable_webrtc'])
         vertical_camera_stack = args.camera_layout == 'vertical'
+        xr_use_webrtc, xr_need_local_img = resolve_xr_image_transport(
+            args.display_mode, camera_config['head_camera'], vertical_camera_stack)
         if vertical_camera_stack and not camera_config['left_wrist_camera']['enable_zmq']:
             raise RuntimeError("Vertical camera layout requires left_wrist_camera.enable_zmq=true")
         if not 0 < args.camera_scale <= 1:
@@ -555,7 +568,7 @@ if __name__ == '__main__':
                                      # display_fps=camera_config['head_camera']['fps'] ? args.frequency? 30.0?
                                      display_mode=args.display_mode,
                                      zmq=camera_config['head_camera']['enable_zmq'],
-                                     webrtc=camera_config['head_camera']['enable_webrtc'],
+                                     webrtc=xr_use_webrtc,
                                      webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
                                      arm_pose_source="controller",
                                      video_plane_height=video_plane_height,

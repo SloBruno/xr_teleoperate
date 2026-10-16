@@ -50,3 +50,28 @@ def test_vertical_stack_skips_missing_camera_frames(monkeypatch):
 
     assert module.stack_camera_images_vertical(None, SimpleNamespace(bgr=None)) is None
     assert module.stack_camera_images_vertical(SimpleNamespace(bgr=None), SimpleNamespace(bgr=None)) is None
+
+
+REAL_HEAD_CFG = {"enable_zmq": True, "enable_webrtc": True, "image_shape": [480, 1280], "binocular": True}
+
+
+def test_real_frames_stack_to_planned_display_shape(monkeypatch):
+    import numpy as np
+    _install_import_stubs(monkeypatch)
+    module = importlib.import_module("teleop.teleop_hand_and_arm")
+    head = SimpleNamespace(bgr=np.zeros((480, 1280, 3), np.uint8))
+    wrist = SimpleNamespace(bgr=np.zeros((480, 640, 3), np.uint8))
+    out = module.stack_camera_images_vertical(head, wrist, 0.5, 0.89, 0.11, 4)
+    assert out.shape == (645, 640, 3)
+
+
+def test_robot_webrtc_flag_must_not_disable_zmq_headset_view(monkeypatch):
+    # Real G1D server advertises enable_webrtc=true on a robot-LAN-only URL the
+    # Wi-Fi Quest cannot reach; the stacked ZMQ view must still be rendered.
+    _install_import_stubs(monkeypatch)
+    module = importlib.import_module("teleop.teleop_hand_and_arm")
+    use_webrtc, need_local = module.resolve_xr_image_transport("immersive", REAL_HEAD_CFG, True)
+    assert use_webrtc is False
+    assert need_local is True
+    assert module.resolve_xr_image_transport("pass-through", REAL_HEAD_CFG, True) == (False, False)
+    assert module.resolve_xr_image_transport("immersive", REAL_HEAD_CFG, False) == (True, False)

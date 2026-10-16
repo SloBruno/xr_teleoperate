@@ -53,6 +53,7 @@ xr_net_announce_url_only() {
     if [[ -n $ip ]]; then
         echo "Interface/IP Quest: $iface / $ip ($label)"
         echo "URL para colar no Quest: https://vuer.ai?grid=False&ws=wss://$ip:$XR_NET_PORT"
+        echo "Certificado autoassinado: ANTES, abra uma vez no navegador do Quest https://$ip:$XR_NET_PORT e aceite (Avançado > Continuar); sem isso o headset não conecta e fica sem imagem."
     else
         echo "AVISO: não foi possível descobrir IPv4/interface pela rota default; seguindo sem URL do Quest." >&2
         echo "       Defina XR_TELEOP_VUER_IP=<IPv4 acessível ao Quest> para imprimir a URL." >&2
