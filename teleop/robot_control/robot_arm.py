@@ -578,7 +578,14 @@ class G1D_ArmController(G1_29_ArmController):
     prep_timeout_factor = 3.0
     prep_stable_window_s = 0.3
     prep_log_period_s = 1.0
-    prep_tolerance = 0.05         # same tolerance as the normal G1 home path
+    # Real G1D (Dex3 mounted, PD only, kp 80/kd 3 arm, 40/1.5 wrist) settles with
+    # a constant gravity sag: elbow L +0.056, elbow R +0.050, shoulder pitch
+    # +0.044/+0.045, wrist pitch +0.032/+0.036, others <0.015, frozen for 8 s.
+    # 0.05 rejected that healthy steady state, so G1D accepts <=0.08 rad, but
+    # only when the error is also settled (no joint moves > prep_settle_band
+    # during the stable window).  The normal G1 path keeps 0.05.
+    prep_tolerance = 0.08
+    prep_settle_band = 0.01       # rad; max drift of any joint inside the window
     prep_hold_seconds = 3.0
     prep_hold_kp = 40.0
     prep_hold_kd = 1.5            # official example wrist/arm damping
@@ -634,6 +641,7 @@ class G1D_ArmController(G1_29_ArmController):
         start = time.monotonic()
         last_log = None
         stable_since = None
+        stable_ref = None
 
         def report(label, q):
             text = self._preparation_report(q, label)
@@ -680,14 +688,18 @@ class G1D_ArmController(G1_29_ArmController):
                     except Exception:
                         pass
             if np.all(np.abs(last_good_q) <= tolerance):
+                if stable_ref is not None and np.max(np.abs(last_good_q - stable_ref)) > self.prep_settle_band:
+                    stable_since = None  # still moving: restart the window
                 if stable_since is None:
                     stable_since = now
+                    stable_ref = last_good_q.copy()
                 if now - stable_since >= self.prep_stable_window_s:
                     self.last_preparation_status = "preparation_ready"
                     logger_mp.info("[G1D_ArmController] both arms have reached the home position.")
                     return True
             else:
                 stable_since = None
+                stable_ref = None
             if now - start >= timeout_s:
                 return fail("preparation_timeout",
                             "timed out waiting for arms to reach home position.", last_good_q)

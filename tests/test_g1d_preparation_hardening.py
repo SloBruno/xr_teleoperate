@@ -165,8 +165,42 @@ def test_arrival_requires_stable_window_inside_same_tolerance():
     assert arm.output_enabled.is_set()  # success does not hold/deactivate
     # just outside tolerance never arrives
     clock = Clock()
-    arm = make_arm(lambda t: np.full(14, 0.051), clock)
+    arm = make_arm(lambda t: np.full(14, 0.081), clock)
     assert not arm.ctrl_dual_arm_go_home(cancelled=lambda: False)
+
+
+LOG_PROFILE = {18: 0.056, 25: 0.050, 15: 0.044, 22: 0.045, 20: 0.032, 27: 0.036}
+
+
+def _logged_sag():
+    q = np.full(14, 0.01)
+    for joint, err in LOG_PROFILE.items():
+        q[joint - 15] = err
+    return q
+
+
+def test_g1d_accepts_stable_gravity_sag_profile_from_real_log():
+    clock = Clock()
+    q = _logged_sag()
+    arm = make_arm(lambda t: q if t > 1.0 else q * 0, clock)
+    assert max(q) == 0.056 and arm.prep_tolerance == 0.08
+    assert arm.ctrl_dual_arm_go_home(cancelled=lambda: False, require_fresh_lowstate=True)
+    assert arm.last_preparation_status == "preparation_ready"
+    assert clock.t >= 0.3  # needed the stable window
+    np.testing.assert_array_equal(arm.q_target, np.zeros(14))
+
+
+def test_g1d_rejects_joint_above_0_08_or_still_moving():
+    clock = Clock()
+    q = _logged_sag(); q[3] = 0.081
+    arm = make_arm(lambda t: q, clock)
+    assert not arm.ctrl_dual_arm_go_home(cancelled=lambda: False, require_fresh_lowstate=True)
+    assert arm.last_preparation_status == "preparation_timeout"
+    # small but still moving (0.05 rad/s drift, all joints under 0.08 until late)
+    clock = Clock()
+    arm = make_arm(lambda t: np.full(14, 0.02 + 0.05 * (t % 1.0)), clock)
+    assert not arm.ctrl_dual_arm_go_home(cancelled=lambda: False, require_fresh_lowstate=True)
+    assert arm.last_preparation_status == "preparation_timeout"
 
 
 def test_waist_slots_never_commanded_during_hold():

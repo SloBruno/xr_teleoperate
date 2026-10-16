@@ -29,7 +29,7 @@ def test_g1d_uses_the_normal_g1_home_method_with_the_same_target_timeout_and_arr
     launcher = TELEOP.read_text(encoding="utf-8")
     assert "ctrl_dual_arm_go_home(cancelled=lambda: STOP, require_fresh_lowstate=True)" in launcher
     assert "def ctrl_dual_arm_go_home" in g1d  # hardened override, same zero target/tolerance
-    assert "np.zeros(14)" in g1d and "prep_tolerance = 0.05" in g1d
+    assert "np.zeros(14)" in g1d and "prep_tolerance = 0.08" in g1d
 
 
 def test_normal_home_path_keeps_the_normal_target_and_measured_arrival_behavior():
