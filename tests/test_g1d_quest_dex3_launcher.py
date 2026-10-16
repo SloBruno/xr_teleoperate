@@ -1,5 +1,7 @@
 from pathlib import Path
+import os
 import subprocess
+import tempfile
 
 
 ROOT = Path(__file__).parents[1]
@@ -68,3 +70,24 @@ def test_g1d_documentation_describes_teleimager_camera_representation_and_no_fal
     assert "`left_wrist_camera`" in doc
     assert "`binocular`" in doc
     assert "sem fallback" in doc.lower()
+
+
+def test_g1d_launcher_rejects_an_unreadable_tls_pair_before_teleimager_import():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        cert = root / "cert.pem"
+        key = root / "key.pem"
+        cert.write_text("not a certificate", encoding="utf-8")
+        key.write_text("not a key", encoding="utf-8")
+        env = os.environ | {
+            "XR_TELEOP_CERT": str(cert),
+            "XR_TELEOP_KEY": str(key),
+            "TELEIMAGER_PYTHON": "python3",
+        }
+        result = subprocess.run(
+            ["bash", str(G1D_LAUNCHER)], env=env, capture_output=True, text=True, timeout=10
+        )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "G1D TLS preflight failed" in output
+    assert "G1D Teleimager preflight failed" not in output

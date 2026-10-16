@@ -98,6 +98,26 @@ class PrearmActuatorGateTest(unittest.TestCase):
         shutdown = source[source.index("    finally:"):]
         self.assertNotIn("arm_ctrl.ctrl_dual_arm_go_home(release_motion_authority=True)", shutdown)
 
+    def test_g1d_prearm_activation_is_initial_measured_hold_not_quest_tracking_or_dex3_output(self):
+        source = TELEOP.read_text(encoding="utf-8")
+        prepare = source[source.index("Match the original launcher behavior"):source.index("# Initialize before the pre-arm loop")]
+        g1d_prepare = prepare[prepare.index('elif args.arm == "G1D":'):]
+        self.assertIn("arm_ctrl.activate()", g1d_prepare)
+        self.assertNotIn("ctrl_dual_arm_go_home", g1d_prepare)
+        self.assertNotIn("hand_ctrl.activate()", g1d_prepare)
+
+        activate = class_method(ARM, "G1_29_ArmController", "activate")
+        activate_source = ast.get_source_segment(ARM.read_text(encoding="utf-8"), activate)
+        self.assertIsNotNone(activate_source)
+        self.assertIn("lowstate.motor_state[id].q", activate_source or "")
+        self.assertIn("self.q_target = np.array", activate_source or "")
+        self.assertIn("self.publish_thread.start()", activate_source or "")
+
+        ready_loop = source[source.index("while not STOP:"):source.index("start Tracking")]
+        dex3_gate = ready_loop[ready_loop.index("if (\n                args.ee == \"dex3\""):]
+        self.assertIn("START", dex3_gate)
+        self.assertIn("controller_sample_timestamp > ARM_REQUEST_TIMESTAMP", dex3_gate)
+
     def test_startup_inputs_are_serialized_with_launcher_preparation(self):
         source = TELEOP.read_text(encoding="utf-8")
         on_press = source[source.index("def on_press"):source.index("def get_state")]

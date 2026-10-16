@@ -21,6 +21,24 @@ teleimager_host=$G1D_TELEIMAGER_HOST
 teleimager_python=${TELEIMAGER_PYTHON:-/home/unitree/.local/envs/xr-g1d/bin/python}
 G1D_TELEIMAGER_PREFLIGHT_TIMEOUT_S=${G1D_TELEIMAGER_PREFLIGHT_TIMEOUT_S:-12}
 
+preflight_tls() {
+    if [[ ! -r "$XR_TELEOP_CERT" || ! -r "$XR_TELEOP_KEY" ]]; then
+        echo "G1D TLS preflight failed: certificate/key must exist and be readable; refusing to import teleop or DDS." >&2
+        return 1
+    fi
+    if ! "$teleimager_python" -s - "$XR_TELEOP_CERT" "$XR_TELEOP_KEY" <<'PY'
+import ssl
+import sys
+
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(sys.argv[1], sys.argv[2])
+PY
+    then
+        echo "G1D TLS preflight failed: certificate/key cannot be loaded; refusing to import teleop or DDS." >&2
+        return 1
+    fi
+}
+
 preflight_remote_two_camera_streams() {
     if ! timeout -k 2 "$G1D_TELEIMAGER_PREFLIGHT_TIMEOUT_S" "$teleimager_python" -s - "$teleimager_host" <<'PY'
 import os
@@ -67,6 +85,7 @@ PY
     fi
 }
 
+preflight_tls
 preflight_remote_two_camera_streams
 [[ "${G1D_LAUNCHER_SKIP_TELEOP:-0}" == 1 ]] && exit 0
 cd "$repo/teleop"
