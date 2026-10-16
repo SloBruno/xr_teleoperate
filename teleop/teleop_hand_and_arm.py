@@ -514,6 +514,20 @@ if __name__ == '__main__':
     robot_monitor = None
 
     try:
+        # HYPOTHESIS (G1D pass-through: Vuer child forked, 1 thread in futex_wait, 8012 never
+        # listens). TeleVuer forks its Vuer Process in __init__; forking after DDS/keyboard/ZMQ
+        # threads exist can hand the child a locked mutex. Pass-through needs no image shape or
+        # transport, so fork the Vuer process FIRST, while this process is still single-threaded.
+        if args.display_mode == 'pass-through':
+            tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand",
+                                         binocular=False,
+                                         img_shape=(480, 640),
+                                         display_mode=args.display_mode,
+                                         zmq=False,
+                                         webrtc=False,
+                                         webrtc_url=None,
+                                         arm_pose_source="controller")
+
         # setup dds communication domains id
         if args.sim:
             ChannelFactoryInitialize(1, networkInterface=args.network_interface)
@@ -572,7 +586,8 @@ if __name__ == '__main__':
             logger_mp.warning("XR video plane exceeds ~90° of the headset FOV; edges may be cut off")
 
         # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
-        tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand", 
+        if tv_wrapper is None:
+          tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand",
                                      binocular=display_binocular,
                                      img_shape=display_img_shape,
                                      # maybe should decrease fps for better performance?
