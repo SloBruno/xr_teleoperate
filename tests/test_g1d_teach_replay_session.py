@@ -310,6 +310,63 @@ def _replay_setup(tmp_path, arm_offset=1.0, finger_offset=1.5, n=50, arm_fn=None
     return session, io, clock, path, t, arm, left, right
 
 
+def _play_rows(session, io, clock):
+    while session.mode != tr.Mode.REPLAY_PLAY:
+        clock.t += DT
+        session.tick()
+        assert clock.t < 1100.0
+    rows = []
+    while session.mode == tr.Mode.REPLAY_PLAY:
+        clock.t += DT
+        session.tick()
+        rows.append(io.arm_writes()[-1].q.copy())
+        io.arm_q = rows[-1].copy()          # perfect tracking: isolate the planner
+        assert clock.t < 1100.0
+    return np.array(rows)
+
+
+def test_fast_teach_is_replayed_slower_along_the_same_path_within_the_velocity_cap(tmp_path):
+    """A hand-taught motion faster than the cap is time-scaled, not step-clipped."""
+    def fast(t, arm):
+        arm = arm.copy()
+        arm[:, 0] = arm[0, 0] + 0.6 * np.sin(2 * np.pi * 1.0 * t)   # peak 3.8 rad/s
+        return arm
+
+    session, io, clock, path, t, arm, left, right = _replay_setup(
+        tmp_path, arm_offset=0.0, finger_offset=0.0, n=100, arm_fn=fast)
+    io.arm_q = arm[0].copy()
+    io.hand_q["left"] = left[0].copy()
+    io.hand_q["right"] = right[0].copy()
+    session.request_replay(str(path))
+    q = _play_rows(session, io, clock)
+    vmax = session.config.replay_arm_vmax
+    v = np.max(np.abs(np.diff(q, axis=0)), axis=1) / DT
+    assert np.max(v) <= vmax + 1e-6
+    assert vmax <= 1.0                                 # conservative default
+    # same path: the full +/-0.6 rad excursion is reproduced, not shaved off
+    assert np.max(q[:, 0]) - arm[0, 0] >= 0.6 - 0.02
+    assert arm[0, 0] - np.min(q[:, 0]) >= 0.6 - 0.02
+    # playback stretched to about total travel / vmax (2 periods x 4 x 0.6 rad)
+    assert len(q) * DT >= (2 * 4 * 0.6 / vmax) * 0.9
+    assert session.mode == tr.Mode.HOLD
+
+
+def test_slow_teach_is_replayed_at_recorded_speed(tmp_path):
+    def slow(t, arm):
+        arm = arm.copy()
+        arm[:, 0] = arm[0, 0] + 0.2 * t                          # 0.2 rad/s
+        return arm
+
+    session, io, clock, path, t, arm, left, right = _replay_setup(
+        tmp_path, arm_offset=0.0, finger_offset=0.0, n=100, arm_fn=slow)
+    io.arm_q = arm[0].copy()
+    io.hand_q["left"] = left[0].copy()
+    io.hand_q["right"] = right[0].copy()
+    session.request_replay(str(path))
+    q = _play_rows(session, io, clock)
+    assert len(q) * DT <= t[-1] + 4 * DT
+
+
 def test_replay_ramp_in_respects_joint_velocity_caps_and_reaches_first_sample(tmp_path):
     session, io, clock, path, t, arm, left, right = _replay_setup(tmp_path)
     session.request_replay(None)
@@ -373,8 +430,12 @@ def test_replay_playback_interpolates_and_clamps_step_and_limits(tmp_path):
         rows.append((clock.t - play_t0, io.arm_writes()[-1].q.copy()))
     ts = np.array([r[0] for r in rows])
     q = np.array([r[1] for r in rows])
-    inside = ts < t[-1]
-    np.testing.assert_allclose(q[inside, 1], np.interp(ts[inside], t, arm[:, 1]), atol=1e-6)
+    warped = tr.time_warp(t, np.clip(arm, LOWER + session.config.limit_margin,
+                                     UPPER - session.config.limit_margin),
+                          {"left": left, "right": right},
+                          session.config.replay_arm_vmax, session.config.replay_hand_vmax)
+    inside = ts < warped[-1]
+    np.testing.assert_allclose(q[inside, 1], np.interp(ts[inside], warped, arm[:, 1]), atol=1e-6)
     step = np.max(np.abs(np.diff(q, axis=0)), axis=0)
     assert step[2] <= session.config.replay_arm_vmax * DT + 1e-9
     assert np.all(q[:, 3] <= UPPER[3] - session.config.limit_margin + 1e-12)

@@ -407,7 +407,7 @@ class TeachReplayConfig:
     ramp_hand_vmax: float = 2.0
     ramp_min_s: float = 1.0
     ramp_max_s: float = 15.0               # refuse longer ramps
-    replay_arm_vmax: float = 1.5           # rad/s per-joint step clamp in playback
+    replay_arm_vmax: float = 0.8           # rad/s: fast taught segments are time-stretched to this
     replay_hand_vmax: float = 4.0
     limit_margin: float = 0.05             # rad inside model arm limits
     hand_limit_margin: float = 0.0
@@ -424,6 +424,19 @@ class Mode(enum.Enum):
     REPLAY_PLAY = "replay_play"
     QUITTING = "quitting"
     DONE = "done"
+
+
+def time_warp(t, arm_q, hand_q, arm_vmax, hand_vmax):
+    """Stretch each recording segment so linear playback never exceeds the caps.
+
+    Keeps the taught path; only the timing of fast segments is slowed down.
+    """
+    t = np.asarray(t, dtype=float)
+    dt = np.diff(t)
+    need = np.max(np.abs(np.diff(arm_q, axis=0)), axis=1) / float(arm_vmax)
+    for q in hand_q.values():
+        need = np.maximum(need, np.max(np.abs(np.diff(q, axis=0)), axis=1) / float(hand_vmax))
+    return np.concatenate([[0.0], np.cumsum(np.maximum(dt, need))])
 
 
 def smoothstep(s):
@@ -832,10 +845,14 @@ class TeachReplaySession:
             ramp, _ = self._plan_ramp(now, arm, hands, recording)
         self._ramp = ramp
         self._recording = recording
+        self._play_t = time_warp(recording.t, recording.arm_q,
+                                 {s: recording.hand_q[s] for s in self.config.hand_sides},
+                                 self.config.replay_arm_vmax, self.config.replay_hand_vmax)
         if not self._protectors:
             self._protectors = self._make_protectors()
         self.mode = Mode.REPLAY_RAMP
-        self._say(f"REPLAY: {recording.path.name} ({recording.duration:.1f}s); ramp-in "
+        self._say(f"REPLAY: {recording.path.name} ({recording.duration:.1f}s taught, "
+                  f"{self._play_t[-1]:.1f}s at <={self.config.replay_arm_vmax} rad/s); ramp-in "
                   f"{ramp['duration']:.1f}s at <={self.config.ramp_arm_vmax} rad/s. 'q' stops.")
         self._replay_step(now, arm, hands)
 
@@ -882,23 +899,24 @@ class TeachReplaySession:
             finished = now - ramp["t0"] >= ramp["duration"]
         else:
             rec = self._recording
+            play_t = self._play_t
             tp = now - self.play_start_time
             dt = max(0.0, now - self._last_tick) if self._last_tick is not None else 0.0
-            target = np.array([np.interp(tp, rec.t, rec.arm_q[:, j]) for j in range(ARM_DOF)])
+            target = np.array([np.interp(tp, play_t, rec.arm_q[:, j]) for j in range(ARM_DOF)])
             target = self._clamp_arm(target)
             prev = self._last_arm_cmd.q
             step = cfg.replay_arm_vmax * dt
             arm_q = prev + np.clip(target - prev, -step, step)
             hand_q = {}
             for side in cfg.hand_sides:
-                ht = np.array([np.interp(tp, rec.t, rec.hand_q[side][:, j]) for j in range(HAND_DOF)])
+                ht = np.array([np.interp(tp, play_t, rec.hand_q[side][:, j]) for j in range(HAND_DOF)])
                 ht = self._clamp_hand(side, ht)
                 hprev = self._last_hand_cmd[side].q
                 hstep = cfg.replay_hand_vmax * dt
                 hand_q[side] = hprev + np.clip(ht - hprev, -hstep, hstep)
             final_arm = self._clamp_arm(rec.arm_q[-1])
             final_hand = {s: self._clamp_hand(s, rec.hand_q[s][-1]) for s in cfg.hand_sides}
-            finished = (tp >= rec.duration
+            finished = (tp >= play_t[-1]
                         and np.allclose(arm_q, final_arm, atol=1e-9, rtol=0)
                         and all(np.allclose(hand_q[s], final_hand[s], atol=1e-9, rtol=0) for s in cfg.hand_sides))
         g = self._gravity(arm_q)
