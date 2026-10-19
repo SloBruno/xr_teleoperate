@@ -26,6 +26,7 @@ teach_python=${TELEIMAGER_PYTHON:-/home/unitree/.local/envs/xr-g1d/bin/python}
 
 cmd=("$teach_python" -s teach_replay_g1d.py --network-interface "$g1d_dds_interface" "$@")
 echo "G1D TEACH/REPLAY: robot SUPPORTED, area clear, R3/e-stop in reach. Keys: r=teach s=save p=replay q=quit."
+echo "Optional browser panel: add --web [PORT] (default 8095); URL with token is printed below."
 echo "command: ${cmd[*]}"
 [[ "${G1D_TEACH_SKIP_RUN:-0}" == 1 ]] && exit 0
 cd "$repo/teleop"

@@ -98,6 +98,13 @@ def latest_recording(directory) -> Path | None:
     return candidates[-1] if candidates else None
 
 
+def _recording_base(filename: str) -> str:
+    for suffix in (".aborted.jsonl", ".jsonl.part", ".jsonl"):
+        if filename.endswith(suffix):
+            return filename[: -len(suffix)]
+    return filename
+
+
 def resolve_replay_path(directory, name: str | None) -> Path:
     directory = Path(directory)
     if name is None:
@@ -505,6 +512,11 @@ class TeachReplaySession:
         self.play_start_time = None
         self._quit_deadline = None
         self._protectors = {}
+        # Web panel (optional): which input started the current replay and the
+        # last browser heartbeat as one atomic (session-clock time, timeout) pair.
+        self._replay_origin = None
+        self._web_deadman = None
+        self._writer_name = None
 
     # ---------------------------------------------------------------- input
     @property
@@ -534,7 +546,15 @@ class TeachReplaySession:
             self._pending = ("save",)
             return True
 
-    def request_replay(self, name: str | None) -> bool:
+    def feed_web_deadman(self, timeout_s: float) -> None:
+        """Lock-free browser heartbeat (single atomic attribute store)."""
+        self._web_deadman = (self.clock(), float(timeout_s))
+
+    def _web_connection_lost(self, now) -> bool:
+        fed = self._web_deadman
+        return fed is None or now - fed[0] > fed[1]
+
+    def request_replay(self, name: str | None, *, origin: str = "terminal") -> bool:
         with self.lock:
             if self._quit.is_set() or self.mode not in (Mode.IDLE, Mode.HOLD) or self._pending:
                 return self._refuse_locked("p ignored in mode " + self.mode.value)
@@ -548,7 +568,7 @@ class TeachReplaySession:
         with self.lock:
             if self._quit.is_set() or self.mode not in (Mode.IDLE, Mode.HOLD) or self._pending:
                 return self._refuse_locked("p ignored in mode " + self.mode.value)
-            self._pending = ("replay", recording)
+            self._pending = ("replay", recording, origin)
             return True
 
     # -------------------------------------------------------------- helpers
@@ -742,8 +762,10 @@ class TeachReplaySession:
             self._protectors = self._make_protectors()
         header = build_header(hand_sides=self.config.hand_sides, rate_hz=self.config.record_rate_hz,
                               extra={"teach_arm_kd": list(self.config.teach_arm_kd)})
+        name = utc_recording_name()
         try:
-            self._writer = self.writer_factory(self.teach_dir, header)
+            self._writer = self.writer_factory(self.teach_dir, header, name=name)
+            self._writer_name = name
         except Exception as exc:
             self._writer = None
             self._say(f"TEACH: recorder unavailable ({exc}); holding instead")
@@ -813,7 +835,10 @@ class TeachReplaySession:
             "hand_start": {s: hands[s].q.copy() for s in hand_goal}, "hand_goal": hand_goal,
         }, None
 
-    def _start_replay(self, now, recording: Recording):
+    def _start_replay(self, now, recording: Recording, origin: str = "terminal"):
+        if origin == "web" and self._web_connection_lost(now):
+            self._say("REPLAY refused: web connection lost")
+            return
         missing = [s for s in self.config.hand_sides if s not in recording.hand_sides]
         if missing:
             self._say(f"REPLAY refused: recording has no data for hand(s) {missing}")
@@ -845,6 +870,7 @@ class TeachReplaySession:
             ramp, _ = self._plan_ramp(now, arm, hands, recording)
         self._ramp = ramp
         self._recording = recording
+        self._replay_origin = origin
         self._play_t = time_warp(recording.t, recording.arm_q,
                                  {s: recording.hand_q[s] for s in self.config.hand_sides},
                                  self.config.replay_arm_vmax, self.config.replay_hand_vmax)
@@ -1045,13 +1071,19 @@ class TeachReplaySession:
             elif kind == "save" and self.mode == Mode.TEACH:
                 self._save(now)
             elif kind == "replay" and self.mode in (Mode.IDLE, Mode.HOLD):
-                self._start_replay(now, pending[1])
+                self._start_replay(now, pending[1], pending[2] if len(pending) > 2 else "terminal")
                 if self.mode == Mode.REPLAY_RAMP:
                     return
 
         if self.mode == Mode.IDLE:
             return
         if self.mode == Mode.HOLD:
+            self._write_hold()
+            return
+        if (self.mode in (Mode.REPLAY_RAMP, Mode.REPLAY_PLAY) and self._replay_origin == "web"
+                and self._web_connection_lost(now)):
+            # Browser that started this replay vanished: hold (never release/quit).
+            self._enter_hold(now, "web connection lost (no heartbeat from the controlling browser)")
             self._write_hold()
             return
         arm, hands, reason = self._fresh_all(now)
@@ -1066,6 +1098,47 @@ class TeachReplaySession:
             self._teach_step(now, arm, hands)
         elif self.mode in (Mode.REPLAY_RAMP, Mode.REPLAY_PLAY):
             self._replay_step(now, arm, hands)
+
+    # --------------------------------------------------------------- status
+    def status_view(self) -> dict:
+        """Lock-free display snapshot for the web panel (never waits for a tick).
+
+        Reads only references that the tick replaces atomically; values may be
+        one cycle old, which is fine for display. Never used for control.
+        """
+        now = self.clock()
+        mode = self.mode
+        view = {"mode": mode.value, "message": self.last_message,
+                "messages": list(self.messages[-8:]), "replay_origin": None,
+                "recording": None, "replay": None, "quit_requested": self._quit.is_set()}
+        busy = []
+        writer, t0, name = self._writer, self._teach_t0, self._writer_name
+        if mode == Mode.TEACH and writer is not None and name:
+            view["recording"] = {"name": name, "elapsed_s": max(0.0, now - (t0 or now))}
+            busy.append(name)
+        for closing in list(self._closing_writers):
+            if getattr(closing, "name", None):
+                busy.append(closing.name)
+        recording, ramp, play_t, play_start = (self._recording, self._ramp,
+                                               getattr(self, "_play_t", None), self.play_start_time)
+        if mode in (Mode.REPLAY_RAMP, Mode.REPLAY_PLAY) and recording is not None:
+            view["replay_origin"] = self._replay_origin
+            info = {"name": recording.path.name, "phase": "ramp" if mode == Mode.REPLAY_RAMP else "play",
+                    "progress": 0.0}
+            try:
+                if mode == Mode.REPLAY_RAMP and ramp:
+                    info["progress"] = min(1.0, max(0.0, (now - ramp["t0"]) / ramp["duration"]))
+                elif play_t is not None and play_start is not None and play_t[-1] > 0:
+                    info["progress"] = min(1.0, max(0.0, (now - play_start) / float(play_t[-1])))
+            except Exception:
+                pass
+            view["replay"] = info
+            busy.append(_recording_base(recording.path.name))
+        pending = self._pending
+        if pending and pending[0] == "replay":
+            busy.append(_recording_base(pending[1].path.name))
+        view["busy_recordings"] = sorted(set(busy))
+        return view
 
     # -------------------------------------------------------------- results
     def wait_for_recordings(self, timeout: float = 5.0):

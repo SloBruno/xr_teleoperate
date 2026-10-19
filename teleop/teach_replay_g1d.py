@@ -6,6 +6,9 @@ Keys (interactive terminal, sshkeyboard):
   p  REPLAY the latest saved recording (or --replay NAME)
   q  stop everything immediately (hold measured pose briefly, release), exit
 
+Optional ``--web [PORT]`` (default 8095): offline browser control panel with the
+same r/s/p/q actions (token-protected URL printed below); the keys keep working.
+
 Separate from teleop_hand_and_arm.py: no XR, no IK, no video. Before the first
 accepted r/p only DDS subscribers exist. Launch via run_g1d_teach_replay.sh.
 """
@@ -47,6 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--teach-dir", default=None, help="recording directory "
                         "(default ~/.local/state/xr_teleoperate/teach)")
     parser.add_argument("--control-hz", type=float, default=CONTROL_HZ)
+    parser.add_argument("--web", nargs="?", type=int, const=8095, default=None, metavar="PORT",
+                        help="also serve the offline web control panel on 0.0.0.0:PORT (default 8095)")
     return parser
 
 
@@ -209,6 +214,44 @@ def _load_model():
     return ik.gravity_tauff, lower, upper, effort
 
 
+def make_freshness_fn(io, sides, clock=time.monotonic):
+    """State ages (s) for the web panel; None when missing/not configured."""
+    def ages():
+        out = {"arm": None, "left": None, "right": None}
+        now = clock()
+        try:
+            arm = io.arm_state()
+            out["arm"] = None if arm is None else max(0.0, now - float(arm.timestamp))
+        except Exception:
+            pass
+        for side in sides:
+            try:
+                hand = io.hand_state(side)
+                out[side] = None if hand is None else max(0.0, now - float(hand.timestamp))
+            except Exception:
+                pass
+        return out
+    return ages
+
+
+def start_web_panel(session, io, sides, teach_dir, port, print_fn=print):
+    """Start the panel; on failure keep the terminal keys only (never abort)."""
+    from teleop.utils.teach_web import WebPanel, local_ipv4_addresses
+
+    try:
+        panel = WebPanel(session, teach_dir, host="0.0.0.0", port=port,
+                         freshness_fn=make_freshness_fn(io, sides, getattr(io, "clock", time.monotonic)))
+        panel.start()
+    except Exception as exc:
+        print_fn(f"[teach] WEB panel NOT started ({type(exc).__name__}: {exc}); terminal keys only.")
+        return None
+    addresses = local_ipv4_addresses() or [("?", "<ip-do-robo>")]
+    print_fn("[teach] WEB panel (same r/s/p/q; PARAR = q). Open on the phone/Quest/PC:")
+    for name, ip in addresses:
+        print_fn(f"[teach]   {name:>10}: {panel.url(ip)}")
+    return panel
+
+
 def _wait_for_state(io, sides, timeout_s):
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -264,6 +307,11 @@ def main(argv=None):
         state_line += f" {side}=" + ("ok" if io.hand_state(side) is not None else "MISSING")
     printer(f"[teach] passive (no command publisher). state: {state_line}. Press r, p or q.")
 
+    panel = None
+    if args.web is not None:
+        panel = start_web_panel(session, io, sides, teach_dir, args.web,
+                                print_fn=lambda m: print(m, flush=True))
+
     from sshkeyboard import listen_keyboard, stop_listening
     keyboard = threading.Thread(
         target=listen_keyboard,
@@ -287,6 +335,11 @@ def main(argv=None):
         for result in session.wait_for_recordings(timeout=5.0):
             print(f"[teach] recording {result.status}: {result.path} "
                   f"samples={result.samples} dropped={result.dropped} error={result.error}", flush=True)
+        if panel is not None:
+            try:
+                panel.stop()
+            except Exception:
+                pass
         try:
             stop_listening()
         except Exception:

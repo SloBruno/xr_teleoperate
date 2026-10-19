@@ -34,6 +34,37 @@ Segurança:
 * Proteção Dex3 existente (falha/térmica/torque) aplicada no replay.
 * Um único escritor para `rt/lowcmd` e cada `rt/dex3/<lado>/cmd`.
 
+## Painel web opcional (`--web`)
+
+```bash
+bash run_g1d_teach_replay.sh --web          # porta 8095
+bash run_g1d_teach_replay.sh --web 9000
+```
+
+O terminal imprime `http://<ip>:PORT/?t=TOKEN` para cada interface (use a do
+Wi-Fi). Abra no celular/Quest/PC — página única, sem internet/CDN. As teclas
+`r/s/p/q` continuam funcionando e são o fallback.
+
+* Botões Ensinar (r), Salvar (s), Reproduzir (p) e **PARAR (q)** fixo embaixo;
+  status (modo, mensagem, idade do estado braço/mãos, gravação + tempo,
+  progresso do replay) atualizado a ~5 Hz.
+* Lista de gravações (mais recente primeiro, só salvas; "mostrar abortadas"
+  opcional) com duração/data: Selecionar para reproduzir, Renomear (mantém o
+  prefixo UTC: `<UTC>_<rótulo>.jsonl`), Apagar (move para `teach/trash/`).
+  Renomear/apagar recusados enquanto o arquivo está gravando/reproduzindo.
+* Token aleatório por execução, exigido em toda `/api` (comparação em tempo
+  constante); sem token a página só mostra "token necessário". Qualquer um com a
+  URL completa controla o robô: não compartilhe.
+* Um navegador controla por vez; outros ficam somente leitura até o primeiro
+  ficar >3 s sem consultar. PARAR é aceito de qualquer navegador com token e
+  descarta ações web pendentes.
+* Deadman: replay iniciado pela web vai para **HOLD** (não solta, não sai) com
+  "web connection lost" se o navegador controlador ficar >1 s sem consultar.
+  Replay iniciado pela tecla `p` não é afetado.
+* O servidor HTTP só enfileira pedidos para os mesmos `request_*` das teclas;
+  nunca faz IO/DDS e nunca espera o ciclo de controle. Se a porta estiver
+  ocupada, o painel não sobe e o modo terminal segue normal.
+
 Todos os números (kd de teach, fração de gravidade 50% do esforço URDF, limites
 de velocidade, 2 s de hold no `q`) são palpites iniciais — calibrar no teste
 físico, robô suspenso, R3/e-stop na mão.
