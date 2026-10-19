@@ -30,7 +30,7 @@ def test_g1d_launcher_uses_configurable_remote_teleimager_host_without_starting_
     source = G1D_LAUNCHER.read_text(encoding="utf-8")
     assert "G1D_TELEIMAGER_HOST=${G1D_TELEIMAGER_HOST:-192.168.123.164}" in source
     assert "teleimager_host=$G1D_TELEIMAGER_HOST" in source
-    assert "TELEIMAGER_PYTHON:-/home/unitree/.local/envs/xr-g1d/bin/python" in source
+    assert "TELEIMAGER_PYTHON:-/home/unitree/.local/envs/xr-g1d-vuer016/bin/python" in source
     assert "/home/unitree/miniconda3/envs/tv/bin/python" not in source
     for forbidden in ("--detect", "pyrealsense2", "teleimager.image_server", "setsid nohup", "teleimager_dir="):
         assert forbidden not in source
