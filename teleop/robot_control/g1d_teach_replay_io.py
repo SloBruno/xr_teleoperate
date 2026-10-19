@@ -162,14 +162,27 @@ class G1DTeachReplayIO:
                 hc.mode = dex3_mode_byte(j)
                 hc.q, hc.dq, hc.tau, hc.kp, hc.kd = 0.0, 0.0, 0.0, 0.0, 0.0
             hand_msgs[side] = hmsg
-        pub = dds["publisher_cls"](LOWCMD_TOPIC, dds["lowcmd_type"])
-        pub.Init()
-        hand_pubs = {}
-        for side in hand_sides:
-            hp = dds["publisher_cls"](DEX3_CMD_TOPIC.format(side=side), dds["handcmd_type"])
-            hp.Init()
-            hand_pubs[side] = hp
-        self._crc = dds["crc_factory"]()
+        created = []
+        try:
+            pub = dds["publisher_cls"](LOWCMD_TOPIC, dds["lowcmd_type"])
+            created.append(pub)
+            pub.Init()
+            hand_pubs = {}
+            for side in hand_sides:
+                hp = dds["publisher_cls"](DEX3_CMD_TOPIC.format(side=side), dds["handcmd_type"])
+                created.append(hp)
+                hp.Init()
+                hand_pubs[side] = hp
+            crc = dds["crc_factory"]()
+        except BaseException:
+            # Transaction: no half-built writer survives a failed activation.
+            for publisher in created:
+                try:
+                    publisher.Close()
+                except Exception:
+                    pass
+            raise
+        self._crc = crc
         self._lowcmd_msg, self._lowcmd_pub = msg, pub
         self._hand_msg, self._hand_pub = hand_msgs, hand_pubs
         self._active = True

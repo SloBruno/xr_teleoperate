@@ -199,3 +199,20 @@ def test_conflicting_writer_detection_uses_exact_argv(tmp_path):
     (tmp_path / "self").mkdir()
     found = module.find_conflicting_processes(proc_root=str(tmp_path), own_pid=12)
     assert [pid for pid, _ in found] == [10]
+
+
+def test_exclusive_session_lock_blocks_a_second_instance(tmp_path):
+    module = _entry()
+    first = module.acquire_session_lock(tmp_path / "teach.lock")
+    assert first is not None
+    code = (
+        "import sys; sys.path.insert(0, %r); from teleop import teach_replay_g1d as m; "
+        "print(m.acquire_session_lock(%r) is None)" % (str(ROOT), str(tmp_path / "teach.lock"))
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         env=dict(os.environ, PYTHONPATH=str(ROOT)))
+    assert out.stdout.strip() == "True", out.stderr
+    first.close()
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         env=dict(os.environ, PYTHONPATH=str(ROOT)))
+    assert out.stdout.strip() == "False", out.stderr

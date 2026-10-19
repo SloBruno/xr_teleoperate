@@ -329,3 +329,40 @@ def test_end_to_end_teach_with_real_session_and_real_g1_model(tmp_path):
     assert session.done
     result = session.wait_for_recordings(timeout=5.0)
     assert result and result[-1].status == "aborted_quit"
+
+
+def test_failed_activation_closes_already_created_publishers_and_stays_inactive():
+    class FailingPublisher(FakePublisher):
+        closed = []
+
+        def Init(self):
+            if self.topic == "rt/dex3/right/cmd":
+                raise RuntimeError("init failed")
+            self.inited = True
+
+        def Close(self):
+            FailingPublisher.closed.append(self.topic)
+
+    FakeSubscriber.created.clear()
+    FakePublisher.created.clear()
+    io = gio.G1DTeachReplayIO(
+        hand_sides=("left", "right"), publisher_cls=FailingPublisher, subscriber_cls=FakeSubscriber,
+        lowcmd_factory=lambda: _msg(35), handcmd_factory=lambda: _msg(7), crc_factory=FakeCrc,
+        lowcmd_type=object, lowstate_type=object, handcmd_type=object, handstate_type=object)
+    _feed(io)
+    with pytest.raises(RuntimeError):
+        io.activate(("left", "right"))
+    assert sorted(FailingPublisher.closed) == ["rt/dex3/left/cmd", "rt/dex3/right/cmd", "rt/lowcmd"]
+    io.write_arm(tr.ArmCommand(q=np.zeros(14), dq=np.zeros(14), kp=np.zeros(14), kd=np.zeros(14), tau=np.zeros(14)))
+    assert all(p.written == [] for p in FakePublisher.created)
+
+
+def test_dex3_slot_order_matches_the_reference_joint_index_enums():
+    from teleop.robot_control import robot_hand_unitree as rhu
+
+    assert [int(m) for m in rhu.Dex3_1_Left_JointIndex] == list(range(7))
+    assert [int(m) for m in rhu.Dex3_1_Right_JointIndex] == list(range(7))
+    left = [m.name.replace("kLeftHand", "").lower() for m in rhu.Dex3_1_Left_JointIndex]
+    right = [m.name.replace("kRightHand", "").lower() for m in rhu.Dex3_1_Right_JointIndex]
+    assert left == [n.replace("_", "") for n in tr.HAND_JOINT_NAMES["left"]]
+    assert right == [n.replace("_", "") for n in tr.HAND_JOINT_NAMES["right"]]

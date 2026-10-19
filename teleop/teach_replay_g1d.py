@@ -172,6 +172,25 @@ def find_conflicting_processes(proc_root="/proc", own_pid=None):
     return found
 
 
+DEFAULT_LOCK_PATH = Path.home() / ".local" / "state" / "xr_teleoperate" / "teach_replay.lock"
+
+
+def acquire_session_lock(path=DEFAULT_LOCK_PATH):
+    """Exclusive non-blocking process-lifetime lock; None if already held."""
+    import fcntl
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    os.set_inheritable(handle.fileno(), False)
+    return handle
+
+
 def _load_model():
     """Arm gravity + limits from the same model the G1D teleop uses."""
     import numpy as np
@@ -211,6 +230,11 @@ def main(argv=None):
           flush=True)
     print("=" * 72, flush=True)
 
+    session_lock = acquire_session_lock()
+    if session_lock is None:
+        print(f"[teach] REFUSED: another teach/replay session holds {DEFAULT_LOCK_PATH}", flush=True)
+        printer.close()
+        return 3
     conflicts = find_conflicting_processes()
     if conflicts:
         for pid, cmdline in conflicts:

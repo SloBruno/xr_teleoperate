@@ -452,9 +452,15 @@ class TeachReplaySession:
         self.gravity_fn = gravity_fn
         self.config = config or TeachReplayConfig()
         self.config.hand_sides = tuple(s for s in HAND_SIDES if s in tuple(self.config.hand_sides))
-        self.arm_lower = np.asarray(arm_lower, dtype=float).reshape(ARM_DOF)
-        self.arm_upper = np.asarray(arm_upper, dtype=float).reshape(ARM_DOF)
-        self.arm_effort = np.asarray(arm_effort, dtype=float).reshape(ARM_DOF)
+        self.arm_lower = _vec(arm_lower, ARM_DOF)
+        self.arm_upper = _vec(arm_upper, ARM_DOF)
+        self.arm_effort = _vec(arm_effort, ARM_DOF)
+        if self.arm_lower is None or self.arm_upper is None or self.arm_effort is None:
+            raise ValueError("arm limits/effort must be 14 finite values")
+        if np.any(self.arm_upper - self.arm_lower <= 2 * self.config.limit_margin):
+            raise ValueError("arm joint limits are empty after the safety margin")
+        if np.any(self.arm_effort <= 0.0):
+            raise ValueError("arm effort limits must be positive")
         if np.any(np.asarray(self.config.teach_arm_kp) > self.config.teach_arm_kp_max):
             raise ValueError("teach arm kp exceeds teach_arm_kp_max")
         self.teach_dir = Path(teach_dir) if teach_dir is not None else default_teach_dir()
@@ -597,7 +603,8 @@ class TeachReplaySession:
         if tau is None:
             return None
         cap = self.config.gravity_effort_fraction * self.arm_effort
-        return np.clip(tau, -cap, cap)
+        tau = np.clip(tau, -cap, cap)
+        return tau if np.all(np.isfinite(tau)) else None
 
     def _gravity_scale(self, now):
         if self._activated_at is None or self.config.gravity_ramp_s <= 0:

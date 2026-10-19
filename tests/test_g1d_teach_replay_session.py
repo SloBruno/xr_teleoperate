@@ -634,3 +634,16 @@ def test_end_to_end_teach_save_then_replay_the_saved_file(tmp_path):
 def test_dex3_freshness_matches_the_existing_protector_predicate():
     from teleop.utils import dex3_protection
     assert tr.TeachReplayConfig().hand_state_max_age == dex3_protection.STATE_STALE_S
+
+
+@pytest.mark.parametrize("effort", [np.full(14, np.nan), np.zeros(14), np.full(13, 25.0)])
+def test_session_refuses_invalid_effort_limits(tmp_path, effort):
+    with pytest.raises(ValueError):
+        tr.TeachReplaySession(FakeIO(Clock()), gravity_fn=gravity, arm_lower=LOWER, arm_upper=UPPER,
+                              arm_effort=effort, teach_dir=tmp_path)
+
+
+def test_session_refuses_invalid_joint_limits(tmp_path):
+    with pytest.raises(ValueError):
+        tr.TeachReplaySession(FakeIO(Clock()), gravity_fn=gravity, arm_lower=UPPER, arm_upper=LOWER,
+                              arm_effort=EFFORT, teach_dir=tmp_path)
