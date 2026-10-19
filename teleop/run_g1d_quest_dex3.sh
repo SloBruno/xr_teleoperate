@@ -106,6 +106,7 @@ preflight_tls
 if [[ "${G1D_VIDEO:-0}" == 1 ]]; then
     preflight_remote_two_camera_streams
     [[ "${G1D_LAUNCHER_SKIP_TELEOP:-0}" == 1 ]] && exit 0
+    xr_net_announce
     cd "$repo/teleop"
     echo "G1D arm-only: remote Teleimager $teleimager_host has two verified streams; press r to arm tracking; q to release and exit."
     exec "$teleimager_python" -s teleop_hand_and_arm.py \
@@ -121,6 +122,7 @@ fi
 
 echo "G1D video DISABLED (pass-through, no camera preflight, no ImageClient); set G1D_VIDEO=1 to re-enable the two-camera video flow."
 [[ "${G1D_LAUNCHER_SKIP_TELEOP:-0}" == 1 ]] && exit 0
+xr_net_announce
 cd "$repo/teleop"
 echo "G1D arm-only (no video): press r or right A to arm tracking; right B or q to release and exit."
 exec "$teleimager_python" -s teleop_hand_and_arm.py \

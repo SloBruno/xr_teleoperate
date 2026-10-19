@@ -63,7 +63,7 @@ xr_net_announce_url_only() {
 
 xr_net_cert_sans() {  # prints "IP:x" / "DNS:y" per line
     openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null |
-        grep -oE '(IP Address|DNS):[^,[:space:]]+' | sed 's/^IP Address:/IP:/'
+        grep -oE '(IP Address|DNS):[^,[:space:]]+' | sed 's/^IP Address:/IP:/' || true
 }
 
 xr_net_label() {  # iface -> human label
