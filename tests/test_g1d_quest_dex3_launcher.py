@@ -117,6 +117,15 @@ def test_g1d_documentation_describes_teleimager_camera_representation_and_no_fal
     assert "sem fallback" in doc.lower()
 
 
+def test_g1d_launcher_regenerates_the_quest_tls_certificate_before_teleop_exec():
+    source = G1D_LAUNCHER.read_text(encoding="utf-8")
+    tls_preflight = source.index("preflight_tls\n", source.index("preflight_tls()"))
+    cert_sync = source.index("xr_net_announce", tls_preflight)
+    exec_teleop = source.index("exec ", cert_sync)
+    assert tls_preflight < cert_sync < exec_teleop
+    assert "xr_net_announce_url_only" not in source[cert_sync:exec_teleop]
+
+
 def test_g1d_launcher_rejects_an_unreadable_tls_pair_before_teleimager_import():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
