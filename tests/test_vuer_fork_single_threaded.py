@@ -44,15 +44,15 @@ DRIVER = textwrap.dedent(r'''
         """Real zmq Context + REQ socket, like teleimager's ZMQ_Requester."""
         def __init__(self, host, port):
             events.append("config_request")
-            self._ctx = zmq.Context()
-            self._sock = self._ctx.socket(zmq.REQ)
+            self._context = zmq.Context()
+            self._sock = self._context.socket(zmq.REQ)
             self._sock.setsockopt(zmq.LINGER, 0)
             self._sock.connect("tcp://127.0.0.1:1")
         def request(self):
             return json.loads(json.dumps(CONFIG))
         def close(self):
             self._sock.close()
-            self._ctx.term()
+            self._context.term()
 
     class FakeImageClient:
         """Starts real subscriber threads + zmq context, like teleimager's ImageClient."""
@@ -96,6 +96,19 @@ DRIVER = textwrap.dedent(r'''
         kb_stop.set()
     _real_thread_start = threading.Thread.start
 
+    class FakeIPCServer:
+        def __init__(self, on_press, get_state):
+            events.append("ipc")
+            self._stop = threading.Event()
+        def start(self):
+            threading.Thread(target=self._stop.wait, daemon=True, name="fake-ipc").start()
+        def stop(self):
+            self._stop.set()
+
+    if os.environ.get("PRE_FORK_THREAD") == "1":
+        # Simulates any future thread created before the Vuer fork.
+        threading.Thread(target=threading.Event().wait, daemon=True, name="stray").start()
+
     class StopHere(KeyboardInterrupt):
         pass
 
@@ -134,7 +147,7 @@ DRIVER = textwrap.dedent(r'''
         "teleop.robot_control.robot_arm_ik": ns_module("teleop.robot_control.robot_arm_ik",
             G1_29_ArmIK=object, G1_23_ArmIK=object, H1_2_ArmIK=object, H1_ArmIK=object, H2_ArmIK=object),
         "teleop.utils.episode_writer": ns_module("teleop.utils.episode_writer", EpisodeWriter=object),
-        "teleop.utils.ipc": ns_module("teleop.utils.ipc", IPC_Server=object),
+        "teleop.utils.ipc": ns_module("teleop.utils.ipc", IPC_Server=FakeIPCServer),
         "teleop.utils.motion_switcher": ns_module("teleop.utils.motion_switcher",
             MotionSwitcher=FakeMotionSwitcher, LocoClientWrapper=object, is_walk_fsm=lambda f: False),
     }
@@ -153,15 +166,19 @@ MODES = {
     "head": G1D + ["--camera-layout", "head", "--force-zmq-video", "--video-fps", "10", "--jpeg-quality", "60"],
     "vertical": G1D + ["--camera-layout", "vertical"],
     "no_video": G1D + ["--display-mode", "pass-through", "--no-video"],
+    "passthrough_video": G1D + ["--display-mode", "pass-through", "--camera-layout", "head", "--force-zmq-video",
+                                "--video-fps", "10", "--jpeg-quality", "60"],
+    "head_ipc": G1D + ["--camera-layout", "head", "--force-zmq-video", "--video-fps", "10", "--ipc"],
+    "head_sim": G1D + ["--camera-layout", "head", "--force-zmq-video", "--video-fps", "10", "--sim"],
 }
 
 
-def _run_main(tmp_path, argv):
+def _run_main(tmp_path, argv, extra_env=None):
     driver = tmp_path / "driver.py"
     driver.write_text(DRIVER)
     out = tmp_path / "out.json"
     env = {**os.environ, "XR_TELEOP_STATUS_LOG": str(tmp_path / "s.jsonl"),
-           "XR_TELEOP_POSE_LOG_DIR": str(tmp_path)}
+           "XR_TELEOP_POSE_LOG_DIR": str(tmp_path), **(extra_env or {})}
     proc = subprocess.run([sys.executable, str(driver), str(ROOT), str(out), json.dumps(argv)],
                           capture_output=True, text=True, env=env, cwd=tmp_path, timeout=60)
     assert out.exists(), proc.stdout + proc.stderr
@@ -182,9 +199,20 @@ def test_televuer_forks_while_process_is_single_threaded(tmp_path, mode):
     assert tv < events.index("dds"), events
     if mode == "no_video":
         assert "image_client" not in events and "config_request" not in events, events
+    elif mode == "passthrough_video":
+        assert tv < events.index("config_request") < events.index("image_client"), events
     else:
         assert events.index("config_request") < tv < events.index("image_client"), events
         assert events.index("dds") < events.index("image_client"), events
+    if "ipc" in events:
+        assert tv < events.index("ipc"), events
+
+
+@pytest.mark.parametrize("mode", ["head", "vertical", "no_video"])
+def test_main_fails_closed_instead_of_forking_vuer_beside_a_thread(tmp_path, mode):
+    rec = _run_main(tmp_path, MODES[mode], {"PRE_FORK_THREAD": "1"})
+    assert "televuer" not in rec["events"], rec
+    assert "dds" not in rec["events"], rec
 
 
 def test_head_mode_keeps_head_only_binocular_zmq_10hz_jpeg60(tmp_path):

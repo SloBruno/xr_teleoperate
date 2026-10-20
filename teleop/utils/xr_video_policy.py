@@ -107,7 +107,21 @@ def service_xr_video(*, client, camera_config, camera_layout, need_local_image,
 
 
 CAMERA_CONFIG_REQUEST_PORT = 60000
-_SCENE_CAMERA_KEYS = ("image_shape", "binocular", "enable_zmq", "zmq_port")
+_SCENE_CAMERA_KEYS = ("image_shape", "binocular", "enable_zmq", "zmq_port",
+                      "enable_webrtc", "webrtc_port")
+
+
+def require_single_threaded_for_fork():
+    """Fail closed unless only the main thread exists (TeleVuer forks its Vuer server).
+
+    Forking beside another thread can hand the child a locked mutex: the Vuer
+    child then blocks in futex_wait and its port never listens.
+    """
+    import threading
+
+    if threading.active_count() != 1:
+        names = ", ".join(t.name for t in threading.enumerate())
+        raise RuntimeError(f"refusing to fork the Vuer process beside other threads: {names}")
 
 
 def _native_thread_count():
@@ -135,9 +149,9 @@ def fetch_camera_config_once(requester_factory, host, port=CAMERA_CONFIG_REQUEST
         config = requester.request()
     finally:
         requester.close()
-        context = getattr(requester, "_context", None)
-        if context is not None and not getattr(context, "closed", True):
-            raise RuntimeError("camera-config requester left its ZMQ context alive")
+    context = getattr(requester, "_context", None)
+    if context is not None and not getattr(context, "closed", True):
+        raise RuntimeError("camera-config requester left its ZMQ context alive")
     if baseline is not None:
         polls = max(1, math.ceil(settle_timeout_s / poll_s))
         for _ in range(polls):
@@ -156,8 +170,10 @@ def fetch_camera_config_once(requester_factory, host, port=CAMERA_CONFIG_REQUEST
 def require_matching_camera_config(expected, actual, camera_names):
     """Fail closed if the subscriber's config differs from the one used for the XR scene."""
     for name in camera_names:
-        want = expected.get(name) or {}
-        got = (actual or {}).get(name) or {}
+        want = (expected or {}).get(name)
+        got = (actual or {}).get(name)
+        if want is None or got is None:
+            raise RuntimeError(f"{name} missing from a camera-config response")
         for key in _SCENE_CAMERA_KEYS:
             a, b = want.get(key), got.get(key)
             if isinstance(a, tuple):

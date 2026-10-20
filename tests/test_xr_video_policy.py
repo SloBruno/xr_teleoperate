@@ -262,3 +262,46 @@ def test_one_shot_camera_config_fails_closed_when_native_threads_never_exit():
     with pytest.raises(RuntimeError, match="native threads"):
         fetch_camera_config_once(factory, "h", native_thread_count=lambda: next(counts),
                                  sleep=lambda s: None, settle_timeout_s=0.05, poll_s=0.01)
+
+
+def test_fork_guard_accepts_only_a_single_threaded_process():
+    import threading
+    import pytest
+    from teleop.utils.xr_video_policy import require_single_threaded_for_fork
+
+    require_single_threaded_for_fork()
+    stop = threading.Event()
+    worker = threading.Thread(target=stop.wait, name="stray-worker", daemon=True)
+    worker.start()
+    try:
+        with pytest.raises(RuntimeError, match="stray-worker"):
+            require_single_threaded_for_fork()
+    finally:
+        stop.set()
+        worker.join()
+
+
+def test_subscriber_config_match_covers_webrtc_fields_and_missing_cameras():
+    import pytest
+    from teleop.utils.xr_video_policy import require_matching_camera_config
+
+    head = {"image_shape": [480, 1280], "binocular": True, "enable_zmq": True, "zmq_port": 55555,
+            "enable_webrtc": False, "webrtc_port": 60001}
+    with pytest.raises(RuntimeError, match="enable_webrtc"):
+        require_matching_camera_config({"head_camera": head}, {"head_camera": dict(head, enable_webrtc=True)},
+                                       ("head_camera",))
+    with pytest.raises(RuntimeError, match="webrtc_port"):
+        require_matching_camera_config({"head_camera": head}, {"head_camera": dict(head, webrtc_port=1)},
+                                       ("head_camera",))
+    with pytest.raises(RuntimeError, match="left_wrist_camera"):
+        require_matching_camera_config({"head_camera": head}, {"head_camera": dict(head)},
+                                       ("head_camera", "left_wrist_camera"))
+
+
+def test_one_shot_camera_config_keeps_the_request_error_when_close_also_fails():
+    import pytest
+    from teleop.utils.xr_video_policy import fetch_camera_config_once
+
+    factory = lambda host, port: _FakeRequester(host, port, RuntimeError("request boom"), term_ok=False)
+    with pytest.raises(RuntimeError, match="request boom"):
+        fetch_camera_config_once(factory, "h")
