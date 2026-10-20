@@ -7,8 +7,8 @@ set -euo pipefail
 # Refuse anything that could change the validated G1D profile or enable motion.
 for g1d_extra_arg in "$@"; do
     case "$g1d_extra_arg" in
-        --motion|--motion=*|--arm|--arm=*|--ee|--ee=*|--input-mode|--input-mode=*|--network-interface|--network-interface=*|--camera-layout|--camera-layout=*|--force-zmq-video|--video-fps|--video-fps=*|--jpeg-quality|--jpeg-quality=*)
-            echo "G1D launcher: forwarded argument refused: $g1d_extra_arg (safety/profile flags are fixed; use G1D_VIDEO_MODE and G1D_HEAD_* video settings)." >&2
+        --motion|--motion=*|--g1d-a|--g1d-a=*|--g1d-ag|--g1d-ag=*|--g1d-agv|--g1d-agv=*|--arm|--arm=*|--ee|--ee=*|--input-mode|--input-mode=*|--network-interface|--network-interface=*|--camera-layout|--camera-layout=*|--force-zmq-video|--video-fps|--video-fps=*|--jpeg-quality|--jpeg-quality=*)
+            echo "G1D launcher: forwarded argument refused: $g1d_extra_arg (safety/profile flags are fixed; use G1D_VIDEO_MODE, G1D_HEAD_* and G1D_AGV settings)." >&2
             exit 2
             ;;
     esac
@@ -59,6 +59,26 @@ if [[ "$g1d_video_mode" == head ]]; then
         exit 2
     fi
 fi
+
+# Opt-in G1-D AGV base (left stick) + lift column (right stick). Only this
+# environment switch adds --g1d-agv; the flag itself is never user-forwardable.
+G1D_AGV=${G1D_AGV:-0}
+G1D_AGV_MAX_VX=${G1D_AGV_MAX_VX:-0.6}
+g1d_agv_args=()
+case "$G1D_AGV" in
+    0|"") ;;
+    1)
+        if [[ ! "$G1D_AGV_MAX_VX" =~ ^([0-9]+(\.[0-9]*)?|\.[0-9]+)$ ]] \
+            || ! awk -v v="$G1D_AGV_MAX_VX" 'BEGIN { exit !(v + 0 > 0 && v + 0 <= 1.5) }'; then
+            echo "G1D launcher: G1D_AGV_MAX_VX must be a number in (0, 1.5] m/s." >&2
+            exit 2
+        fi
+        export G1D_AGV_MAX_VX
+        g1d_agv_args=(--g1d-agv)
+        echo "G1D AGV ENABLED: left stick = base (G1D_AGV_MAX_VX=$G1D_AGV_MAX_VX m/s, turn 0.6 rad/s), right stick = lift column; active only after r."
+        ;;
+    *) echo "G1D launcher: G1D_AGV must be 0 or 1." >&2; exit 2 ;;
+esac
 
 # Print the Quest URL before any Python/DDS preflight.  Unlike the G1 helper,
 # this only observes routing and never regenerates TLS material or writes state.
@@ -191,6 +211,7 @@ if [[ "$g1d_video_mode" == head ]]; then
       --jpeg-quality "$G1D_HEAD_JPEG_QUALITY" \
       --img-server-ip "$teleimager_host" \
       --network-interface "$g1d_dds_interface" \
+      ${g1d_agv_args[@]+"${g1d_agv_args[@]}"} \
       "$@"
 fi
 if [[ "$g1d_video_mode" == vertical ]]; then
@@ -207,6 +228,7 @@ if [[ "$g1d_video_mode" == vertical ]]; then
       --camera-layout vertical \
       --img-server-ip "$teleimager_host" \
       --network-interface "$g1d_dds_interface" \
+      ${g1d_agv_args[@]+"${g1d_agv_args[@]}"} \
       "$@"
 fi
 
@@ -223,4 +245,5 @@ exec "$teleimager_python" -s teleop_hand_and_arm.py \
   --display-mode pass-through \
   --no-video \
   --network-interface "$g1d_dds_interface" \
+  ${g1d_agv_args[@]+"${g1d_agv_args[@]}"} \
   "$@"

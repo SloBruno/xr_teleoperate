@@ -109,6 +109,15 @@ DRIVER = textwrap.dedent(r'''
         # Simulates any future thread created before the Vuer fork.
         threading.Thread(target=threading.Event().wait, daemon=True, name="stray").start()
 
+    class FakeChannelSubscriber:
+        """Real AGV height subscriber path: records when DDS readers appear."""
+        def __init__(self, topic, msg_type):
+            events.append("subscriber:" + topic)
+        def Init(self, handler, depth):
+            pass
+        def Close(self):
+            pass
+
     class StopHere(KeyboardInterrupt):
         pass
 
@@ -130,7 +139,12 @@ DRIVER = textwrap.dedent(r'''
         "unitree_sdk2py": ns_module("unitree_sdk2py"),
         "unitree_sdk2py.core": ns_module("unitree_sdk2py.core"),
         "unitree_sdk2py.core.channel": ns_module("unitree_sdk2py.core.channel",
-                                                 ChannelFactoryInitialize=fake_dds_init, ChannelPublisher=object),
+                                                 ChannelFactoryInitialize=fake_dds_init, ChannelPublisher=object,
+                                                 ChannelSubscriber=FakeChannelSubscriber),
+        "unitree_sdk2py.idl.geometry_msgs": ns_module("unitree_sdk2py.idl.geometry_msgs"),
+        "unitree_sdk2py.idl.geometry_msgs.msg": ns_module("unitree_sdk2py.idl.geometry_msgs.msg"),
+        "unitree_sdk2py.idl.geometry_msgs.msg.dds_": ns_module("unitree_sdk2py.idl.geometry_msgs.msg.dds_",
+                                                               Point32_=object),
         "unitree_sdk2py.idl": ns_module("unitree_sdk2py.idl"),
         "unitree_sdk2py.idl.std_msgs": ns_module("unitree_sdk2py.idl.std_msgs"),
         "unitree_sdk2py.idl.std_msgs.msg": ns_module("unitree_sdk2py.idl.std_msgs.msg"),
@@ -171,6 +185,9 @@ MODES = {
     "head_ipc": G1D + ["--camera-layout", "head", "--force-zmq-video", "--video-fps", "10", "--ipc"],
     "head_sim": G1D + ["--camera-layout", "head", "--force-zmq-video", "--video-fps", "10", "--sim"],
 }
+# Opt-in G1-D AGV in every G1D video mode: nothing AGV-related may exist at the fork.
+for _mode in ("head", "vertical", "no_video"):
+    MODES[_mode + "_agv"] = MODES[_mode] + ["--g1d-agv"]
 
 
 def _run_main(tmp_path, argv, extra_env=None):
@@ -197,7 +214,7 @@ def test_televuer_forks_while_process_is_single_threaded(tmp_path, mode):
     events = rec["events"]
     tv = events.index("televuer")
     assert tv < events.index("dds"), events
-    if mode == "no_video":
+    if mode.startswith("no_video"):
         assert "image_client" not in events and "config_request" not in events, events
     elif mode == "passthrough_video":
         assert tv < events.index("config_request") < events.index("image_client"), events
@@ -237,3 +254,20 @@ def test_no_video_keeps_passthrough_wrapper(tmp_path):
     kw = _run_main(tmp_path, MODES["no_video"])["tv_kwargs"]
     assert kw["display_mode"] == "pass-through"
     assert kw["zmq"] is False and kw["webrtc"] is False
+
+
+@pytest.mark.parametrize("mode", ["head_agv", "vertical_agv", "no_video_agv"])
+def test_g1d_agv_creates_its_height_reader_only_after_fork_and_dds(tmp_path, mode):
+    rec = _run_main(tmp_path, MODES[mode])
+    events = rec["events"]
+    assert rec["at_fork"]["py_threads"] == 1, rec["at_fork"]
+    assert "subscriber:rt/hispeed_state" in events, events
+    assert events.index("televuer") < events.index("dds") < events.index("subscriber:rt/hispeed_state"), events
+    # no RPC client / sender thread pre-arm (the driver stops before r)
+    assert "g1d-agv-sender" not in rec["at_fork"]["thread_names"]
+
+
+@pytest.mark.parametrize("mode", ["head", "vertical", "no_video"])
+def test_without_g1d_agv_no_height_reader_is_created(tmp_path, mode):
+    events = _run_main(tmp_path, MODES[mode])["events"]
+    assert not any(e.startswith("subscriber:") for e in events), events

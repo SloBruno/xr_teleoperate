@@ -101,3 +101,63 @@ proporcional). Não habilite rastreamento de mãos para os dedos.
 O processo só arma rastreamento com `r` no terminal e encerra com `q`. Antes de
 `r`, o G1D mantém a pose medida; após `q`, ele libera a saída sem retorno
 automático à pose zero e sem abrir/fechar automaticamente as mãos.
+
+## Base AGV e coluna de elevação (opt-in, `G1D_AGV=1`)
+
+Desligado por padrão. Sem `G1D_AGV=1` nada relacionado ao AGV é construído
+(nenhum cliente RPC, thread ou subscriber). A flag `--g1d-agv` só é adicionada
+pelo launcher; passá-la (ou abreviações `--g1d-a…`) como argumento extra é
+recusado. `--motion` continua recusado. Funciona nos três modos de vídeo
+(`off`, `head`, `vertical`).
+
+Comando exato (modo de vídeo leve recomendado), a partir de `teleop/`:
+
+```bash
+G1D_AGV=1 G1D_VIDEO_MODE=head bash run_g1d_quest_dex3.sh
+```
+
+Limite de velocidade linear (padrão 0.6 m/s, máximo 1.5 m/s; validado no
+launcher e no Python, valor inválido aborta antes de qualquer preflight):
+
+```bash
+G1D_AGV=1 G1D_AGV_MAX_VX=0.3 G1D_VIDEO_MODE=head bash run_g1d_quest_dex3.sh
+```
+
+Mapeamento (mesma convenção de sinais já validada na caminhada do G1: o Quest
+reporta y<0 com o stick para frente):
+
+| Entrada | Comando | Faixa |
+|---|---|---|
+| stick esquerdo frente/trás | `Move.vx` (+frente) | ±`G1D_AGV_MAX_VX` m/s |
+| stick esquerdo esquerda/direita | `Move.vyaw` (esquerda = anti-horário, +) | ±0.6 rad/s |
+| stick direito frente/trás | `HeightAdjust` (frente = sobe) | ±1 (×76.5 mm/s) |
+
+`vy` é sempre 0 (não suportado). Zona morta 0.12 + curva cúbica (as mesmas da
+caminhada do G1). Sem limites de altura em software: a coluna tem fim de curso
+mecânico.
+
+Segurança: só há movimento após `r` (rastreamento armado) com amostra do
+controle fresca (≤0.25 s). O cliente RPC `agv` e a thread de envio (20 Hz) só são
+criados no início do rastreamento; o loop de 30 Hz apenas publica o alvo em
+memória. Com controle velho, não armado, `q`/B, exceção ou encerramento: envia
+`Move(0,0,0)` e `HeightAdjust(0)` imediatamente (no encerramento, antes da
+limpeza lenta dos braços; join limitado). A coluna também para se
+`rt/hispeed_state` (altura) ficar sem amostra por >0.5 s. Códigos RPC diferentes
+de 0 (9101 não iniciado, 9102 falha de movimento, 9103 falha de altura) são
+contados e os primeiros são logados.
+
+Status (`teleop-status.jsonl`, campo `locomotion.agv`): `raw_left_xy`,
+`raw_right_xy` (sticks crus), `target` [vx, vyaw, vz], `sent`
+[vx, vy, vyaw, vz] efetivamente enviado, `reason`/`column_reason`,
+`move_code`/`height_code`, contadores de erro e `height` (altura em metros,
+idade e frescor).
+
+Validação física (primeira vez, área livre, emergência à mão, robô suspenso ou
+em espaço amplo): `G1D_AGV_MAX_VX=0.2`; antes de `r` confirmar que nada se
+move; depois de `r`, um eixo por vez com deflexão pequena — stick esquerdo
+frente (status: `raw_left_xy[1]<0`, `sent[0]>0`, base anda para frente), esquerda
+(`raw_left_xy[0]<0`, `sent[2]>0`, gira anti-horário), stick direito frente
+(`raw_right_xy[1]<0`, `sent[3]>0`, coluna sobe, `height.height_m` aumenta);
+soltar → zeros; tirar o controle do rastreamento → zeros em ≤0.25 s; `q` → para.
+Se o sinal físico divergir, compare o stick cru com o comando antes de mudar
+qualquer sinal.

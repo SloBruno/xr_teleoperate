@@ -45,6 +45,7 @@ from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper, is_w
 from teleop.utils.quest_controls import (LocomotionRamp, dispatch_joystick_locomotion, joystick_to_locomotion, stick_snapshot,
                                          resolve_speed_caps, speed_cap_banner, loco_stick_is_fresh)
 from teleop.utils.loco_preflight import run_loco_preflight
+from teleop.utils import g1d_agv
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
 from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
 from teleop.utils.human_arm_calibration import HumanArmSweep, HumanCalibratedWristCalibrator
@@ -487,6 +488,7 @@ if __name__ == '__main__':
     parser.add_argument('--walk-speed-cap', type=float, default=None, help='Walk cap m/s (default 0.3, hard max 0.6; env G1_WALK_SPEED_CAP)')
     parser.add_argument('--loco-request-fsm', type=str, default='none', choices=['none', '500'], help='Opt-in: in the preflight only, request FSM 500 (SetFsmId) when the robot is in 501 and confirm by polling; never 801; default none = send nothing')
     parser.add_argument('--loco-backend', type=str, default='wirelesscontroller', choices=['setvelocity', 'wirelesscontroller'], help='Walking transport: wirelesscontroller (default: continuous 20 Hz rt/wirelesscontroller joystick state; fail-safe, no silent fallback) or setvelocity (legacy RPC 7105, only when forced)')
+    parser.add_argument('--g1d-agv', action='store_true', help='G1D only, launcher-controlled (G1D_AGV=1): Quest left stick drives the AGV base (vx/vyaw), right stick the lift column; cap env G1D_AGV_MAX_VX (default 0.6, max 1.5 m/s)')
     parser.add_argument('--turn-rate-cap', type=float, default=None, help='Turn cap rad/s (default 0.3, hard max 1.0; env G1_TURN_RATE_CAP)')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
@@ -514,6 +516,14 @@ if __name__ == '__main__':
         parser.error("G1D forced-ZMQ head video requires --video-fps at most 10.")
     if args.arm == "G1D" and args.motion:
         parser.error("G1D is arm-only; --motion is not supported.")
+    if args.g1d_agv and args.arm != "G1D":
+        parser.error("--g1d-agv is only valid with --arm G1D.")
+    agv_max_vx = None
+    if args.g1d_agv:
+        try:
+            agv_max_vx = g1d_agv.resolve_agv_max_vx(os.environ.get("G1D_AGV_MAX_VX") or None)
+        except ValueError as error:
+            parser.error(str(error))
     if args.arm == "G1D" and not args.g1d_ik_geometry_assumption:
         parser.error("G1D reuses G1_29 arm IK geometry without G1D hardware validation; pass --g1d-ik-geometry-assumption only after validating the geometry.")
     walk_cap, turn_cap = resolve_speed_caps(args.walk_speed_cap, args.turn_rate_cap, os.environ)
@@ -538,6 +548,8 @@ if __name__ == '__main__':
     loco_wrapper = None
     loco_preflight = None
     robot_monitor = None
+    # Opt-in G1-D AGV/column: nothing AGV-related exists without --g1d-agv.
+    agv_ctrl = None
 
     try:
         # TeleVuer forks its Vuer server Process in __init__. Forking after DDS /
@@ -625,6 +637,18 @@ if __name__ == '__main__':
             ChannelFactoryInitialize(1, networkInterface=args.network_interface)
         else:
             ChannelFactoryInitialize(0, networkInterface=args.network_interface)
+
+        # G1-D AGV (opt-in): object + passive height subscriber only, created
+        # after the Vuer fork and DDS init. RPC client and the 20 Hz sender
+        # thread are created only once tracking is armed (post-r).
+        if args.g1d_agv:
+            agv_ctrl = g1d_agv.G1dAgvController(
+                max_vx=agv_max_vx, armed_fn=lambda: START and not STOP, warn=logger_mp.warning,
+                client_factory=g1d_agv.make_agv_client, height_factory=g1d_agv.HeightMonitor)
+            agv_ctrl.start_feedback()
+            logger_mp.warning(f"[agv] G1-D AGV ENABLED: left stick vx<= {agv_max_vx:.2f} m/s, "
+                              f"vyaw<= {g1d_agv.AGV_MAX_VYAW_RADPS:.2f} rad/s; right stick = column; "
+                              f"active only after r with a fresh controller.")
 
         # ipc communication mode. client usage: see utils/ipc.py
         if args.ipc:
@@ -1029,6 +1053,11 @@ if __name__ == '__main__':
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         _safe_emit_lifecycle_event(pose_telemetry_sink, "tracking_started")
+        if agv_ctrl is not None:
+            with LIFECYCLE_LOCK:
+                agv_start_cancelled = STOP
+            if not agv_start_cancelled:
+                agv_ctrl.activate()
         arm_ctrl.speed_gradual_max()
 
         head_img = None
@@ -1187,6 +1216,14 @@ if __name__ == '__main__':
                 stick_log["watchdog_stop_code"] = getattr(loco_wrapper, "watchdog_stop_code", None)
                 if getattr(loco_wrapper, "sender", None) is not None:
                     stick_log["watchdog_trips"] = loco_wrapper.sender.watchdog.trips
+
+            if agv_ctrl is not None:
+                # In-memory post only; the sender thread owns every AGV RPC.
+                stick_log["agv"] = agv_ctrl.submit(
+                    tele_data.left_ctrl_thumbstickValue,
+                    tele_data.right_ctrl_thumbstickValue,
+                    tele_data.controller_sample_timestamp,
+                )
 
             if _diag is not None: _diag.mark("locomotion")
             tracking_pressure_timestamps = (0.0, 0.0)
@@ -1483,6 +1520,11 @@ if __name__ == '__main__':
         if getattr(loco_wrapper, "stop_move_sender", None) is not None:
             loco_wrapper.stop_move_sender()
         stop_locomotion_best_effort(loco_wrapper, shutdown_cause or "shutdown")
+        # G1-D AGV/column (loco_wrapper is always None for G1D): immediate
+        # Move(0)/HeightAdjust(0) burst + bounded sender join, before any slow
+        # arm cleanup. Never raises.
+        if agv_ctrl is not None:
+            agv_ctrl.shutdown(shutdown_cause or "shutdown")
         # G1D keeps its declared stable pose: no automatic arm home and no
         # automatic Dex3 open/close motion at q.
         if args.arm == "G1_29":
