@@ -432,10 +432,15 @@ def load_recording(path, *, max_gap_s: float = 0.25, min_samples: int = 2,
         raise RecordingError("sample time must be finite and strictly increasing")
     if not np.all(np.isfinite(t_mono)) or np.any(np.diff(t_mono) <= 0.0):
         raise RecordingError("sample time must be finite and strictly increasing")
-    try:
-        duration = float(footer["duration_s"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise RecordingError("invalid footer duration") from exc
+    # Older G1D writers did not record footer.duration_s; then the duration is
+    # the (already validated, strictly increasing) sample time span.
+    if "duration_s" not in footer:
+        duration = float(t[-1] - t[0])
+    else:
+        try:
+            duration = float(footer["duration_s"])
+        except (TypeError, ValueError) as exc:
+            raise RecordingError("invalid footer duration") from exc
     if not math.isfinite(duration) or duration <= 0.0 or not math.isclose(duration, t[-1] - t[0], rel_tol=1e-9, abs_tol=1e-9):
         raise RecordingError("invalid footer duration")
     if np.max(np.diff(t)) > max_gap_s:

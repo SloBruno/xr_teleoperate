@@ -67,6 +67,28 @@ def test_recording_without_profile_field_from_g1d_still_loads(tmp_path):
     assert rec.header["robot"] == "G1D"
 
 
+def test_recording_without_footer_duration_from_older_writer_still_loads(tmp_path):
+    q = [0.0, 0.0, 0.5, -0.5, -0.5, -0.5, -0.5]
+    path = _write(tmp_path / "e.jsonl", left_q=q, profile=None)
+    lines = path.read_text().splitlines()
+    footer = json.loads(lines[-1]); footer.pop("duration_s")
+    lines[-1] = json.dumps(footer)
+    path.write_text("\n".join(lines) + "\n")
+    rec = _load(path)
+    assert rec.t[-1] == pytest.approx(0.08)
+
+
+def test_wrong_footer_duration_is_still_refused(tmp_path):
+    q = [0.0, 0.0, 0.5, -0.5, -0.5, -0.5, -0.5]
+    path = _write(tmp_path / "f.jsonl", left_q=q)
+    lines = path.read_text().splitlines()
+    footer = json.loads(lines[-1]); footer["duration_s"] = 9.0
+    lines[-1] = json.dumps(footer)
+    path.write_text("\n".join(lines) + "\n")
+    with pytest.raises(tr.RecordingError, match="duration"):
+        _load(path)
+
+
 def test_wrong_profile_is_still_refused(tmp_path):
     q = [0.0, 0.0, 0.5, -0.5, -0.5, -0.5, -0.5]
     with pytest.raises(tr.RecordingError, match="unsupported robot/profile"):
