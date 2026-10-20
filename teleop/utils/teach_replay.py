@@ -71,6 +71,9 @@ SMOOTHSTEP_PEAK_FACTOR = 1.5   # max d/ds of 3s^2 - 2s^3
 # stops (measured on G1D recordings). Accept that sensor overshoot when loading;
 # commands are still clamped strictly inside the limits.
 HAND_LIMIT_MEASUREMENT_TOL_RAD = 0.10
+# Same idea for the arm encoders at their mechanical stops (measured up to
+# ~0.009 rad on G1D); kept small because arm commands carry more energy.
+ARM_LIMIT_MEASUREMENT_TOL_RAD = 0.05
 # A DDS callback may stamp a sample just after the tick took its time
 # reference; accept that small monotonic skew instead of a false "stale".
 STATE_FUTURE_SKEW_S = 0.01
@@ -453,7 +456,10 @@ def load_recording(path, *, max_gap_s: float = 0.25, min_samples: int = 2,
         _finite_matrix([s.get(f"{side}_hand_dq") for s in samples], HAND_DOF, f"{side}_hand_dq")
     if arm_lower is not None or arm_upper is not None:
         lo, hi = _finite_matrix([arm_lower], ARM_DOF, "arm_lower")[0], _finite_matrix([arm_upper], ARM_DOF, "arm_upper")[0]
-        if np.any(lo >= hi) or np.any(arm < lo) or np.any(arm > hi):
+        # Arms pushed onto their mechanical stop read slightly past the model
+        # limits; replay commands are clamped inside them (_clamp_arm).
+        tol = ARM_LIMIT_MEASUREMENT_TOL_RAD
+        if np.any(lo >= hi) or np.any(arm < lo - tol) or np.any(arm > hi + tol):
             raise RecordingError("arm joint limit violation")
     if hand_limits is not None:
         for side, values in hands.items():

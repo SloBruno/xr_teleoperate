@@ -93,3 +93,25 @@ def test_wrong_profile_is_still_refused(tmp_path):
     q = [0.0, 0.0, 0.5, -0.5, -0.5, -0.5, -0.5]
     with pytest.raises(tr.RecordingError, match="unsupported robot/profile"):
         _load(_write(tmp_path / "d.jsonl", left_q=q, profile="G1_29"))
+
+
+def _with_arm(path, joint, value):
+    lines = path.read_text().splitlines()
+    for i in range(1, len(lines) - 1):
+        s = json.loads(lines[i]); s["arm_q"][joint] = value; lines[i] = json.dumps(s)
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_arm_encoder_overshoot_at_stop_is_accepted(tmp_path):
+    # real G1D teach: left elbow read 2.103 with model upper limit 2.094
+    q = [0.0, 0.0, 0.5, -0.5, -0.5, -0.5, -0.5]
+    path = _with_arm(_write(tmp_path / "g.jsonl", left_q=q), 3, ARM_HI[3] + 0.0087)
+    assert _load(path).arm_q.shape == (5, 14)
+
+
+def test_arm_clearly_out_of_range_is_still_refused(tmp_path):
+    q = [0.0, 0.0, 0.5, -0.5, -0.5, -0.5, -0.5]
+    path = _with_arm(_write(tmp_path / "h.jsonl", left_q=q), 3, ARM_HI[3] + 0.2)
+    with pytest.raises(tr.RecordingError, match="arm joint limit violation"):
+        _load(path)
