@@ -102,3 +102,42 @@ def service_xr_video(*, client, camera_config, camera_layout, need_local_image,
         displayed_frame=displayed_frame,
         frame_fresh=bool(plan.head),
     )
+
+
+CAMERA_CONFIG_REQUEST_PORT = 60000
+_SCENE_CAMERA_KEYS = ("image_shape", "binocular", "enable_zmq", "zmq_port")
+
+
+def fetch_camera_config_once(requester_factory, host, port=CAMERA_CONFIG_REQUEST_PORT):
+    """One-shot camera-config request that leaves no ZMQ context/I/O threads alive.
+
+    TeleVuer forks its Vuer server in __init__, so the XR scene must be built
+    while this process is single-threaded; a live zmq.Context owns I/O threads.
+    """
+    requester = requester_factory(host, port)
+    try:
+        config = requester.request()
+    finally:
+        requester.close()
+        context = getattr(requester, "_context", None)
+        if context is not None and not getattr(context, "closed", True):
+            raise RuntimeError("camera-config requester left its ZMQ context alive")
+    if config is None:
+        raise RuntimeError("Failed to get camera configuration.")
+    return config
+
+
+def require_matching_camera_config(expected, actual, camera_names):
+    """Fail closed if the subscriber's config differs from the one used for the XR scene."""
+    for name in camera_names:
+        want = expected.get(name) or {}
+        got = (actual or {}).get(name) or {}
+        for key in _SCENE_CAMERA_KEYS:
+            a, b = want.get(key), got.get(key)
+            if isinstance(a, tuple):
+                a = list(a)
+            if isinstance(b, tuple):
+                b = list(b)
+            if a != b:
+                raise RuntimeError(
+                    f"{name}.{key} changed between camera-config requests ({a!r} -> {b!r})")

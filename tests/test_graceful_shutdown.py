@@ -533,7 +533,10 @@ def _run_launcher(monkeypatch, *, raise_in_tele_data=None, press_q=True):
         "unitree_sdk2py.idl.std_msgs.msg.dds_": types.SimpleNamespace(String_=object),
         "televuer": types.SimpleNamespace(TeleVuerWrapper=FakeTeleVuerWrapper),
         "teleimager": types.ModuleType("teleimager"),
-        "teleimager.image_client": types.SimpleNamespace(ImageClient=FakeImageClient),
+        "teleimager.image_client": types.SimpleNamespace(
+            ImageClient=FakeImageClient,
+            ZMQ_Requester=lambda host, port: types.SimpleNamespace(
+                request=lambda: FakeImageClient().get_cam_config(), close=lambda: None)),
         "sshkeyboard": types.SimpleNamespace(listen_keyboard=lambda **kwargs: None, stop_listening=lambda: None),
         "teleop.robot_control.robot_arm": types.SimpleNamespace(
             G1_29_ArmController=FakeArmController, G1_23_ArmController=FakeArmController,
