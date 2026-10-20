@@ -37,6 +37,34 @@ def test_video_env_restores_camera_preflight(tmp_path):
     assert "192.168.123.164" in log  # preflight invoked with the host argv
 
 
+def test_head_video_mode_uses_head_only_preflight(tmp_path):
+    r, log = _run(tmp_path, {"G1D_VIDEO_MODE": "head"})
+    assert r.returncode == 0, r.stderr
+    assert "192.168.123.164 head" in log
+
+    src = LAUNCHER.read_text()
+    head_probe = src.split("preflight_remote_head_stream()", 1)[1].split("\n}\n", 1)[0]
+    assert "60000" in head_probe and "55555" in head_probe
+    assert "head_camera" in head_probe and "get_head_frame" in head_probe
+    assert 'camera_names=("head_camera",)' in head_probe
+    assert "binocular" in head_probe
+    assert "55556" not in head_probe
+    assert "left_wrist" not in head_probe and "right_wrist" not in head_probe
+
+
+def test_head_video_mode_has_safe_lightweight_fixed_args_and_legacy_defaults():
+    src = LAUNCHER.read_text()
+    assert 'G1D_VIDEO_MODE=${G1D_VIDEO_MODE:-}' in src
+    assert 'G1D_HEAD_VIDEO_FPS=${G1D_HEAD_VIDEO_FPS:-10}' in src
+    assert 'G1D_HEAD_JPEG_QUALITY=${G1D_HEAD_JPEG_QUALITY:-60}' in src
+    assert "--camera-layout head" in src
+    assert "--force-zmq-video" in src
+    assert '--video-fps "$G1D_HEAD_VIDEO_FPS"' in src
+    assert '--jpeg-quality "$G1D_HEAD_JPEG_QUALITY"' in src
+    assert "--camera-layout vertical" in src  # G1D_VIDEO=1 compatibility
+    assert 'if [[ "${G1D_VIDEO:-0}" == 1 ]]' in src
+
+
 def test_launcher_source_default_args_and_video_args():
     src = LAUNCHER.read_text()
     assert "--display-mode pass-through" in src and "--no-video" in src
@@ -63,13 +91,25 @@ def test_teleop_has_no_video_flag_and_guards_imageclient():
     assert "--record cannot be combined with --no-video" in TELEOP
 
 
+def test_teleop_integrates_nonblocking_video_policy_and_quality_controls():
+    assert "'--force-zmq-video'" in TELEOP
+    assert "'--video-fps'" in TELEOP
+    assert "'--jpeg-quality'" in TELEOP
+    assert "VideoFrameGate" in TELEOP
+    assert "service_xr_video(" in TELEOP
+    assert "force_zmq=args.force_zmq_video" in TELEOP
+    assert "display_fps=args.video_fps or 30.0" in TELEOP
+    assert "jpeg_quality=args.jpeg_quality" in TELEOP
+    assert 'camera_names=("head_camera",) if args.camera_layout == "head" else None' in TELEOP
+    assert "validate_head_only_camera(camera_config['head_camera'])" in TELEOP
+    assert "args.camera_layout != 'head' or video_update.frame_fresh" in TELEOP
+
+
 def test_no_video_creates_wrapper_before_threads_and_never_derefs_none_config():
     try_pos = TELEOP.index("\n    try:\n        # HYPOTHESIS")
     early = TELEOP.index("tv_wrapper = TeleVuerWrapper(", try_pos)
     assert "args.no_video" in TELEOP[try_pos:early]
     assert early < TELEOP.index("ChannelFactoryInitialize(0", try_pos)
     assert "camera_config = None" in TELEOP
-    # remaining unguarded uses live only in the --record block, which --no-video refuses
-    for m in re.finditer(r"\n( *)if (camera_config\[[^\n]*):", TELEOP):
-        assert len(m.group(1)) >= 20, m.group(0)  # only inside the --record block
-    assert len(re.findall(r"if camera_config is not None and camera_config\[", TELEOP)) >= 4
+    # Camera access is centralized and both ready/tracking calls are guarded.
+    assert TELEOP.count("if camera_config is not None:\n                video_update = service_xr_video(") == 2

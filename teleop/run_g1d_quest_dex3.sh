@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# G1D operator launcher: video disabled by default (pass-through); G1D_VIDEO=1 requires two remote camera streams. r/q stays in Python.
+# G1D operator launcher: video defaults off. G1D_VIDEO=1 keeps the legacy
+# two-camera stack; G1D_VIDEO_MODE=head selects lightweight binocular ZMQ.
 set -euo pipefail
 
 # Extra arguments are forwarded to teleop (appended after the fixed safety flags).
 # Refuse anything that could change the validated G1D profile or enable motion.
 for g1d_extra_arg in "$@"; do
     case "$g1d_extra_arg" in
-        --motion|--motion=*|--arm|--arm=*|--ee|--ee=*|--input-mode|--input-mode=*|--network-interface|--network-interface=*)
-            echo "G1D launcher: forwarded argument refused: $g1d_extra_arg (--motion, --arm, --ee, --input-mode and --network-interface are fixed by this launcher)." >&2
+        --motion|--motion=*|--arm|--arm=*|--ee|--ee=*|--input-mode|--input-mode=*|--network-interface|--network-interface=*|--camera-layout|--camera-layout=*|--force-zmq-video|--video-fps|--video-fps=*|--jpeg-quality|--jpeg-quality=*)
+            echo "G1D launcher: forwarded argument refused: $g1d_extra_arg (safety/profile flags are fixed; use G1D_VIDEO_MODE and G1D_HEAD_* video settings)." >&2
             exit 2
             ;;
     esac
@@ -31,6 +32,33 @@ G1D_TELEIMAGER_HOST=${G1D_TELEIMAGER_HOST:-192.168.123.164}
 teleimager_host=$G1D_TELEIMAGER_HOST
 teleimager_python=${TELEIMAGER_PYTHON:-/home/unitree/.local/envs/xr-g1d-vuer016/bin/python}
 G1D_TELEIMAGER_PREFLIGHT_TIMEOUT_S=${G1D_TELEIMAGER_PREFLIGHT_TIMEOUT_S:-12}
+G1D_VIDEO_MODE=${G1D_VIDEO_MODE:-}
+G1D_HEAD_VIDEO_FPS=${G1D_HEAD_VIDEO_FPS:-10}
+G1D_HEAD_JPEG_QUALITY=${G1D_HEAD_JPEG_QUALITY:-60}
+
+if [[ -z "$G1D_VIDEO_MODE" ]]; then
+    if [[ "${G1D_VIDEO:-0}" == 1 ]]; then
+        g1d_video_mode=vertical
+    else
+        g1d_video_mode=off
+    fi
+else
+    g1d_video_mode=$G1D_VIDEO_MODE
+fi
+case "$g1d_video_mode" in
+    off|head|vertical) ;;
+    *) echo "G1D launcher: G1D_VIDEO_MODE must be off, head, or vertical." >&2; exit 2 ;;
+esac
+if [[ "$g1d_video_mode" == head ]]; then
+    if [[ ! "$G1D_HEAD_VIDEO_FPS" =~ ^([1-9]|10)(\.0*)?$ ]]; then
+        echo "G1D launcher: G1D_HEAD_VIDEO_FPS must be between 1 and 10." >&2
+        exit 2
+    fi
+    if [[ ! "$G1D_HEAD_JPEG_QUALITY" =~ ^([1-9]|[1-9][0-9]|100)$ ]]; then
+        echo "G1D launcher: G1D_HEAD_JPEG_QUALITY must be an integer from 1 to 100." >&2
+        exit 2
+    fi
+fi
 
 # Print the Quest URL before any Python/DDS preflight.  Unlike the G1 helper,
 # this only observes routing and never regenerates TLS material or writes state.
@@ -52,6 +80,48 @@ context.load_cert_chain(sys.argv[1], sys.argv[2])
 PY
     then
         echo "G1D TLS preflight failed: certificate/key cannot be loaded; refusing to import teleop or DDS." >&2
+        return 1
+    fi
+}
+
+preflight_remote_head_stream() {
+    if ! timeout -k 2 "$G1D_TELEIMAGER_PREFLIGHT_TIMEOUT_S" "$teleimager_python" -s - "$teleimager_host" head <<'PY'
+import os
+import socket
+import sys
+import time
+
+from teleimager.image_client import ImageClient
+
+host = sys.argv[1]
+for port in (60000, 55555):
+    with socket.create_connection((host, port), timeout=1):
+        pass
+client = ImageClient(host=host, request_bgr=True, camera_names=("head_camera",))
+config = client.get_cam_config()
+head_config = config.get("head_camera")
+if not isinstance(head_config, dict):
+    raise RuntimeError("missing configured camera path: head_camera")
+if head_config.get("enable_zmq") is not True or head_config.get("zmq_port") != 55555:
+    raise RuntimeError("head_camera must publish ZMQ on TCP 55555")
+if head_config.get("binocular") is not True:
+    raise RuntimeError("head_camera must declare binocular=true")
+image_shape = head_config.get("image_shape")
+if not (isinstance(image_shape, (list, tuple)) and len(image_shape) == 2):
+    raise RuntimeError("head_camera.image_shape must declare [height, width]")
+expected_shape = (int(image_shape[0]), int(image_shape[1]), 3)
+deadline = time.monotonic() + 6.0
+while time.monotonic() < deadline:
+    head = client.get_head_frame()
+    bgr = getattr(head, "bgr", None)
+    if bgr is not None and getattr(bgr, "shape", None) == expected_shape and bgr.nbytes > 0:
+        # ImageClient owns background ZMQ threads; avoid teardown aborts.
+        os._exit(0)
+    time.sleep(0.05)
+os._exit(2)
+PY
+    then
+        echo "G1D head Teleimager preflight failed for remote host $teleimager_host; refusing to start." >&2
         return 1
     fi
 }
@@ -103,7 +173,27 @@ PY
 }
 
 preflight_tls
-if [[ "${G1D_VIDEO:-0}" == 1 ]]; then
+if [[ "$g1d_video_mode" == head ]]; then
+    preflight_remote_head_stream
+    [[ "${G1D_LAUNCHER_SKIP_TELEOP:-0}" == 1 ]] && exit 0
+    xr_net_announce
+    cd "$repo/teleop"
+    echo "G1D HEAD-ONLY BINOCULAR ZMQ: $G1D_HEAD_VIDEO_FPS Hz, JPEG quality $G1D_HEAD_JPEG_QUALITY; no wrist streams."
+    echo "G1D arm-only: press r or right A to arm tracking; right B or q to release and exit."
+    exec "$teleimager_python" -s teleop_hand_and_arm.py \
+      --arm G1D \
+      --g1d-ik-geometry-assumption \
+      --ee dex3 \
+      --input-mode hand \
+      --camera-layout head \
+      --force-zmq-video \
+      --video-fps "$G1D_HEAD_VIDEO_FPS" \
+      --jpeg-quality "$G1D_HEAD_JPEG_QUALITY" \
+      --img-server-ip "$teleimager_host" \
+      --network-interface "$g1d_dds_interface" \
+      "$@"
+fi
+if [[ "$g1d_video_mode" == vertical ]]; then
     preflight_remote_two_camera_streams
     [[ "${G1D_LAUNCHER_SKIP_TELEOP:-0}" == 1 ]] && exit 0
     xr_net_announce
@@ -120,7 +210,7 @@ if [[ "${G1D_VIDEO:-0}" == 1 ]]; then
       "$@"
 fi
 
-echo "G1D video DISABLED (pass-through, no camera preflight, no ImageClient); set G1D_VIDEO=1 to re-enable the two-camera video flow."
+echo "G1D video DISABLED (pass-through, no camera preflight, no ImageClient); set G1D_VIDEO_MODE=head for lightweight binocular ZMQ or G1D_VIDEO=1 for the legacy two-camera flow."
 [[ "${G1D_LAUNCHER_SKIP_TELEOP:-0}" == 1 ]] && exit 0
 xr_net_announce
 cd "$repo/teleop"
