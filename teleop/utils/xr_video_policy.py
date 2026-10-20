@@ -109,17 +109,22 @@ def service_xr_video(*, client, camera_config, camera_layout, need_local_image,
 CAMERA_CONFIG_REQUEST_PORT = 60000
 _SCENE_CAMERA_KEYS = ("image_shape", "binocular", "enable_zmq", "zmq_port",
                       "enable_webrtc", "webrtc_port")
+# logging_mp starts these at import / first log line. They only wait on
+# multiprocessing queues; pass-through has always forked the Vuer server beside
+# them. Any other thread (DDS, keyboard, ZMQ subscriber) still blocks the fork.
+FORK_SAFE_THREAD_NAMES = frozenset({"MainThread", "LogConsole", "LogListener", "QueueFeederThread"})
 
 
 def require_single_threaded_for_fork():
-    """Fail closed unless only the main thread exists (TeleVuer forks its Vuer server).
+    """Fail closed unless only main + known logging threads exist (TeleVuer forks).
 
     Forking beside another thread can hand the child a locked mutex: the Vuer
     child then blocks in futex_wait and its port never listens.
     """
     import threading
 
-    if threading.active_count() != 1:
+    others = [t.name for t in threading.enumerate() if t.name not in FORK_SAFE_THREAD_NAMES]
+    if others:
         names = ", ".join(t.name for t in threading.enumerate())
         raise RuntimeError(f"refusing to fork the Vuer process beside other threads: {names}")
 
@@ -132,9 +137,19 @@ def _native_thread_count():
         return None
 
 
+def _prime_logging():
+    """Emit one log line so logging_mp starts its QueueFeederThread now."""
+    try:
+        import logging_mp
+        logging_mp.getLogger(__name__).info("requesting camera config before forking Vuer")
+        time.sleep(0.05)
+    except Exception:
+        pass
+
+
 def fetch_camera_config_once(requester_factory, host, port=CAMERA_CONFIG_REQUEST_PORT, *,
                              native_thread_count=_native_thread_count, sleep=time.sleep,
-                             settle_timeout_s=1.0, poll_s=0.01):
+                             settle_timeout_s=1.0, poll_s=0.01, before_baseline=None):
     """One-shot camera-config request that leaves no ZMQ context/I/O threads alive.
 
     TeleVuer forks its Vuer server in __init__, so the XR scene must be built
@@ -142,7 +157,14 @@ def fetch_camera_config_once(requester_factory, host, port=CAMERA_CONFIG_REQUEST
     libzmq's I/O threads can still be exiting right after term() returns, so
     wait (bounded) until the native thread count is back to its pre-request
     value, and fail closed otherwise.
+
+    ``before_baseline`` runs first (default: one log line) so the logging_mp
+    QueueFeederThread started by the requester's own first log line already
+    exists when the baseline is taken and is not mistaken for a ZMQ leak.
     """
+    if before_baseline is None:
+        before_baseline = _prime_logging
+    before_baseline()
     baseline = native_thread_count()
     requester = requester_factory(host, port)
     try:

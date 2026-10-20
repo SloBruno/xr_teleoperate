@@ -305,3 +305,42 @@ def test_one_shot_camera_config_keeps_the_request_error_when_close_also_fails():
     factory = lambda host, port: _FakeRequester(host, port, RuntimeError("request boom"), term_ok=False)
     with pytest.raises(RuntimeError, match="request boom"):
         fetch_camera_config_once(factory, "h")
+
+
+def test_fork_guard_allows_the_logging_mp_threads_present_since_import():
+    # Real robot: importing teleop starts LogConsole/LogListener and the first log
+    # line starts QueueFeederThread. Pass-through has always forked beside them.
+    import threading
+    import pytest
+    from teleop.utils.xr_video_policy import require_single_threaded_for_fork
+
+    stop = threading.Event()
+    workers = [threading.Thread(target=stop.wait, name=n, daemon=True)
+               for n in ("LogConsole", "LogListener", "QueueFeederThread")]
+    for w in workers:
+        w.start()
+    try:
+        require_single_threaded_for_fork()
+        stray = threading.Thread(target=stop.wait, name="dds-reader", daemon=True)
+        stray.start()
+        with pytest.raises(RuntimeError, match="dds-reader"):
+            require_single_threaded_for_fork()
+    finally:
+        stop.set()
+        for w in workers:
+            w.join()
+
+
+def test_one_shot_camera_config_primes_logging_before_the_native_baseline():
+    # The requester logs; the first log starts QueueFeederThread (one native
+    # thread). Priming before the baseline keeps that from looking like a ZMQ leak.
+    from teleop.utils.xr_video_policy import fetch_camera_config_once
+
+    events = []
+    counts = iter([17, 17])
+    factory = lambda host, port: _FakeRequester(host, port, {"head_camera": {}})
+    fetch_camera_config_once(
+        factory, "h", before_baseline=lambda: events.append("prime"),
+        native_thread_count=lambda: events.append("count") or next(counts),
+        sleep=lambda s: None)
+    assert events[:2] == ["prime", "count"]
