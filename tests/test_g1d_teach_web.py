@@ -1,4 +1,5 @@
 """Offline web control panel for G1D teach/replay (real HTTP on 127.0.0.1, fake IO)."""
+import http.client
 import json
 import re
 import sys
@@ -392,6 +393,25 @@ def test_delete_moves_into_trash_inside_teach_dir(fake, tmp_path):
     assert call(panel, "POST", "/api/delete", {"name": path.name})[0] == 404
 
 
+def test_cross_panel_delete_uses_unique_trash_destination(tmp_path):
+    session = FakeSession()
+    first = start_panel(session, tmp_path); second = start_panel(session, tmp_path)
+    try:
+        path = saved_file(tmp_path); (tmp_path / "trash").mkdir()
+        (tmp_path / "trash" / path.name).write_bytes(b"existing")
+        results = []; barrier = threading.Barrier(2)
+        def remove(panel):
+            barrier.wait(); results.append(panel.delete(path.name))
+        threads = [threading.Thread(target=remove, args=(panel,)) for panel in (first, second)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join()
+        assert sum(status == 200 for status, _ in results) == 1
+        assert (tmp_path / "trash" / path.name).read_bytes() == b"existing"
+        assert len(list((tmp_path / "trash").glob("*.jsonl"))) == 2
+    finally:
+        first.stop(); second.stop()
+
+
 def test_upload_valid_recording_promotes_atomically_and_never_queues_replay(fake, tmp_path):
     session, panel = fake
     source = saved_file(tmp_path / "source")
@@ -445,6 +465,44 @@ def test_upload_rejects_malformed_recording_and_cleans_partial(fake, tmp_path):
     assert status == 400 and not body["ok"]
     assert session.calls == []
     assert not list(tmp_path.glob("*.part"))
+
+
+def test_upload_rejects_declared_oversize_without_reading_body_or_leaving_partial(fake, tmp_path):
+    session, panel = fake
+    conn = http.client.HTTPConnection("127.0.0.1", panel.port, timeout=3.0)
+    conn.putrequest("POST", "/api/upload")
+    conn.putheader("X-Token", TOKEN)
+    conn.putheader("X-Client-Id", "A")
+    conn.putheader("X-Filename", "too_large.jsonl")
+    conn.putheader("Content-Length", str(tw.MAX_UPLOAD_BYTES + 1))
+    conn.endheaders()
+    response = conn.getresponse()
+    payload = json.loads(response.read())
+    conn.close()
+    assert response.status == 413 and not payload["ok"]
+    assert session.calls == []
+    assert not (tmp_path / "too_large.jsonl").exists()
+    assert not list(tmp_path.glob(".g1d-upload-*.part"))
+
+
+def test_upload_rejects_truncated_http_body_and_removes_partial(fake, tmp_path):
+    session, panel = fake
+    source = saved_file(tmp_path / "source").read_bytes()
+    conn = http.client.HTTPConnection("127.0.0.1", panel.port, timeout=3.0)
+    conn.putrequest("POST", "/api/upload")
+    conn.putheader("X-Token", TOKEN)
+    conn.putheader("X-Client-Id", "A")
+    conn.putheader("X-Filename", "truncated.jsonl")
+    conn.putheader("Content-Length", str(len(source) + 100))
+    conn.endheaders(source[:100])
+    conn.sock.shutdown(1)
+    response = conn.getresponse()
+    payload = json.loads(response.read())
+    conn.close()
+    assert response.status == 400 and not payload["ok"]
+    assert session.calls == []
+    assert not (tmp_path / "truncated.jsonl").exists()
+    assert not list(tmp_path.glob(".g1d-upload-*.part"))
 
 
 @pytest.mark.parametrize("mutate", [
@@ -585,6 +643,15 @@ def test_launcher_forwards_web_flag(tmp_path):
 def test_panel_url_contains_ip_port_and_token(tmp_path):
     panel = tw.WebPanel(FakeSession(), tmp_path, port=8095, token="abc")
     assert panel.url("10.0.0.7") == "http://10.0.0.7:8095/?t=abc"
+
+
+def test_unauthorized_api_error_is_portuguese(tmp_path):
+    panel = start_panel(FakeSession(), tmp_path)
+    try:
+        status, body = call(panel, "POST", "/api/status", token=None)
+        assert status == 401 and body["error"] == "token necessário"
+    finally:
+        panel.stop()
 
 
 def test_web_module_uses_stdlib_only():

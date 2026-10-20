@@ -89,6 +89,70 @@ def test_emit_after_close_is_rejected_and_lands_nowhere(tmp_path):
     assert result.samples == 2
 
 
+def test_same_name_writers_keep_both_payloads_without_part_debris(tmp_path):
+    writers = [tr.RecordingWriter(tmp_path, _header(), name="same") for _ in range(2)]
+    assert writers[0].emit(_sample(0.0)); assert writers[0].emit(_sample(0.02))
+    assert writers[1].emit(_sample(10.0)); assert writers[1].emit(_sample(10.02))
+    results = [writer.close() for writer in writers]
+    assert all(result.error is None for result in results)
+    paths = sorted(tmp_path.glob("same*.jsonl"))
+    assert len(paths) == 2
+    assert {json.loads(path.read_text().splitlines()[1])["t"] for path in paths} == {0.0, 10.0}
+    assert not list(tmp_path.glob("*.part"))
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda record: record.pop("t_mono"),
+    lambda record: record.__setitem__("t_mono", "bad"),
+    lambda record: record.__setitem__("t_mono", float("nan")),
+    lambda record: record.__setitem__("t_mono", float("inf")),
+])
+def test_emit_rejects_invalid_timing_before_enqueue(tmp_path, mutate):
+    writer = tr.RecordingWriter(tmp_path, _header(), name="timing")
+    sample = _sample(0.0); mutate(sample)
+    assert writer.emit(sample) is False
+    assert writer.close().samples == 0
+
+
+def test_emit_rejects_nonincreasing_timing_after_an_accepted_sample(tmp_path):
+    writer = tr.RecordingWriter(tmp_path, _header(), name="timing-order")
+    assert writer.emit(_sample(0.0))
+    assert writer.emit(_sample(0.0)) is False
+    assert writer.close().samples == 1
+
+
+@pytest.mark.parametrize("field,value,reason", [
+    ("clock", "wall", "clock"),
+    ("t_mono", None, "sample time"),
+    ("t_mono", float("nan"), "sample time"),
+    ("t_mono", float("inf"), "sample time"),
+    ("t_mono", "bad", "sample time"),
+])
+def test_load_recording_validates_monotonic_clock_contract(tmp_path, field, value, reason):
+    writer = tr.RecordingWriter(tmp_path, _header(), name="clock")
+    writer.emit(_sample(0.0)); writer.emit(_sample(0.02))
+    path = writer.close().path
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    if field == "clock": records[0][field] = value
+    elif value is None: records[1].pop(field)
+    else: records[1][field] = value
+    bad = tmp_path / "bad-clock.jsonl"
+    bad.write_text("\n".join(json.dumps(record, allow_nan=True) for record in records) + "\n")
+    with pytest.raises(tr.RecordingError, match=reason): tr.load_recording(bad)
+
+
+def test_load_recording_rejects_nonincreasing_t_mono_and_allows_unknown_fields(tmp_path):
+    writer = tr.RecordingWriter(tmp_path, _header(), name="clock-order")
+    writer.emit(_sample(0.0)); writer.emit(_sample(0.02))
+    path = writer.close().path
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    records[0]["harmless_unknown"] = {"x": 1}
+    records[2]["t_mono"] = records[1]["t_mono"]
+    bad = tmp_path / "bad-order.jsonl"
+    bad.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    with pytest.raises(tr.RecordingError, match="sample time"): tr.load_recording(bad)
+
+
 def test_storage_failure_degrades_to_error_result_not_exception(tmp_path):
     blocker = tmp_path / "file"
     blocker.write_text("x")

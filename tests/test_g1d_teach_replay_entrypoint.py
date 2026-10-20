@@ -266,3 +266,18 @@ def test_launcher_state_recovery_cleans_stale_identity(tmp_path):
                                session_id="stale")
     assert module.recover_existing_session(state, proc_root="/proc", own_pid=os.getpid()) is None
     assert not state.exists()
+
+
+@pytest.mark.parametrize("recovered,expected", [
+    ("__G1D_TEACH_REPLAY_LIVE_NO_WEB__", "[teach] existing session is live without a web panel"),
+    ("http://127.0.0.1:8095/?t=secret", "http://127.0.0.1:8095/?t=secret"),
+])
+def test_main_recovery_prints_exactly_one_line_without_runtime_initialization(monkeypatch, recovered, expected):
+    module = _entry()
+    monkeypatch.setattr(module, "recover_existing_session", lambda: recovered)
+    monkeypatch.setattr(module, "acquire_session_lock", lambda: pytest.fail("lock initialized"))
+    monkeypatch.setattr(module, "_load_model", lambda: pytest.fail("model initialized"))
+    printed = []
+    monkeypatch.setattr("builtins.print", lambda *args, **kwargs: printed.append((args, kwargs)))
+    assert module.main([]) == 0
+    assert printed == [((expected,), {"flush": True})]

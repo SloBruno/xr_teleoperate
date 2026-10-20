@@ -29,6 +29,7 @@ import json
 import math
 import os
 import queue
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -177,6 +178,8 @@ class RecordingWriter:
         self._result: RecordingResult | None = None
         self._first_t = None
         self._last_t = None
+        self._first_t_mono = None
+        self._last_t_mono = None
         self._open = open_file
         self._thread = threading.Thread(target=self._run, name="teach-recorder", daemon=True)
         self._thread.start()
@@ -187,6 +190,14 @@ class RecordingWriter:
             return self._dropped
 
     def emit(self, sample: Mapping) -> bool:
+        try:
+            t = float(sample["t"])
+            t_mono = float(sample["t_mono"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if (isinstance(sample.get("t"), bool) or isinstance(sample.get("t_mono"), bool)
+                or not math.isfinite(t) or not math.isfinite(t_mono)):
+            return False
         record = {"type": "sample"}
         for key, value in sample.items():
             if isinstance(value, np.ndarray):
@@ -197,11 +208,16 @@ class RecordingWriter:
         with self._lock:
             if self._closing:
                 return False
+            if ((self._last_t is not None and t <= self._last_t)
+                    or (self._last_t_mono is not None and t_mono <= self._last_t_mono)):
+                return False
             try:
                 self._queue.put_nowait(record)
             except queue.Full:
                 self._dropped += 1
                 return False
+            self._last_t = t
+            self._last_t_mono = t_mono
             return True
 
     def request_close(self, status: str = "saved") -> None:
@@ -237,11 +253,15 @@ class RecordingWriter:
     def _run(self):
         written = 0
         handle = None
-        part = self.directory / f"{self.name}.jsonl.part"
+        part = None
         error = None
         try:
             try:
                 self.directory.mkdir(parents=True, exist_ok=True)
+                fd, private_name = tempfile.mkstemp(prefix=f".{self.name}-", suffix=".jsonl.part",
+                                                     dir=self.directory)
+                os.close(fd)
+                part = Path(private_name)
                 handle = self._open(part, "w")
                 handle.write(json.dumps(self._header) + "\n")
             except Exception as exc:  # storage failure: keep draining, report
@@ -278,8 +298,18 @@ class RecordingWriter:
                     handle.close()
                     handle = None
                     suffix = ".jsonl" if status == "saved" else ".aborted.jsonl"
-                    final = self.directory / f"{self.name}{suffix}"
-                    os.replace(part, final)
+                    base = self.name
+                    index = 0
+                    while True:
+                        candidate = self.directory / f"{base}{suffix}" if index == 0 else \
+                            self.directory / f"{base}_{index}{suffix}"
+                        try:
+                            os.link(part, candidate)
+                            part.unlink()
+                            final = candidate
+                            break
+                        except FileExistsError:
+                            index += 1
                 except Exception as exc:
                     error = error or f"{type(exc).__name__}: {exc}"
             self._result = RecordingResult(final, written, dropped, status, error)
@@ -291,6 +321,11 @@ class RecordingWriter:
                 try:
                     handle.close()
                 except Exception:
+                    pass
+            if part is not None:
+                try:
+                    part.unlink()
+                except OSError:
                     pass
             self._done.set()
 
@@ -333,6 +368,8 @@ def load_recording(path, *, max_gap_s: float = 0.25, min_samples: int = 2,
             or records[0].get("type") != "header" or records[0].get("schema") != RECORDING_SCHEMA):
         raise RecordingError("missing or unknown header schema")
     header = records[0]
+    if header.get("clock") != "monotonic_s":
+        raise RecordingError("clock must be monotonic_s")
     if header.get("robot") != "G1D" or header.get("profile") != "G1D":
         raise RecordingError("unsupported robot/profile")
     try:
@@ -370,9 +407,12 @@ def load_recording(path, *, max_gap_s: float = 0.25, min_samples: int = 2,
     sides = tuple(s for s in HAND_SIDES if s in header.get("hand_sides", []))
     try:
         t = np.asarray([float(s["t"]) for s in samples], dtype=float)
+        t_mono = np.asarray([float(s["t_mono"]) for s in samples], dtype=float)
     except (KeyError, TypeError, ValueError) as exc:
         raise RecordingError("sample time missing") from exc
     if not np.all(np.isfinite(t)) or np.any(np.diff(t) <= 0.0):
+        raise RecordingError("sample time must be finite and strictly increasing")
+    if not np.all(np.isfinite(t_mono)) or np.any(np.diff(t_mono) <= 0.0):
         raise RecordingError("sample time must be finite and strictly increasing")
     try:
         duration = float(footer["duration_s"])

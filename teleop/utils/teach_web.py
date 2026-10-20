@@ -28,6 +28,7 @@ import re
 import secrets
 import threading
 import time
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -142,6 +143,23 @@ class WebPanel:
         self._summary_cache = {}
         self._server = None
         self._threads = []
+
+    @contextmanager
+    def _file_operations(self):
+        """Serialize destructive/promoting operations within and across panels."""
+        with self._file_lock:
+            self.teach_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = self.teach_dir / ".g1d-recordings.lock"
+            handle = open(lock_path, "a+")
+            try:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                yield
+            finally:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                finally:
+                    handle.close()
 
     # ------------------------------------------------------------ lifecycle
     @property
@@ -277,7 +295,7 @@ class WebPanel:
         return out
 
     def rename(self, name, label):
-        with self._file_lock:
+        with self._file_operations():
             src = safe_recording_path(self.teach_dir, name)
             dst = safe_recording_path(self.teach_dir, renamed_name(name, label))
             if not src.is_file():
@@ -294,7 +312,7 @@ class WebPanel:
             return 200, {"ok": True, "name": dst.name}
 
     def delete(self, name):
-        with self._file_lock:
+        with self._file_operations():
             src = safe_recording_path(self.teach_dir, name)
             if not src.is_file():
                 return 404, {"ok": False, "error": "gravação não encontrada"}
@@ -303,10 +321,17 @@ class WebPanel:
             trash = src.parent / TRASH_DIR
             try:
                 trash.mkdir(exist_ok=True)
-                target = trash / name
-                if target.exists():
-                    target = trash / f"{recording_base(name)}.{int(time.time())}.jsonl"
-                os.replace(src, target)
+                index = 0
+                while True:
+                    target = trash / name if index == 0 else trash / (
+                        f"{recording_base(name)}_{index}"
+                        + (".aborted.jsonl" if name.endswith(".aborted.jsonl") else ".jsonl"))
+                    try:
+                        os.link(src, target)
+                        os.unlink(src)
+                        break
+                    except FileExistsError:
+                        index += 1
             except OSError as exc:
                 return 500, {"ok": False, "error": str(exc)}
             return 200, {"ok": True}
@@ -339,19 +364,18 @@ class WebPanel:
                 os.fsync(handle.fileno())
             load_recording(temp, arm_lower=self.arm_lower, arm_upper=self.arm_upper,
                            hand_limits=DEX3_LIMITS)
-            with self._file_lock:
-                target = self.teach_dir / filename
-                stem = Path(filename).stem
-                suffix = Path(filename).suffix
+            with self._file_operations():
+                base = recording_base(filename)
+                suffix = ".aborted.jsonl" if filename.endswith(".aborted.jsonl") else ".jsonl"
                 index = 0
                 while True:
+                    target = self.teach_dir / (f"{base}{suffix}" if index == 0 else f"{base}_{index}{suffix}")
                     try:
                         os.link(temp, target)  # exclusive same-filesystem promotion
                         temp.unlink()
                         break
                     except FileExistsError:
                         index += 1
-                        target = self.teach_dir / f"{stem}_{index}{suffix}"
             temp = None
             self._summary_cache.clear()
             return 201, {"ok": True, "name": target.name}
@@ -458,7 +482,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path, query = self._parse()
         if not self._token_ok(query):
-            return self._send(401, {"ok": False, "error": "token required"})
+            return self._send(401, {"ok": False, "error": "token necessário"})
         panel = self.panel
         if path == "/api/stop":                # always accepted, from any client
             panel.stop_now()
