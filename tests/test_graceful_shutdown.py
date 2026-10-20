@@ -558,6 +558,11 @@ def _run_launcher(monkeypatch, *, raise_in_tele_data=None, press_q=True):
     real = shutdown_module.run_graceful_arm_shutdown
     monkeypatch.setattr(shutdown_module, "run_graceful_arm_shutdown",
                         lambda arm, **kw: real(arm, **{**kw, "clock": fast, "sleep": fast.sleep}))
+    # In-process harness: pytest may still hold daemon threads from earlier tests.
+    # The single-thread fork guard is exercised in a clean subprocess by
+    # tests/test_vuer_fork_single_threaded.py.
+    import teleop.utils.xr_video_policy as _xr_video_policy
+    monkeypatch.setattr(_xr_video_policy, "require_single_threaded_for_fork", lambda: None)
     runpy.run_path(str(ROOT / "teleop" / "teleop_hand_and_arm.py"), run_name="__main__")
     return calls
 

@@ -558,6 +558,11 @@ def test_hand_motion_initializes_locomotion_before_first_move(monkeypatch):
     monkeypatch.setattr("builtins.exit", lambda code: None)
 
     script = Path(__file__).resolve().parents[1] / "teleop" / "teleop_hand_and_arm.py"
+    # In-process harness: pytest may still hold daemon threads from earlier tests.
+    # The single-thread fork guard is exercised in a clean subprocess by
+    # tests/test_vuer_fork_single_threaded.py.
+    import teleop.utils.xr_video_policy as _xr_video_policy
+    monkeypatch.setattr(_xr_video_policy, "require_single_threaded_for_fork", lambda: None)
     runpy.run_path(str(script), run_name="__main__")
 
     assert moves == ["initialized", (0.0, 0.0, 0.0)]
