@@ -75,3 +75,25 @@ def test_robot_webrtc_flag_must_not_disable_zmq_headset_view(monkeypatch):
     assert need_local is True
     assert module.resolve_xr_image_transport("pass-through", REAL_HEAD_CFG, True) == (False, False)
     assert module.resolve_xr_image_transport("immersive", REAL_HEAD_CFG, False) == (True, False)
+
+
+def test_explicit_head_zmq_mode_overrides_advertised_webrtc(monkeypatch):
+    _install_import_stubs(monkeypatch)
+    module = importlib.import_module("teleop.teleop_hand_and_arm")
+
+    assert module.resolve_xr_image_transport(
+        "immersive", REAL_HEAD_CFG, False, force_zmq=True
+    ) == (False, True)
+
+
+def test_explicit_head_zmq_mode_requires_head_zmq(monkeypatch):
+    _install_import_stubs(monkeypatch)
+    module = importlib.import_module("teleop.teleop_hand_and_arm")
+    config = {**REAL_HEAD_CFG, "enable_zmq": False}
+
+    try:
+        module.resolve_xr_image_transport("immersive", config, False, force_zmq=True)
+    except RuntimeError as exc:
+        assert "ZMQ" in str(exc)
+    else:
+        raise AssertionError("forced ZMQ must fail closed when head ZMQ is disabled")

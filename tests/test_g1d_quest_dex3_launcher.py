@@ -117,6 +117,15 @@ def test_g1d_documentation_describes_teleimager_camera_representation_and_no_fal
     assert "sem fallback" in doc.lower()
 
 
+def test_g1d_documentation_has_exact_head_only_command_and_limits():
+    doc = G1D_DOC.read_text(encoding="utf-8")
+    assert "G1D_VIDEO_MODE=head bash run_g1d_quest_dex3.sh" in doc
+    assert "ZMQ" in doc and "55555" in doc
+    assert "10 Hz" in doc and "JPEG" in doc and "60" in doc
+    assert "binocular" in doc
+    assert "não consome" in doc.lower() and "pulso" in doc.lower()
+
+
 def test_g1d_launcher_regenerates_the_quest_tls_certificate_before_teleop_exec():
     source = G1D_LAUNCHER.read_text(encoding="utf-8")
     tls_preflight = source.index("preflight_tls\n", source.index("preflight_tls()"))
@@ -159,7 +168,7 @@ def _fake_python(root):
     return fake
 
 
-def _run_launcher(tmp_path, *args):
+def _run_launcher(tmp_path, *args, extra_env=None):
     cert = tmp_path / "cert.pem"
     key = tmp_path / "key.pem"
     cert.write_text("x", encoding="utf-8")
@@ -169,6 +178,7 @@ def _run_launcher(tmp_path, *args):
         "XR_TELEOP_KEY": str(key),
         "TELEIMAGER_PYTHON": str(_fake_python(tmp_path)),
     }
+    env.update(extra_env or {})
     env.pop("G1D_LAUNCHER_SKIP_TELEOP", None)
     return subprocess.run(
         ["bash", str(G1D_LAUNCHER), *args], env=env, capture_output=True, text=True, timeout=20
@@ -181,6 +191,26 @@ def test_g1d_launcher_forwards_extra_args_after_fixed_safety_flags(tmp_path):
     argv = next(l for l in result.stdout.splitlines() if l.startswith("ARGV:"))
     assert "--arm G1D --g1d-ik-geometry-assumption --ee dex3 --input-mode hand" in argv
     assert argv.endswith("--display-mode pass-through --camera-scale 0.3")
+
+
+def test_g1d_head_mode_execs_exact_safe_head_only_arguments(tmp_path):
+    result = _run_launcher(
+        tmp_path, extra_env={"G1D_VIDEO_MODE": "head", "XR_TELEOP_VUER_IP": "10.0.0.42"}
+    )
+    assert result.returncode == 0, result.stderr
+    argv = next(line for line in result.stdout.splitlines() if line.startswith("ARGV:"))
+    assert "--camera-layout head --force-zmq-video --video-fps 10 --jpeg-quality 60" in argv
+    assert "--img-server-ip 192.168.123.164" in argv
+    assert "--camera-layout vertical" not in argv
+
+
+def test_g1d_head_mode_rejects_frame_rate_above_ten_before_preflight(tmp_path):
+    result = _run_launcher(
+        tmp_path, extra_env={"G1D_VIDEO_MODE": "head", "G1D_HEAD_VIDEO_FPS": "11"}
+    )
+    assert result.returncode == 2
+    assert "between 1 and 10" in (result.stdout + result.stderr)
+    assert "ARGV:" not in result.stdout
 
 
 def test_g1d_launcher_refuses_motion_and_profile_overrides_before_anything_else(tmp_path):

@@ -20,17 +20,27 @@ No Teleimager, os caminhos de imagem são representados no
 par estereoscópico; `enable_zmq` e a porta ZMQ definem se o fluxo é publicado.
 
 O perfil G1D consome o Teleimager remoto em `192.168.123.164` por padrão
-(configurável por `G1D_TELEIMAGER_HOST`). Ele exige especificamente dois
-caminhos físicos/configurados: `head_camera` na porta TCP/ZMQ `55555` e
-`left_wrist_camera` na porta `55556`; a configuração também precisa declarar
-`binocular` para cada caminho. Antes de iniciar a teleoperação, o launcher
-confere as portas TCP `60000`, `55555` e `55556`, as duas seções com
-`enable_zmq=true` e porta correta, e decodifica um frame BGR real de cada fluxo.
-O launcher não inicia, para ou gerencia Teleimager/Realsense localmente. Não
-existe fallback para uma câmera, para a câmera de pulso publicada como cabeça,
-nem para `head`/`any`: sem fallback.
-Se qualquer fluxo não estiver saudável, o perfil falha fechado e não inicia a
-teleoperação.
+(configurável por `G1D_TELEIMAGER_HOST`). O vídeo continua desligado por
+padrão. `G1D_VIDEO=1` preserva sem alteração o fluxo vertical legado: exige
+`head_camera` em TCP/ZMQ `55555` e `left_wrist_camera` em `55556`, confere as
+portas `60000`, `55555` e `55556` e decodifica um frame BGR real de cada fluxo.
+Nesse modo não existe fallback para uma câmera, para a câmera de pulso publicada
+como cabeça, nem para `head`/`any`: sem fallback.
+
+O modo explícito `G1D_VIDEO_MODE=head` é o caminho leve recomendado para o G1D.
+O preflight consulta somente a configuração (`60000`) e `head_camera` ZMQ
+(`55555`), exige `enable_zmq=true`, porta correta, `binocular=true` e um frame
+BGR com a forma declarada. Ele força ZMQ mesmo quando o servidor anuncia WebRTC,
+preserva o frame binocular lado a lado e não consome nenhuma câmera de pulso.
+Leitura de frames e cópia para XR ficam limitadas a 10 Hz sem inserir espera no
+loop de controle de 30 Hz. A codificação XR usa JPEG quality 60 neste modo; os
+padrões legados continuam 30 Hz/quality 80. Os limites podem ser reduzidos com
+`G1D_HEAD_VIDEO_FPS` (1..10) e a qualidade pode ser configurada com
+`G1D_HEAD_JPEG_QUALITY` (1..100).
+
+O launcher não inicia, para ou gerencia Teleimager/Realsense localmente. Se o
+fluxo exigido pelo modo selecionado não estiver saudável, o perfil falha fechado
+e não inicia a teleoperação.
 
 ## Runtime isolado G1D
 
@@ -49,6 +59,12 @@ partir de `teleop/`:
 bash run_g1d_quest_dex3.sh
 ```
 
+Para o modo leve de vídeo binocular ZMQ (somente cabeça), use exatamente:
+
+```bash
+G1D_VIDEO_MODE=head bash run_g1d_quest_dex3.sh
+```
+
 O launcher é separado de `run_g1_quest_dex3.sh`; não modifique nem reutilize o
 perfil G1. Ele fixa DDS em `enP2p1s0` por padrão. Para outra interface, use
 `G1D_DDS_INTERFACE=<interface> bash run_g1d_quest_dex3.sh`.
@@ -61,15 +77,19 @@ bash run_g1d_quest_dex3.sh --display-mode pass-through   # sem vídeo no headset
 bash run_g1d_quest_dex3.sh --camera-scale 0.3            # vídeo menor
 ```
 
-O launcher recusa (exit 2) `--motion`, `--arm`, `--ee`, `--input-mode` e
-`--network-interface` (também na forma `--flag=valor`).
+O launcher recusa (exit 2) `--motion`, `--arm`, `--ee`, `--input-mode`,
+`--network-interface`, `--camera-layout`, `--force-zmq-video`, `--video-fps` e
+`--jpeg-quality` (também na forma `--flag=valor`). Use as variáveis
+`G1D_VIDEO_MODE` e `G1D_HEAD_*` para selecionar/configurar o modo seguro.
 
-O processo invocado pelo launcher recebe:
+Todo processo invocado recebe:
 
 ```text
 --arm G1D --g1d-ik-geometry-assumption --ee dex3 --input-mode hand
---camera-layout vertical
 ```
+
+O modo legado acrescenta `--camera-layout vertical`; o modo leve acrescenta
+`--camera-layout head --force-zmq-video --video-fps 10 --jpeg-quality 60`.
 
 Ele não habilita controle de movimento: G1D é somente braços.
 
