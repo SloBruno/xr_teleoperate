@@ -452,6 +452,32 @@ def test_continuous_replay_never_enters_terminal_hold_and_reports_continuous(tmp
     assert session.status_view()["replay"]["total"] is None
 
 
+def test_web_origin_replay_ignores_heartbeat_loss_finite_and_continuous(tmp_path):
+    # Approved: browser liveness never pauses/stops replay; nothing feeds a heartbeat here.
+    assert not hasattr(tr.TeachReplaySession, "feed_web_deadman")
+    for continuous, repeat in ((False, 2), (True, 1)):
+        session, io, clock, path, t, arm, left, right = _replay_setup(tmp_path, n=4, arm_offset=0.0)
+        io.arm_q = arm[0].copy(); io.hand_q["left"] = left[0].copy(); io.hand_q["right"] = right[0].copy()
+        msgs = []
+        session.on_message = msgs.append
+        assert session.request_replay(str(path), origin="web", repeat=repeat, continuous=continuous)
+        for _ in range(5000):
+            clock.t += DT; session.tick()
+            if session.mode == tr.Mode.HOLD or getattr(session, "_replay_iteration", 1) >= 3:
+                break
+            if session.mode == tr.Mode.REPLAY_PLAY:
+                io.arm_q = io.arm_writes()[-1].q.copy()
+                io.hand_q["left"] = io.hand_writes("left")[-1].q.copy()
+                io.hand_q["right"] = io.hand_writes("right")[-1].q.copy()
+        assert not any("web" in str(m).lower() and "lost" in str(m).lower() for m in msgs)
+        if continuous:
+            assert session._replay_iteration >= 3
+            assert session.mode in (tr.Mode.REPLAY_RAMP, tr.Mode.REPLAY_PLAY)
+        else:
+            assert session.mode == tr.Mode.HOLD and session._replay_iteration == 2
+            assert any("replay finished" in str(m) for m in msgs)
+
+
 def test_replay_refused_when_ramp_would_be_too_long(tmp_path):
     session, io, clock, path, *_ = _replay_setup(tmp_path, arm_offset=1.0)
     session.config.ramp_max_s = 1.0

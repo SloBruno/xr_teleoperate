@@ -29,6 +29,7 @@ session_state=$HOME/.local/state/xr_teleoperate/teach_replay.session.json
 if [[ -f "$session_state" ]]; then
     # The Python entrypoint validates PID/start-time/argv/session identity and
     # prints only the live URL (or the no-web fact); stale state falls through.
+    cd "$repo/teleop"
     exec "${cmd[@]}"
 fi
 echo "G1D TEACH/REPLAY: robot SUPPORTED, area clear, R3/e-stop in reach. Keys: r=teach s=save p=replay q=quit."

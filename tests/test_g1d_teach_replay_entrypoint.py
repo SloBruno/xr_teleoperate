@@ -178,6 +178,24 @@ def test_launcher_dry_run_prints_command_without_starting_python(tmp_path):
     assert "--hands left" in result.stdout
 
 
+def test_launcher_recovery_path_runs_entrypoint_from_teleop_dir(tmp_path):
+    # With a session state file present the launcher hands off to Python for
+    # URL recovery; the relative entrypoint must resolve from teleop/.
+    state = tmp_path / ".local" / "state" / "xr_teleoperate" / "teach_replay.session.json"
+    state.parent.mkdir(parents=True)
+    state.write_text("{}")
+    fake = tmp_path / "fakepy"
+    fake.write_text("#!/usr/bin/env bash\npwd\nprintf '%s\\n' \"$@\"\n")
+    fake.chmod(0o755)
+    env = dict(os.environ, HOME=str(tmp_path), TELEIMAGER_PYTHON=str(fake))
+    result = subprocess.run(["bash", str(LAUNCHER), "--web"], capture_output=True, text=True,
+                            env=env, cwd=str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[0] == str(ROOT / "teleop")
+    assert "teach_replay_g1d.py" in lines and "--web" in lines
+
+
 @pytest.mark.parametrize("arg", ["--network-interface", "--network-interface=eth0"])
 def test_launcher_refuses_interface_override_argument(arg):
     env = dict(os.environ, G1D_TEACH_SKIP_RUN="1")
