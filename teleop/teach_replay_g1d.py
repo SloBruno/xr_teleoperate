@@ -262,6 +262,10 @@ def recover_existing_session(path=DEFAULT_STATE_PATH, *, proc_root="/proc", own_
                         or parsed.fragment or parsed.query != f"t={data['token']}"
                         or parsed.port != int(data["port"])):
                     raise ValueError("panel URL/port mismatch")
+                from teleop.utils.teach_web import local_ipv4_addresses
+                local_hosts = {"127.0.0.1", *(ip for _, ip in local_ipv4_addresses())}
+                if parsed.hostname not in local_hosts:
+                    raise ValueError("panel URL host is not local")
             if not data.get("session_id") or not isinstance(data.get("started_at"), (int, float)):
                 raise ValueError("invalid session freshness")
             if pid <= 0 or proc_start_time(pid, proc_root) != int(data["proc_start_time"]):

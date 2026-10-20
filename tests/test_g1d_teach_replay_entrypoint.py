@@ -317,6 +317,7 @@ def test_recovery_requires_live_exact_session_and_token_http_service(tmp_path):
     "http://user:pass@127.0.0.1:8095/?t=secret",
     "http://127.0.0.1:8095/path?t=secret",
     "http://127.0.0.1:8095/?t=secret#fragment",
+    "http://evil.example:8095/?t=secret",
     "http://:8095/?t=secret",
 ])
 def test_recovery_rejects_noncanonical_web_url(tmp_path, full_url):
