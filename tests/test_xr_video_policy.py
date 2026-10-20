@@ -240,3 +240,25 @@ def test_subscriber_config_must_match_the_config_used_to_build_the_xr_scene():
     with pytest.raises(RuntimeError, match="left_wrist_camera"):
         require_matching_camera_config(expected, {"head_camera": dict(head), "left_wrist_camera": dict(wrist, binocular=True)},
                                        ("head_camera", "left_wrist_camera"))
+
+
+def test_one_shot_camera_config_waits_for_exiting_zmq_threads_to_disappear():
+    from teleop.utils.xr_video_policy import fetch_camera_config_once
+
+    counts = iter([1, 3, 2, 1])  # before, then libzmq I/O threads still exiting after term()
+    sleeps = []
+    factory = lambda host, port: _FakeRequester(host, port, {"head_camera": {}})
+    fetch_camera_config_once(factory, "h", native_thread_count=lambda: next(counts),
+                             sleep=sleeps.append, settle_timeout_s=1.0)
+    assert len(sleeps) == 2
+
+
+def test_one_shot_camera_config_fails_closed_when_native_threads_never_exit():
+    import pytest
+    from teleop.utils.xr_video_policy import fetch_camera_config_once
+
+    counts = iter([1] + [2] * 1000)
+    factory = lambda host, port: _FakeRequester(host, port, {"head_camera": {}})
+    with pytest.raises(RuntimeError, match="native threads"):
+        fetch_camera_config_once(factory, "h", native_thread_count=lambda: next(counts),
+                                 sleep=lambda s: None, settle_timeout_s=0.05, poll_s=0.01)
