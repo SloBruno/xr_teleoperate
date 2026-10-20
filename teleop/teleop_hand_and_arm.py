@@ -59,7 +59,7 @@ from teleop.utils.xr_video_plane import (
 )
 from teleop.utils.xr_video_policy import (
     VideoFrameGate, fetch_camera_config_once, require_matching_camera_config,
-    service_xr_video, validate_head_only_camera,
+    require_single_threaded_for_fork, service_xr_video, validate_head_only_camera,
 )
 from teleop.utils.robot_state_monitor import RobotStateMonitor, stop_locomotion_best_effort
 from teleop.utils.teleop_status import (
@@ -545,7 +545,12 @@ if __name__ == '__main__':
         # stuck in futex_wait, 8012 never listens). Build the XR wrapper FIRST, in
         # every mode, while this process is still single-threaded; only then start
         # DDS, the keyboard listener and the ZMQ image subscriber threads.
+        # Fork (not spawn) is kept on purpose: TeleVuer's Process target is a bound
+        # method of an object holding the Vuer app plus Value/Array/shared_memory
+        # image and pose buffers, which a spawned child could not unpickle cleanly.
+        # Python >= 3.14 defaults to forkserver; televuer must then request fork.
         if args.display_mode == 'pass-through' or args.no_video:
+            require_single_threaded_for_fork()
             tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand",
                                          binocular=False,
                                          img_shape=(480, 640),
@@ -600,6 +605,7 @@ if __name__ == '__main__':
 
             # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
             if tv_wrapper is None:
+              require_single_threaded_for_fork()
               tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand",
                                          binocular=display_binocular,
                                          img_shape=display_img_shape,
