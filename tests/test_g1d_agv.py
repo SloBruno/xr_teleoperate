@@ -576,3 +576,64 @@ def test_error_log_budget_is_per_rpc_kind():
     client.height_code = 9103
     ctrl.tick()
     assert any("9103" in w for w in warnings), warnings
+
+
+def test_shutdown_still_closes_feedback_if_an_interrupt_escapes_the_burst():
+    warnings = []
+    ctrl, client, height, _, clock = _ctrl(warn=warnings.append)
+    ctrl.start_feedback()
+    ctrl.activate(start_thread=False)
+
+    def bad_send(*a):
+        raise KeyboardInterrupt
+    ctrl._send = bad_send
+    ctrl.shutdown("q", burst_gap_s=0.0)
+    assert height.closed is True
+    assert ctrl.snapshot()["sent"] == [0.0, 0.0, 0.0, 0.0]
+    assert ctrl.snapshot()["shutdown_interrupted"] is True
+    assert any("interrupted" in w for w in warnings)
+
+
+def test_real_thread_stuck_rpc_past_join_is_reported_and_ends_with_zeros():
+    gate = threading.Event()
+    entered = threading.Event()
+    calls = []
+    warnings = []
+
+    class Stuck(FakeAgvClient):
+        def Move(self, vx, vy, vyaw):
+            if vx != 0.0 and not gate.is_set():
+                entered.set()
+                gate.wait(3.0)
+            calls.append(("move", vx, vy, vyaw))
+            return 0
+
+        def HeightAdjust(self, vz):
+            calls.append(("height", vz))
+            return 0
+
+    ctrl = agv.G1dAgvController(max_vx=0.6, client_factory=Stuck, height_factory=lambda: FakeHeight(),
+                                armed_fn=lambda: True, warn=warnings.append)
+    ctrl.start_feedback()
+    ctrl.activate()
+    stop = threading.Event()
+
+    def feed():
+        while not stop.is_set():
+            ctrl.submit((0.0, -1.0), (0.0, -1.0), time.monotonic())
+            time.sleep(0.01)
+    feeder = threading.Thread(target=feed, daemon=True)
+    feeder.start()
+    try:
+        assert entered.wait(2.0)
+        ctrl.shutdown("q", join_timeout_s=0.05, burst_gap_s=0.0)
+        assert ctrl.snapshot()["sender_alive_after_join"] is True
+        assert any("still blocked" in w for w in warnings)
+    finally:
+        stop.set()
+        gate.set()
+        feeder.join(1.0)
+        ctrl._thread.join(2.0)
+    assert not ctrl.sender_alive()
+    assert [c for c in calls if c[0] == "move"][-1] == ("move", 0.0, 0.0, 0.0)
+    assert [c for c in calls if c[0] == "height"][-1] == ("height", 0.0)

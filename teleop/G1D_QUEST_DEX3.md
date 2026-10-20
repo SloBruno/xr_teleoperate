@@ -142,8 +142,9 @@ criados no início do rastreamento; o loop de 30 Hz apenas publica o alvo em
 memória. Com controle velho, não armado, `q`/B, exceção ou encerramento: envia
 `Move(0,0,0)` e `HeightAdjust(0)` no próximo ciclo do sender (≤50 ms + latência
 RPC); no encerramento, rajada de zeros antes da limpeza lenta dos braços (join
-limitado; pior caso ~2 s com robô sem resposta). Se uma RPC travada retornar
-depois do encerramento, o próprio sender envia um par de zeros final. A coluna também para se
+limitado; pior caso ~2.3 s com robô sem resposta). Se uma RPC travada retornar
+depois do encerramento e o processo ainda estiver vivo, o próprio sender envia
+um par de zeros final. A coluna também para se
 `rt/hispeed_state` (altura) ficar sem amostra por >0.5 s. Códigos RPC diferentes
 de 0 (9101 não iniciado, 9102 falha de movimento, 9103 falha de altura) são
 contados e os primeiros são logados.
@@ -165,10 +166,12 @@ Se o sinal físico divergir, compare o stick cru com o comando antes de mudar
 qualquer sinal.
 
 Limitação conhecida (verificar antes do uso em campo): todos os zeros dependem
-do processo Python vivo. SIGKILL/OOM/segfault, queda do link Ethernet ou SIGTERM
-(a teleop não instala handler de SIGTERM; o `finally` não roda) deixam o último
+do processo Python vivo. SIGKILL/OOM/segfault, queda do link Ethernet, SIGTERM ou SIGHUP
+(queda da sessão SSH / terminal fechado; a teleop não instala handlers para
+eles, o `finally` não roda) deixam o último
 `Move`/`HeightAdjust` a cargo do firmware do AGV. Em bancada (rodas fora do chão,
 coluna livre), envie um único comando pequeno e pare de enviar: meça se e quando
 base e coluna param sozinhas e registre aqui. Se o comando ficar travado, a
 emergência física é a única proteção contra queda do processo. Encerre sempre
-com `q`/B/Ctrl+C, nunca `kill`.
+com `q`/B/Ctrl+C, nunca `kill`, e rode o launcher dentro de `tmux`/`screen`
+para que uma queda do SSH não mate o processo.

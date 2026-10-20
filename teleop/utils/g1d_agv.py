@@ -429,7 +429,12 @@ class G1dAgvController:
 
     # ---------------------------------------------------- shutdown
     def shutdown(self, reason="shutdown", join_timeout_s=0.5, burst_gap_s=0.05):
-        """Zero immediately, stop the sender (bounded), zero burst. Never raises."""
+        """Zero immediately, stop the sender (bounded), zero burst. Never raises.
+
+        Worst case against an unresponsive robot: lock wait + 3 x (Move +
+        HeightAdjust timeouts) + gaps + join ~= 2.3 s.  Every step is guarded
+        individually so an interrupt cannot skip the later zeros or cleanup.
+        """
         try:
             with self._lock:
                 if self._closed:
@@ -437,23 +442,35 @@ class G1dAgvController:
                 self._closed = True
                 self._target = (0.0, 0.0, 0.0)
                 self.shutdown_reason = reason
-            self._stop.set()
-            got = False
+        except BaseException:
+            self._closed = True
+        self._stop.set()
+        got = False
+        try:
             try:
                 got = self._rpc_lock.acquire(timeout=max(0.0, join_timeout_s))
             except BaseException:
                 self.shutdown_interrupted = True
-            try:
-                for i in range(SHUTDOWN_ZERO_BURST if self._client is not None else 0):
-                    self._send(0.0, 0.0, 0.0)      # never raises
-                    if i < SHUTDOWN_ZERO_BURST - 1 and burst_gap_s:
-                        try:
-                            time.sleep(burst_gap_s)
-                        except BaseException:
-                            self.shutdown_interrupted = True
-            finally:
-                if got:
+            for i in range(SHUTDOWN_ZERO_BURST if self._client is not None else 0):
+                try:
+                    self._send(0.0, 0.0, 0.0)
+                except BaseException:
+                    self.shutdown_interrupted = True
+                if i < SHUTDOWN_ZERO_BURST - 1 and burst_gap_s:
+                    try:
+                        time.sleep(burst_gap_s)
+                    except BaseException:
+                        self.shutdown_interrupted = True
+        finally:
+            if got:
+                try:
                     self._rpc_lock.release()
+                except BaseException:
+                    pass
+            self._finish_shutdown(join_timeout_s)
+
+    def _finish_shutdown(self, join_timeout_s):
+        try:
             if self._thread is not None:
                 try:
                     self._thread.join(max(0.0, join_timeout_s))
@@ -461,17 +478,26 @@ class G1dAgvController:
                     self.shutdown_interrupted = True
                 if self._thread.is_alive():
                     # A stuck RPC: the sender re-checks _closed when it returns
-                    # and then sends its own final zero pair (see tick()).
+                    # and then sends its own final zero pair (see tick()), as
+                    # long as the process is still alive.
                     self.sender_alive_after_join = True
                     self._safe_warn("[agv] sender thread still blocked in an RPC after shutdown join; "
-                                    "it will send a final zero when the RPC returns")
+                                    "it will send a final zero when the RPC returns (if the process lives)")
+        except BaseException:
+            self.shutdown_interrupted = True
+        try:
             with self._lock:
                 self._sent = [0.0, 0.0, 0.0, 0.0]
                 self._reason = self._column_reason = "shutdown"
+        except BaseException:
+            pass
+        try:
             if self.height is not None:
                 self.height.close()
-        except BaseException as error:
-            self._safe_warn(f"[agv] shutdown error: {type(error).__name__}: {error}")
+        except BaseException:
+            pass
+        if self.shutdown_interrupted:
+            self._safe_warn("[agv] shutdown was interrupted (Ctrl-C); zero burst and cleanup still completed")
 
     # ---------------------------------------------------- telemetry
     def snapshot(self, now=None):
