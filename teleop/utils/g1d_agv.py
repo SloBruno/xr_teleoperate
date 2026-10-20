@@ -252,8 +252,10 @@ class G1dAgvController:
         self.nonzero_move_codes = 0
         self.nonzero_height_codes = 0
         self.rpc_exceptions = 0
-        self._logged_errors = 0
+        self._logged_errors = {}             # per RPC kind log budget
         self.shutdown_reason = None
+        self.shutdown_interrupted = False
+        self.sender_alive_after_join = False
 
     # ---------------------------------------------------- lifecycle
     def start_feedback(self):
@@ -329,37 +331,58 @@ class G1dAgvController:
             if height is None or not height.is_fresh(now):
                 vz, column_reason = 0.0, "height_stale"
         with self._rpc_lock:
-            with self._lock:
-                if self._closed:
-                    return
+            if self._is_closed():
+                return
             self._send(vx, vyaw, vz)
+            if (vx or vyaw or vz) and self._is_closed():
+                # Shutdown decided while this RPC was in flight (it may have
+                # timed out waiting for this lock): the stuck sender itself
+                # sends the last word, a zero pair.
+                self._send(0.0, 0.0, 0.0)
+                return
         with self._lock:
             self._sent = [vx, 0.0, vyaw, vz]
             self._reason, self._column_reason = reason, column_reason
             self.ticks += 1
 
+    def _is_closed(self):
+        with self._lock:
+            return self._closed
+
     def _send(self, vx, vyaw, vz):
+        """Move then HeightAdjust. Never raises (KeyboardInterrupt included,
+        so a second Ctrl-C cannot cut a zero burst short). A non-zero column
+        command is replaced by zero if shutdown was decided meanwhile."""
         client = self._client
         if client is None:
             return
         try:
             code = client.Move(vx, 0.0, vyaw)
             self._record("move", code)
-        except Exception as error:
+        except BaseException as error:
             self._record_exception("Move", error)
+        if vz and self._is_closed():
+            vz = 0.0
         try:
             code = client.HeightAdjust(vz)
             self._record("height", code)
-        except Exception as error:
+        except BaseException as error:
             self._record_exception("HeightAdjust", error)
+
+    def _log_budget(self, kind):
+        # Caller holds self._lock.
+        used = self._logged_errors.get(kind, 0)
+        if used >= MAX_LOGGED_RPC_ERRORS:
+            return False
+        self._logged_errors[kind] = used + 1
+        return True
 
     def _record(self, kind, code):
         with self._lock:
             setattr(self, f"{kind}_code", code)
             if code != 0:
                 setattr(self, f"nonzero_{kind}_codes", getattr(self, f"nonzero_{kind}_codes") + 1)
-                log = self._logged_errors < MAX_LOGGED_RPC_ERRORS
-                self._logged_errors += log
+                log = self._log_budget(kind)
             else:
                 log = False
         if log:
@@ -368,10 +391,24 @@ class G1dAgvController:
     def _record_exception(self, name, error):
         with self._lock:
             self.rpc_exceptions += 1
-            log = self._logged_errors < MAX_LOGGED_RPC_ERRORS
-            self._logged_errors += log
+            if isinstance(error, KeyboardInterrupt):
+                self.shutdown_interrupted = True
+            log = self._log_budget(name)
         if log:
             self._safe_warn(f"[agv] {name} raised {type(error).__name__}: {error}")
+
+    def _tick_safely(self):
+        """Sender-thread tick; if it fails before sending, command zero."""
+        try:
+            self.tick()
+        except BaseException as error:
+            self._record_exception("tick", error)
+            with self._rpc_lock:
+                if not self._is_closed():
+                    self._send(0.0, 0.0, 0.0)
+                    with self._lock:
+                        self._sent = [0.0, 0.0, 0.0, 0.0]
+                        self._reason = self._column_reason = "tick_error"
 
     def _safe_warn(self, message):
         try:
@@ -382,10 +419,7 @@ class G1dAgvController:
     def _loop(self):
         nxt = time.monotonic()
         while not self._stop.is_set():
-            try:
-                self.tick()
-            except Exception as error:
-                self._record_exception("tick", error)
+            self._tick_safely()
             nxt += self._period
             delay = nxt - time.monotonic()
             if delay < -self._period:     # overrun: do not burst to catch up
@@ -404,17 +438,33 @@ class G1dAgvController:
                 self._target = (0.0, 0.0, 0.0)
                 self.shutdown_reason = reason
             self._stop.set()
-            got = self._rpc_lock.acquire(timeout=max(0.0, join_timeout_s))
+            got = False
+            try:
+                got = self._rpc_lock.acquire(timeout=max(0.0, join_timeout_s))
+            except BaseException:
+                self.shutdown_interrupted = True
             try:
                 for i in range(SHUTDOWN_ZERO_BURST if self._client is not None else 0):
-                    self._send(0.0, 0.0, 0.0)
+                    self._send(0.0, 0.0, 0.0)      # never raises
                     if i < SHUTDOWN_ZERO_BURST - 1 and burst_gap_s:
-                        time.sleep(burst_gap_s)
+                        try:
+                            time.sleep(burst_gap_s)
+                        except BaseException:
+                            self.shutdown_interrupted = True
             finally:
                 if got:
                     self._rpc_lock.release()
             if self._thread is not None:
-                self._thread.join(max(0.0, join_timeout_s))
+                try:
+                    self._thread.join(max(0.0, join_timeout_s))
+                except BaseException:
+                    self.shutdown_interrupted = True
+                if self._thread.is_alive():
+                    # A stuck RPC: the sender re-checks _closed when it returns
+                    # and then sends its own final zero pair (see tick()).
+                    self.sender_alive_after_join = True
+                    self._safe_warn("[agv] sender thread still blocked in an RPC after shutdown join; "
+                                    "it will send a final zero when the RPC returns")
             with self._lock:
                 self._sent = [0.0, 0.0, 0.0, 0.0]
                 self._reason = self._column_reason = "shutdown"
@@ -453,4 +503,6 @@ class G1dAgvController:
                 "max_vyaw": self.max_vyaw,
                 "sender_alive": self.sender_alive(),
                 "shutdown_reason": self.shutdown_reason,
+                "shutdown_interrupted": self.shutdown_interrupted,
+                "sender_alive_after_join": self.sender_alive_after_join,
             }

@@ -341,7 +341,7 @@ def test_rpc_errors_are_counted_and_first_ones_logged_from_sender():
     snap = ctrl.snapshot()
     assert snap["move_code"] == 9102 and snap["height_code"] == 9103
     assert snap["nonzero_move_codes"] == 20 and snap["nonzero_height_codes"] == 20
-    assert 1 <= len(warnings) <= agv.MAX_LOGGED_RPC_ERRORS
+    assert 1 <= len(warnings) <= 2 * agv.MAX_LOGGED_RPC_ERRORS  # per-kind budget
     assert any("9102" in w for w in warnings)
 
 
@@ -390,7 +390,7 @@ def test_real_thread_runs_about_20hz_and_submit_never_blocks_on_rpc():
             ctrl.submit((0.0, -1.0), (0.0, -1.0), time.monotonic())
             worst = max(worst, time.perf_counter() - t0)
             time.sleep(0.01)
-        assert worst < 0.01, worst
+        assert worst < 0.05, worst   # RPC takes 0.2 s; submit must not wait for it
     finally:
         t0 = time.monotonic()
         ctrl.shutdown("test", join_timeout_s=0.5, burst_gap_s=0.0)
@@ -452,3 +452,127 @@ def test_client_works_over_the_real_sdk_client_class(monkeypatch):
     assert (1001, {"vx": 0.3, "vy": 0.0, "vyaw": 0.1}) in sent
     assert (1002, {"data": -0.4}) in sent
     assert isinstance(code, int) and code != 0
+
+
+# ------------------------------------------------------------------ review fixes
+def test_sender_blocked_past_shutdown_timeout_still_ends_with_zeros():
+    """F1: an in-flight sender RPC must not be the last word after shutdown."""
+    gate = threading.Event()
+    entered = threading.Event()
+    calls = []
+
+    class Blocking(FakeAgvClient):
+        def Move(self, vx, vy, vyaw):
+            if vx != 0.0 and not gate.is_set():
+                entered.set()
+                gate.wait(2.0)            # robot/DDS hang longer than the lock wait
+            calls.append(("move", vx, vy, vyaw))
+            return 0
+
+        def HeightAdjust(self, vz):
+            calls.append(("height", vz))
+            return 0
+
+    clock = Clock()
+    ctrl = agv.G1dAgvController(max_vx=0.6, client_factory=Blocking, height_factory=lambda: FakeHeight(),
+                                armed_fn=lambda: True, clock=clock)
+    ctrl.start_feedback()
+    ctrl.activate(start_thread=False)
+    ctrl.submit((0.0, -1.0), (0.0, -1.0), clock.t)
+    t = threading.Thread(target=ctrl.tick)
+    t.start()
+    assert entered.wait(1.0)
+    stopper = threading.Thread(target=lambda: ctrl.shutdown("q", join_timeout_s=0.05, burst_gap_s=0.0))
+    stopper.start()
+    time.sleep(0.2)
+    gate.set()                            # stuck sender resumes after the burst
+    t.join(2.0)
+    stopper.join(2.0)
+    assert not t.is_alive() and not stopper.is_alive()
+    moves = [c for c in calls if c[0] == "move"]
+    heights = [c for c in calls if c[0] == "height"]
+    assert moves[-1] == ("move", 0.0, 0.0, 0.0), calls
+    assert heights[-1] == ("height", 0.0), calls
+    assert ("height", 1.0) not in heights  # column RPC after a closed decision is replaced by zero
+
+
+def test_keyboard_interrupt_during_shutdown_burst_still_sends_all_zeros_and_closes():
+    """F2: a second Ctrl-C must not cut the zero burst short (shutdown never raises
+    so teleop's arm cleanup that follows is not skipped)."""
+    raised = []
+
+    class Interrupting(FakeAgvClient):
+        def Move(self, vx, vy, vyaw):
+            if not raised:
+                raised.append(1)
+                raise KeyboardInterrupt
+            return super().Move(vx, vy, vyaw)
+
+    ctrl, client, height, _, clock = _ctrl(client=Interrupting())
+    ctrl.start_feedback()
+    ctrl.activate(start_thread=False)
+    ctrl.shutdown("q", burst_gap_s=0.0)
+    assert raised
+    assert ("move", 0.0, 0.0, 0.0) in client.calls
+    assert client.calls[-1] == ("height", 0.0)
+    assert height.closed is True
+
+
+def test_keyboard_interrupt_in_burst_sleep_is_contained(monkeypatch):
+    ctrl, client, height, _, clock = _ctrl()
+    ctrl.start_feedback()
+    ctrl.activate(start_thread=False)
+    real_sleep = time.sleep
+
+    def sleep(s):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(agv.time, "sleep", sleep)
+    ctrl.shutdown("q", burst_gap_s=0.05)
+    monkeypatch.setattr(agv.time, "sleep", real_sleep)
+    assert [c for c in client.calls if c[0] == "move"][-1] == ("move", 0.0, 0.0, 0.0)
+    assert height.closed is True
+
+
+def test_tick_failure_falls_back_to_zero_send():
+    """F5: a tick that raises before sending must still command zero."""
+    ctrl, client, _, state, clock = _ctrl()
+    ctrl.start_feedback()
+    ctrl.activate(start_thread=False)
+    ctrl.submit((0.0, -1.0), (0.0, -1.0), clock.t)
+    ctrl.tick()
+    assert _last(client, "move") == ("move", 0.6, 0.0, 0.0)
+
+    class BadHeight(FakeHeight):
+        def is_fresh(self, now=None):
+            raise RuntimeError("boom")
+    ctrl.height = BadHeight()
+    ctrl._tick_safely()
+    assert _last(client, "move") == ("move", 0.0, 0.0, 0.0)
+    assert _last(client, "height") == ("height", 0.0)
+    assert ctrl.snapshot()["rpc_exceptions"] >= 1
+
+
+@pytest.mark.parametrize("offset", [+0.05, +5.0])
+def test_future_dated_controller_sample_is_stale_in_submit_and_tick(offset):
+    ctrl, client, _, _, clock = _ctrl()
+    ctrl.start_feedback()
+    ctrl.activate(start_thread=False)
+    snap = ctrl.submit((0.0, -1.0), (0.0, -1.0), clock.t + offset)
+    assert snap["reason"] == "controller_stale" and snap["target"] == [0.0, 0.0, 0.0]
+    ctrl._target, ctrl._sample_t = (0.6, 0.0, 1.0), clock.t + offset   # force a bad stored sample
+    ctrl.tick()
+    assert _last(client, "move") == ("move", 0.0, 0.0, 0.0)
+    assert _last(client, "height") == ("height", 0.0)
+
+
+def test_error_log_budget_is_per_rpc_kind():
+    warnings = []
+    client = FakeAgvClient(move_code=9102, height_code=0)
+    ctrl, client, _, _, clock = _ctrl(client=client, warn=warnings.append)
+    ctrl.start_feedback()
+    ctrl.activate(start_thread=False)
+    for _ in range(20):
+        ctrl.tick()
+    client.height_code = 9103
+    ctrl.tick()
+    assert any("9103" in w for w in warnings), warnings

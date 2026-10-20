@@ -518,6 +518,8 @@ if __name__ == '__main__':
         parser.error("G1D is arm-only; --motion is not supported.")
     if args.g1d_agv and args.arm != "G1D":
         parser.error("--g1d-agv is only valid with --arm G1D.")
+    if args.g1d_agv and os.environ.get("G1D_AGV") != "1":
+        parser.error("--g1d-agv is launcher-controlled: set G1D_AGV=1 (run_g1d_quest_dex3.sh).")
     agv_max_vx = None
     if args.g1d_agv:
         try:

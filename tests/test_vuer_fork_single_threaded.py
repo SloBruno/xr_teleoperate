@@ -204,7 +204,7 @@ def _run_main(tmp_path, argv, extra_env=None):
 
 @pytest.mark.parametrize("mode", sorted(MODES))
 def test_televuer_forks_while_process_is_single_threaded(tmp_path, mode):
-    rec = _run_main(tmp_path, MODES[mode])
+    rec = _run_main(tmp_path, MODES[mode], {"G1D_AGV": "1"} if mode.endswith("_agv") else None)
     assert "at_fork" in rec, rec
     at_fork = rec["at_fork"]
     assert at_fork["py_threads"] == 1, at_fork
@@ -258,7 +258,7 @@ def test_no_video_keeps_passthrough_wrapper(tmp_path):
 
 @pytest.mark.parametrize("mode", ["head_agv", "vertical_agv", "no_video_agv"])
 def test_g1d_agv_creates_its_height_reader_only_after_fork_and_dds(tmp_path, mode):
-    rec = _run_main(tmp_path, MODES[mode])
+    rec = _run_main(tmp_path, MODES[mode], {"G1D_AGV": "1"})
     events = rec["events"]
     assert rec["at_fork"]["py_threads"] == 1, rec["at_fork"]
     assert "subscriber:rt/hispeed_state" in events, events

@@ -73,7 +73,7 @@ case "$G1D_AGV" in
             echo "G1D launcher: G1D_AGV_MAX_VX must be a number in (0, 1.5] m/s." >&2
             exit 2
         fi
-        export G1D_AGV_MAX_VX
+        export G1D_AGV G1D_AGV_MAX_VX
         g1d_agv_args=(--g1d-agv)
         echo "G1D AGV ENABLED: left stick = base (G1D_AGV_MAX_VX=$G1D_AGV_MAX_VX m/s, turn 0.6 rad/s), right stick = lift column; active only after r."
         ;;

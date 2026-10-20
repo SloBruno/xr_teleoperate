@@ -207,6 +207,10 @@ def _run(monkeypatch, tmp_path, script, *, agv=True, extra_env=None):
     monkeypatch.setattr(xvp, "require_single_threaded_for_fork", lambda: None)
     monkeypatch.setenv("XR_TELEOP_STATUS_LOG", str(tmp_path / "status.jsonl"))
     monkeypatch.setenv("XR_TELEOP_POSE_LOG_DIR", str(tmp_path))
+    if agv:
+        monkeypatch.setenv("G1D_AGV", "1")
+    else:
+        monkeypatch.delenv("G1D_AGV", raising=False)
     for k, v in (extra_env or {}).items():
         monkeypatch.setenv(k, v)
     argv = BASE_ARGV + (["--g1d-agv"] if agv else [])
@@ -299,6 +303,21 @@ def test_invalid_env_cap_refuses_before_anything_runs(monkeypatch, tmp_path, cap
     with pytest.raises(SystemExit):
         _run(monkeypatch, tmp_path, lambda i: {"q": True}, extra_env={"G1D_AGV_MAX_VX": bad})
     assert "G1D_AGV_MAX_VX" in capsys.readouterr().err
+
+
+def test_flag_without_launcher_env_is_refused(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("G1D_AGV", raising=False)
+    monkeypatch.setattr(sys, "argv", BASE_ARGV + ["--g1d-agv"])
+    with pytest.raises(SystemExit):
+        _run_parse_only(monkeypatch)
+    assert "launcher-controlled" in capsys.readouterr().err
+
+
+def test_agv_zeroes_before_arm_cleanup_even_if_loop_raises_keyboardinterrupt(monkeypatch, tmp_path):
+    log, calls, _ = _run(monkeypatch, tmp_path, _forward_then(10, lambda i: {"raise": KeyboardInterrupt()}))
+    assert _moves(calls)[-1][3:] == (0.0, 0.0, 0.0)
+    last_agv = max(i for i, e in enumerate(log) if e == "agv_move")
+    assert last_agv < log.index("arm_shutdown") < log.index("ipc_stop") < log.index("tv_close")
 
 
 def test_flag_rejected_for_non_g1d_arm(monkeypatch, tmp_path, capsys):
