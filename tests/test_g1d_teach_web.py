@@ -230,6 +230,45 @@ def test_web_replay_exposes_finite_repeat_and_continuous_modes(fake, tmp_path):
     assert session.calls[-1][3:] == (1, True)
 
 
+@pytest.mark.parametrize("repeat", [True, False, 1.0, "1", 0, 101])
+def test_web_replay_rejects_non_integral_or_out_of_range_repeat(fake, tmp_path, repeat):
+    _session, panel = fake
+    path = write_recording(tmp_path / "repeat.jsonl", [0.0, 0.02], np.zeros((2, 14)),
+                           {"left": np.zeros((2, 7)), "right": np.zeros((2, 7))})
+
+    assert call(panel, "POST", "/api/replay", {"name": path.name, "repeat": repeat})[0] == 400
+
+
+@pytest.mark.parametrize("repeat", [1, 100])
+def test_web_replay_accepts_repeat_boundaries(fake, tmp_path, repeat):
+    session, panel = fake
+    path = write_recording(tmp_path / "repeat.jsonl", [0.0, 0.02], np.zeros((2, 14)),
+                           {"left": np.zeros((2, 7)), "right": np.zeros((2, 7))})
+
+    assert call(panel, "POST", "/api/replay", {"name": path.name, "repeat": repeat})[0] == 202
+    assert wait_until(lambda: len(session.calls) == 1)
+    assert session.calls[-1][3:] == (repeat, False)
+
+
+def test_web_replay_continuous_remains_unbounded_until_stop(fake, tmp_path):
+    session, panel = fake
+    path = write_recording(tmp_path / "repeat.jsonl", [0.0, 0.02], np.zeros((2, 14)),
+                           {"left": np.zeros((2, 7)), "right": np.zeros((2, 7))})
+
+    assert call(panel, "POST", "/api/replay", {"name": path.name, "continuous": True})[0] == 202
+    assert wait_until(lambda: len(session.calls) == 1)
+    assert session.calls[-1][3:] == (1, True)
+
+
+def test_web_page_documents_and_limits_finite_repeats(fake):
+    _session, panel = fake
+    status, body = call(panel, "GET", "/")
+
+    assert status == 200
+    assert 'type="number" min="1" max="100"' in body
+    assert "repetições finitas: de 1 a 100" in body.lower()
+
+
 def test_status_reports_mode_message_freshness_and_controller(fake):
     session, panel = fake
     session.mode = tr.Mode.HOLD

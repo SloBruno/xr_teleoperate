@@ -33,7 +33,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from teleop.utils.teach_replay import DEX3_LIMITS, RecordingError, load_recording
+from teleop.utils.teach_replay import (DEX3_LIMITS, RecordingError, load_recording,
+                                        validate_replay_repeat)
 
 DEFAULT_PORT = 8095
 CONTROLLER_TIMEOUT_S = 3.0
@@ -521,8 +522,8 @@ class _Handler(BaseHTTPRequestHandler):
                         return self._send(404, {"ok": False, "error": "gravação não encontrada"})
                     arg = str(target)
                 try:
-                    repeat = int(body.get("repeat", 1))
-                except (TypeError, ValueError):
+                    repeat = validate_replay_repeat(body.get("repeat", 1))
+                except ValueError:
                     raise NameError_("repetições inválidas")
                 continuous = body.get("continuous", False)
                 if not isinstance(continuous, bool) or repeat < 1 or (continuous and repeat != 1):
@@ -617,8 +618,9 @@ small{color:#999}
  <button id="teach">Ensinar (r)</button>
  <button id="save">Salvar (s)</button>
  <button id="replay">Reproduzir (p)</button>
- <label>Repetições <input id="repeat" type="number" min="1" value="1" style="width:5em"></label>
+ <label>Repetições <input id="repeat" type="number" min="1" max="100" value="1" style="width:5em"></label>
  <label><input id="continuous" type="checkbox"> Repetir continuamente</label>
+ <small>Repetições finitas: de 1 a 100; contínuo permanece até PARAR.</small>
 </div>
 <div class="card"><b>Enviar gravação</b><br><input id="uploadfile" type="file" accept=".jsonl">
  <button id="upload">Enviar</button><small>Limite: 16 MiB; a gravação é validada antes de aparecer na lista.</small></div>

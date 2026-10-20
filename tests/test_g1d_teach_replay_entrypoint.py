@@ -1,6 +1,7 @@
 """Teach/replay entrypoint + launcher: key mapping, stop precedence, isolation."""
 import ast
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -237,6 +238,58 @@ def test_launcher_state_recovery_returns_only_existing_full_web_url(tmp_path, mo
         panel.stop()
 
 
+@pytest.mark.parametrize("alter", [
+    lambda module, state: state.update(proc_start_time=state["proc_start_time"] + 1),
+    lambda module, state: state.update(argv=state["argv"] + ["--altered"]),
+])
+def test_launcher_state_recovery_rejects_exact_identity_changes(tmp_path, alter):
+    module = _entry()
+    state = tmp_path / "session.json"
+    me = os.getpid()
+    payload = {"pid": me, "proc_start_time": module.proc_start_time(me),
+               "argv": module.current_process_argv(), "port": 0, "token": "secret",
+               "full_url": "", "web_enabled": False, "session_id": "s1"}
+    alter(module, payload)
+    module.write_session_state(state, **payload)
+
+    assert module.recover_existing_session(state, proc_root="/proc", own_pid=me) is None
+    assert not state.exists()
+
+
+def test_launcher_state_write_is_private_after_atomic_replace(tmp_path):
+    module = _entry()
+    state = tmp_path / "session.json"
+    me = os.getpid()
+    module.write_session_state(state, pid=me, proc_start_time=module.proc_start_time(me),
+                               argv=module.current_process_argv(), port=0, token="secret",
+                               full_url="", web_enabled=False, session_id="s1")
+
+    assert stat.S_IMODE(state.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("session_id, pid", [("other", os.getpid()), ("s1", os.getpid() + 1)])
+def test_remove_session_state_preserves_mismatched_owner_or_session(tmp_path, session_id, pid):
+    module = _entry()
+    state = tmp_path / "session.json"
+    module.write_session_state(state, pid=pid, proc_start_time=1, argv=[], port=0, token="secret",
+                               full_url="", web_enabled=False, session_id=session_id)
+
+    module.remove_session_state(state, "s1")
+
+    assert state.exists()
+
+
+def test_valid_no_web_state_requires_and_accepts_exact_process_identity(tmp_path):
+    module = _entry()
+    state = tmp_path / "session.json"
+    me = os.getpid()
+    module.write_session_state(state, pid=me, proc_start_time=module.proc_start_time(me),
+                               argv=module.current_process_argv(), port=0, token="secret",
+                               full_url="", web_enabled=False, session_id="s1")
+
+    assert module.recover_existing_session(state, proc_root="/proc", own_pid=me) == module.NO_WEB_SESSION
+
+
 def test_recovery_requires_live_exact_session_and_token_http_service(tmp_path):
     module = _entry()
     from teleop.utils.teach_web import WebPanel
@@ -254,6 +307,33 @@ def test_recovery_requires_live_exact_session_and_token_http_service(tmp_path):
         panel.session_id = "wrong"
         assert module.recover_existing_session(state, proc_root="/proc", own_pid=me) is None
         assert not state.exists()
+    finally:
+        panel.stop()
+
+
+@pytest.mark.parametrize("full_url", [
+    "http://127.0.0.1:8095/?t=secret&x=extra",
+    "http://127.0.0.1:8095/?t=secret&t=secret",
+    "http://user:pass@127.0.0.1:8095/?t=secret",
+    "http://127.0.0.1:8095/path?t=secret",
+    "http://127.0.0.1:8095/?t=secret#fragment",
+    "http://:8095/?t=secret",
+])
+def test_recovery_rejects_noncanonical_web_url(tmp_path, full_url):
+    module = _entry()
+    from teleop.utils.teach_web import WebPanel
+    class Session:
+        session_id = "s-canonical"
+    panel = WebPanel(Session(), tmp_path, host="127.0.0.1", port=0, token="secret")
+    panel.start()
+    state = tmp_path / "session.json"
+    try:
+        me = os.getpid()
+        module.write_session_state(state, pid=me, proc_start_time=module.proc_start_time(me),
+                                   argv=module.current_process_argv(), port=panel.port, token="secret",
+                                   full_url=full_url.replace("8095", str(panel.port)),
+                                   web_enabled=True, session_id="s-canonical")
+        assert module.recover_existing_session(state, proc_root="/proc", own_pid=me) is None
     finally:
         panel.stop()
 

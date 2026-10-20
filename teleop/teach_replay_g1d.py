@@ -26,7 +26,7 @@ import time
 from contextlib import contextmanager
 from urllib.request import Request, urlopen
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -257,10 +257,11 @@ def recover_existing_session(path=DEFAULT_STATE_PATH, *, proc_root="/proc", own_
             web_enabled = bool(data.get("web_enabled"))
             if web_enabled:
                 parsed = urlsplit(str(data["full_url"]))
-                if parsed.scheme != "http" or parsed.port != int(data["port"]):
+                if (parsed.scheme != "http" or not parsed.hostname or parsed.username is not None
+                        or parsed.password is not None or parsed.path != "/"
+                        or parsed.fragment or parsed.query != f"t={data['token']}"
+                        or parsed.port != int(data["port"])):
                     raise ValueError("panel URL/port mismatch")
-                if parse_qs(parsed.query).get("t", [None])[0] != str(data["token"]):
-                    raise ValueError("panel URL/token mismatch")
             if not data.get("session_id") or not isinstance(data.get("started_at"), (int, float)):
                 raise ValueError("invalid session freshness")
             if pid <= 0 or proc_start_time(pid, proc_root) != int(data["proc_start_time"]):

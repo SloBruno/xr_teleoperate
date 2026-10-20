@@ -61,8 +61,9 @@ Wi-Fi). Abra no celular/Quest/PC — página única, sem internet/CDN. As teclas
 * A perda da página/heartbeat **não** interrompe replay finito ou contínuo.
   Frescura do estado DDS, proteção das mãos, erro de rastreamento, limites,
   ciclo de vida e **PARAR** continuam sendo gates independentes.
-* O painel permite `Repetições` (N) ou `Repetir continuamente`; cada ciclo
-  volta à primeira amostra pela mesma rampa segura a partir da pose medida.
+* O painel permite `Repetições` (N de 1 a 100) ou `Repetir continuamente`; cada
+  ciclo volta à primeira amostra pela mesma rampa segura a partir da pose
+  medida. O modo contínuo permanece sem limite até **PARAR**.
   Upload aceita somente JSONL G1D validado, com limite conservador de **16 MiB**;
   o arquivo é escrito em chunks, validado e promovido atomicamente sem substituir
   outro arquivo. Upload nunca inicia replay.

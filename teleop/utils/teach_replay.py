@@ -27,6 +27,7 @@ from __future__ import annotations
 import enum
 import json
 import math
+import numbers
 import os
 import queue
 import tempfile
@@ -69,6 +70,17 @@ SMOOTHSTEP_PEAK_FACTOR = 1.5   # max d/ds of 3s^2 - 2s^3
 # A DDS callback may stamp a sample just after the tick took its time
 # reference; accept that small monotonic skew instead of a false "stale".
 STATE_FUTURE_SKEW_S = 0.01
+MAX_REPLAY_REPEAT = 100
+
+
+def validate_replay_repeat(repeat) -> int:
+    """Return a finite replay count, rejecting coercive/non-integral inputs."""
+    if isinstance(repeat, bool) or not isinstance(repeat, numbers.Integral):
+        raise ValueError("invalid replay repeat")
+    repeat = int(repeat)
+    if not 1 <= repeat <= MAX_REPLAY_REPEAT:
+        raise ValueError("invalid replay repeat")
+    return repeat
 
 
 class RecordingError(ValueError):
@@ -647,8 +659,8 @@ class TeachReplaySession:
     def request_replay(self, name: str | None, *, origin: str = "terminal",
                        repeat: int = 1, continuous: bool = False) -> bool:
         try:
-            repeat = int(repeat)
-        except (TypeError, ValueError):
+            repeat = validate_replay_repeat(repeat)
+        except ValueError:
             return False
         if repeat < 1 or (continuous and repeat != 1):
             return False

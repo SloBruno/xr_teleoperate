@@ -593,6 +593,32 @@ def test_request_replay_validates_with_session_limits(tmp_path, monkeypatch):
     assert seen["hand_limits"] is tr.DEX3_LIMITS
 
 
+@pytest.mark.parametrize("repeat", [True, False, 1.0, "1", 0, 101])
+def test_request_replay_rejects_non_integral_or_out_of_range_repeat(tmp_path, repeat):
+    session, _io, _clock = make(tmp_path)
+    path = write_recording(tmp_path / "repeat.jsonl", [0.0, 0.02], np.zeros((2, 14)),
+                           {"left": np.zeros((2, 7)), "right": np.zeros((2, 7))})
+
+    assert session.request_replay(path.name, repeat=repeat) is False
+
+
+@pytest.mark.parametrize("repeat", [1, 100])
+def test_request_replay_accepts_repeat_boundaries(tmp_path, repeat):
+    session, _io, _clock = make(tmp_path)
+    path = write_recording(tmp_path / "repeat.jsonl", [0.0, 0.02], np.zeros((2, 14)),
+                           {"left": np.zeros((2, 7)), "right": np.zeros((2, 7))})
+
+    assert session.request_replay(path.name, repeat=repeat) is True
+
+
+def test_request_replay_continuous_remains_unbounded_until_stop(tmp_path):
+    session, _io, _clock = make(tmp_path)
+    path = write_recording(tmp_path / "repeat.jsonl", [0.0, 0.02], np.zeros((2, 14)),
+                           {"left": np.zeros((2, 7)), "right": np.zeros((2, 7))})
+
+    assert session.request_replay(path.name, continuous=True) is True
+
+
 # ---------------------------------------------------------------- lifecycle
 def test_q_before_r_exits_without_any_output(tmp_path):
     session, io, clock = make(tmp_path)
