@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 import math
+import os
+import time
 
 
 @dataclass(frozen=True)
@@ -108,12 +110,26 @@ CAMERA_CONFIG_REQUEST_PORT = 60000
 _SCENE_CAMERA_KEYS = ("image_shape", "binocular", "enable_zmq", "zmq_port")
 
 
-def fetch_camera_config_once(requester_factory, host, port=CAMERA_CONFIG_REQUEST_PORT):
+def _native_thread_count():
+    """Kernel tasks of this process (Linux); None where /proc is unavailable."""
+    try:
+        return len(os.listdir("/proc/self/task"))
+    except OSError:
+        return None
+
+
+def fetch_camera_config_once(requester_factory, host, port=CAMERA_CONFIG_REQUEST_PORT, *,
+                             native_thread_count=_native_thread_count, sleep=time.sleep,
+                             settle_timeout_s=1.0, poll_s=0.01):
     """One-shot camera-config request that leaves no ZMQ context/I/O threads alive.
 
     TeleVuer forks its Vuer server in __init__, so the XR scene must be built
     while this process is single-threaded; a live zmq.Context owns I/O threads.
+    libzmq's I/O threads can still be exiting right after term() returns, so
+    wait (bounded) until the native thread count is back to its pre-request
+    value, and fail closed otherwise.
     """
+    baseline = native_thread_count()
     requester = requester_factory(host, port)
     try:
         config = requester.request()
@@ -122,6 +138,16 @@ def fetch_camera_config_once(requester_factory, host, port=CAMERA_CONFIG_REQUEST
         context = getattr(requester, "_context", None)
         if context is not None and not getattr(context, "closed", True):
             raise RuntimeError("camera-config requester left its ZMQ context alive")
+    if baseline is not None:
+        polls = max(1, math.ceil(settle_timeout_s / poll_s))
+        for _ in range(polls):
+            current = native_thread_count()
+            if current is None or current <= baseline:
+                break
+            sleep(poll_s)
+        else:
+            raise RuntimeError(
+                f"camera-config request left native threads alive ({current} > {baseline})")
     if config is None:
         raise RuntimeError("Failed to get camera configuration.")
     return config
