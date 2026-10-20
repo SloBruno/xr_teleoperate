@@ -220,16 +220,42 @@ def test_exclusive_session_lock_blocks_a_second_instance(tmp_path):
 
 def test_launcher_state_recovery_returns_only_existing_full_web_url(tmp_path, monkeypatch):
     module = _entry()
+    from teleop.utils.teach_web import WebPanel
+    class Session:
+        session_id = "s1"
+    panel = WebPanel(Session(), tmp_path, host="127.0.0.1", port=0, token="secret")
+    panel.start()
     state = tmp_path / "session.json"
-    me = os.getpid()
-    start = module.proc_start_time(me)
-    argv = module.current_process_argv()
-    module.write_session_state(state, pid=me, proc_start_time=start, argv=argv,
-                               port=1234, token="secret", full_url="http://127.0.0.1:1234/?t=secret",
-                               web_enabled=True, session_id="s1")
-    assert module.recover_existing_session(state, proc_root="/proc", own_pid=me) == \
-        "http://127.0.0.1:1234/?t=secret"
-    assert state.exists()
+    try:
+        me = os.getpid()
+        module.write_session_state(state, pid=me, proc_start_time=module.proc_start_time(me),
+                                   argv=module.current_process_argv(), port=panel.port, token="secret",
+                                   full_url=panel.url("127.0.0.1"), web_enabled=True, session_id="s1")
+        assert module.recover_existing_session(state, proc_root="/proc", own_pid=me) == panel.url("127.0.0.1")
+        assert state.exists()
+    finally:
+        panel.stop()
+
+
+def test_recovery_requires_live_exact_session_and_token_http_service(tmp_path):
+    module = _entry()
+    from teleop.utils.teach_web import WebPanel
+    class Session:
+        session_id = "s-live"
+    panel = WebPanel(Session(), tmp_path, host="127.0.0.1", port=0, token="secret")
+    panel.start()
+    state = tmp_path / "session.json"
+    try:
+        me = os.getpid(); start = module.proc_start_time(me); argv = module.current_process_argv()
+        module.write_session_state(state, pid=me, proc_start_time=start, argv=argv,
+                                   port=panel.port, token="secret", full_url=panel.url("127.0.0.1"),
+                                   web_enabled=True, session_id="s-live")
+        assert module.recover_existing_session(state, proc_root="/proc", own_pid=me) == panel.url("127.0.0.1")
+        panel.session_id = "wrong"
+        assert module.recover_existing_session(state, proc_root="/proc", own_pid=me) is None
+        assert not state.exists()
+    finally:
+        panel.stop()
 
 
 def test_launcher_state_recovery_cleans_stale_identity(tmp_path):

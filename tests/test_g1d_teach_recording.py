@@ -36,11 +36,13 @@ def test_writer_persists_header_samples_footer_and_atomic_final_name(tmp_path):
     lines = [json.loads(line) for line in result.path.read_text().splitlines()]
     assert lines[0]["type"] == "header"
     assert lines[0]["schema"] == tr.RECORDING_SCHEMA
+    assert lines[0]["profile"] == "G1D"
     assert lines[0]["rate_hz"] == 50.0
     assert lines[0]["arm_joint_names"] == list(tr.ARM_JOINT_NAMES)
     assert len(lines[0]["arm_joint_names"]) == 14
     assert lines[0]["hand_sides"] == ["left", "right"]
-    assert lines[-1] == {"type": "footer", "status": "saved", "samples": 10, "dropped": 0}
+    assert lines[-1] == {"type": "footer", "status": "saved", "samples": 10, "dropped": 0,
+                          "duration_s": 0.18}
     body = lines[1:-1]
     assert all(item["type"] == "sample" for item in body)
     assert len(body[0]["arm_q"]) == 14 and len(body[0]["left_hand_q"]) == 7
@@ -169,6 +171,59 @@ def test_load_recording_rejects_invalid_rate_and_duration_metadata(tmp_path):
     lines = path.read_text().splitlines(); header = json.loads(lines[0]); header["rate_hz"] = float("nan")
     lines[0] = json.dumps(header); path.write_text("\n".join(lines) + "\n")
     with pytest.raises(tr.RecordingError, match="rate"):
+        tr.load_recording(path)
+
+
+@pytest.mark.parametrize("mutate,reason", [
+    (lambda h, f: h.pop("profile"), "profile"),
+    (lambda h, f: h.__setitem__("profile", "OTHER"), "profile"),
+    (lambda h, f: h.__setitem__("hand_sides", ["right", "left"]), "hand sides"),
+    (lambda h, f: h.__setitem__("hand_sides", ["left", "left"]), "hand sides"),
+])
+def test_load_recording_rejects_incomplete_profile_and_hand_side_schema(tmp_path, mutate, reason):
+    writer = tr.RecordingWriter(tmp_path, _header(), name="strict-header")
+    writer.emit(_sample(0.0)); writer.emit(_sample(0.02))
+    path = writer.close().path
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    mutate(lines[0], lines[-1])
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+    with pytest.raises(tr.RecordingError, match=reason):
+        tr.load_recording(path)
+
+
+@pytest.mark.parametrize("field,value,reason", [
+    ("samples", 99, "samples"),
+    ("samples", -1, "samples"),
+    ("dropped", -1, "dropped"),
+    ("duration_s", float("nan"), "duration"),
+    ("duration_s", 0.0, "duration"),
+])
+def test_load_recording_rejects_bad_footer_metadata(tmp_path, field, value, reason):
+    writer = tr.RecordingWriter(tmp_path, _header(), name="strict-footer")
+    writer.emit(_sample(0.0)); writer.emit(_sample(0.02))
+    path = writer.close().path
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    lines[-1][field] = value
+    path.write_text("\n".join(json.dumps(line, allow_nan=True) for line in lines) + "\n")
+    with pytest.raises(tr.RecordingError, match=reason):
+        tr.load_recording(path)
+
+
+def test_load_recording_rejects_unexpected_record_between_header_and_footer(tmp_path):
+    writer = tr.RecordingWriter(tmp_path, _header(), name="unexpected")
+    writer.emit(_sample(0.0)); writer.emit(_sample(0.02))
+    path = writer.close().path
+    lines = path.read_text().splitlines()
+    lines.insert(-1, json.dumps({"type": "metadata", "x": 1}))
+    path.write_text("\n".join(lines) + "\n")
+    with pytest.raises(tr.RecordingError, match="unexpected"):
+        tr.load_recording(path)
+
+
+def test_load_recording_rejects_non_object_json_record(tmp_path):
+    path = tmp_path / "non-object.jsonl"
+    path.write_text("[]\n")
+    with pytest.raises(tr.RecordingError):
         tr.load_recording(path)
 
 

@@ -23,6 +23,8 @@ import secrets
 import sys
 import threading
 import time
+from contextlib import contextmanager
+from urllib.request import Request, urlopen
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -202,52 +204,80 @@ def write_session_state(path, *, pid, proc_start_time, argv, port, token, full_u
                "port": int(port), "token": str(token), "full_url": str(full_url),
                "web_enabled": bool(web_enabled), "session_id": str(session_id),
                "started_at": time.time()}
-    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    with open(temp, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, sort_keys=True); handle.flush(); os.fsync(handle.fileno())
-    os.chmod(temp, 0o600)
-    os.replace(temp, path)
+    with _state_file_lock(path):
+        temp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        with open(temp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True); handle.flush(); os.fsync(handle.fileno())
+        os.chmod(temp, 0o600)
+        os.replace(temp, path)
+
+
+@contextmanager
+def _state_file_lock(path):
+    import fcntl
+    lock_path = Path(path).with_name(Path(path).name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def remove_session_state(path, session_id):
     path = Path(path)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if data.get("pid") == os.getpid() and data.get("session_id") == session_id:
-            path.unlink()
-    except (OSError, ValueError):
-        pass
+    with _state_file_lock(path):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("pid") == os.getpid() and data.get("session_id") == session_id:
+                path.unlink()
+        except (OSError, ValueError):
+            pass
+
+
+def _probe_live_panel(data):
+    request = Request(f"http://127.0.0.1:{int(data['port'])}/api/session",
+                      headers={"X-Token": str(data["token"])})
+    with urlopen(request, timeout=0.5) as response:
+        if response.status != 200:
+            raise ValueError("panel session probe failed")
+        body = json.loads(response.read().decode("utf-8"))
+    if body != {"ok": True, "session_id": str(data["session_id"])}:
+        raise ValueError("panel session mismatch")
 
 
 def recover_existing_session(path=DEFAULT_STATE_PATH, *, proc_root="/proc", own_pid=None):
     path = Path(path)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        pid = int(data["pid"])
-        web_enabled = bool(data.get("web_enabled"))
-        if web_enabled:
-            parsed = urlsplit(str(data["full_url"]))
-            if parsed.scheme != "http" or parsed.port != int(data["port"]):
-                raise ValueError("panel URL/port mismatch")
-            if parse_qs(parsed.query).get("t", [None])[0] != str(data["token"]):
-                raise ValueError("panel URL/token mismatch")
-        if not data.get("session_id") or not isinstance(data.get("started_at"), (int, float)):
-            raise ValueError("invalid session freshness")
-        if own_pid is not None and pid == own_pid:
-            return data["full_url"] if web_enabled else NO_WEB_SESSION
-        if pid <= 0 or proc_start_time(pid, proc_root) != int(data["proc_start_time"]):
-            raise ValueError("stale process identity")
-        if current_process_argv(proc_root, pid) != list(data["argv"]):
-            raise ValueError("process argv changed")
-        if web_enabled and int(data["port"]) <= 0:
-            raise ValueError("invalid session state")
-        return data["full_url"] if web_enabled else NO_WEB_SESSION
-    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+    with _state_file_lock(path):
         try:
-            path.unlink()
-        except OSError:
-            pass
-        return None
+            data = json.loads(path.read_text(encoding="utf-8"))
+            pid = int(data["pid"])
+            web_enabled = bool(data.get("web_enabled"))
+            if web_enabled:
+                parsed = urlsplit(str(data["full_url"]))
+                if parsed.scheme != "http" or parsed.port != int(data["port"]):
+                    raise ValueError("panel URL/port mismatch")
+                if parse_qs(parsed.query).get("t", [None])[0] != str(data["token"]):
+                    raise ValueError("panel URL/token mismatch")
+            if not data.get("session_id") or not isinstance(data.get("started_at"), (int, float)):
+                raise ValueError("invalid session freshness")
+            if pid <= 0 or proc_start_time(pid, proc_root) != int(data["proc_start_time"]):
+                raise ValueError("stale process identity")
+            if current_process_argv(proc_root, pid) != list(data["argv"]):
+                raise ValueError("process argv changed")
+            if web_enabled:
+                if int(data["port"]) <= 0:
+                    raise ValueError("invalid session state")
+                _probe_live_panel(data)
+            return data["full_url"] if web_enabled else NO_WEB_SESSION
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return None
 
 
 def acquire_session_lock(path=DEFAULT_LOCK_PATH):
@@ -304,12 +334,13 @@ def make_freshness_fn(io, sides, clock=time.monotonic):
     return ages
 
 
-def start_web_panel(session, io, sides, teach_dir, port, print_fn=print):
+def start_web_panel(session, io, sides, teach_dir, port, *, session_id=None, print_fn=print):
     """Start the panel; on failure keep the terminal keys only (never abort)."""
     from teleop.utils.teach_web import WebPanel, local_ipv4_addresses
 
     try:
         panel = WebPanel(session, teach_dir, host="0.0.0.0", port=port,
+                         session_id=session_id,
                          freshness_fn=make_freshness_fn(io, sides, getattr(io, "clock", time.monotonic)),
                          arm_lower=getattr(session, "arm_lower", None),
                          arm_upper=getattr(session, "arm_upper", None))
@@ -317,7 +348,8 @@ def start_web_panel(session, io, sides, teach_dir, port, print_fn=print):
     except Exception as exc:
         print_fn(f"[teach] WEB panel NOT started ({type(exc).__name__}: {exc}); terminal keys only.")
         return None
-    addresses = local_ipv4_addresses() or [("?", "<ip-do-robo>")]
+    addresses = local_ipv4_addresses() or [("loopback", "127.0.0.1")]
+    panel.canonical_url = panel.url(addresses[0][1])
     print_fn("[teach] WEB panel (same r/s/p/q; PARAR = q). Open on the phone/Quest/PC:")
     for name, ip in addresses:
         print_fn(f"[teach]   {name:>10}: {panel.url(ip)}")
@@ -386,15 +418,15 @@ def main(argv=None):
         state_line += f" {side}=" + ("ok" if io.hand_state(side) is not None else "MISSING")
     printer(f"[teach] passive (no command publisher). state: {state_line}. Press r, p or q.")
 
-    panel = None
     session_id = secrets.token_urlsafe(18)
+    panel = None
     if args.web is not None:
-        panel = start_web_panel(session, io, sides, teach_dir, args.web,
+        panel = start_web_panel(session, io, sides, teach_dir, args.web, session_id=session_id,
                                 print_fn=lambda m: print(m, flush=True))
     write_session_state(DEFAULT_STATE_PATH, pid=os.getpid(), proc_start_time=proc_start_time(os.getpid()),
                         argv=current_process_argv(), port=panel.port if panel is not None else 0,
                         token=panel.token if panel is not None else "disabled",
-                        full_url=panel.url("127.0.0.1") if panel is not None else "",
+                        full_url=getattr(panel, "canonical_url", "") if panel is not None else "",
                         web_enabled=panel is not None, session_id=session_id)
 
     from sshkeyboard import listen_keyboard, stop_listening

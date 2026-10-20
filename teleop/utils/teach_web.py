@@ -35,7 +35,6 @@ from urllib.parse import parse_qs, urlsplit
 from teleop.utils.teach_replay import DEX3_LIMITS, RecordingError, load_recording
 
 DEFAULT_PORT = 8095
-DEADMAN_S = 1.0
 CONTROLLER_TIMEOUT_S = 3.0
 MAX_BODY = 4096
 MAX_UPLOAD_BYTES = 16 * 1024 * 1024  # conservative documented request/file limit
@@ -121,7 +120,8 @@ def _summarize(path: Path) -> dict:
 
 class WebPanel:
     def __init__(self, session, teach_dir, *, host="0.0.0.0", port=DEFAULT_PORT, token=None,
-                 clock=time.monotonic, freshness_fn=None, deadman_s=DEADMAN_S,
+                 session_id=None,
+                 clock=time.monotonic, freshness_fn=None,
                  controller_timeout_s=CONTROLLER_TIMEOUT_S, queue_size=4,
                  arm_lower=None, arm_upper=None):
         self.session = session
@@ -129,9 +129,9 @@ class WebPanel:
         self.host = host
         self._port = int(port)
         self.token = token or secrets.token_urlsafe(16)
+        self.session_id = session_id or getattr(session, "session_id", None) or secrets.token_urlsafe(18)
         self.clock = clock
         self.freshness_fn = freshness_fn
-        self.deadman_s = float(deadman_s)
         self.controller_timeout_s = float(controller_timeout_s)
         self.arm_lower = arm_lower
         self.arm_upper = arm_upper
@@ -240,11 +240,6 @@ class WebPanel:
                 is_controller = True
             else:
                 is_controller = False
-        if is_controller:
-            try:
-                self.session.feed_web_deadman(self.deadman_s)
-            except Exception:
-                pass
         return is_controller
 
     # ---------------------------------------------------------- recordings
@@ -349,10 +344,14 @@ class WebPanel:
                 stem = Path(filename).stem
                 suffix = Path(filename).suffix
                 index = 0
-                while target.exists():
-                    index += 1
-                    target = self.teach_dir / f"{stem}_{index}{suffix}"
-                os.replace(temp, target)
+                while True:
+                    try:
+                        os.link(temp, target)  # exclusive same-filesystem promotion
+                        temp.unlink()
+                        break
+                    except FileExistsError:
+                        index += 1
+                        target = self.teach_dir / f"{stem}_{index}{suffix}"
             temp = None
             self._summary_cache.clear()
             return 201, {"ok": True, "name": target.name}
@@ -445,9 +444,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(401, TOKEN_REQUIRED_HTML.encode(), "text/html; charset=utf-8")
             return self._send(200, PAGE_HTML.encode(), "text/html; charset=utf-8")
         if not self._token_ok(query):
-            return self._send(401, {"ok": False, "error": "token required"})
+            return self._send(401, {"ok": False, "error": "token necessário"})
         if path == "/api/status":
             return self._send(200, self.panel.status(self._client()))
+        if path == "/api/session":
+            return self._send(200, {"ok": True, "session_id": self.panel.session_id})
         if path == "/api/recordings":
             include = (query.get("all") or ["0"])[0] == "1"
             return self._send(200, {"ok": True, "recordings": self.panel.list_recordings(include)})
@@ -482,7 +483,7 @@ class _Handler(BaseHTTPRequestHandler):
         if path in ("/api/teach", "/api/save"):
             kind = path.rsplit("/", 1)[1]
             if not panel.enqueue(kind):
-                return self._send(503, {"ok": False, "error": "busy"})
+                return self._send(503, {"ok": False, "error": "ocupado"})
             return self._send(202, {"ok": True, "queued": True})
         try:
             if path == "/api/replay":
@@ -503,7 +504,7 @@ class _Handler(BaseHTTPRequestHandler):
                 if not isinstance(continuous, bool) or repeat < 1 or (continuous and repeat != 1):
                     raise NameError_("modo de repetição inválido")
                 if not panel.enqueue("replay", (arg, repeat, continuous)):
-                    return self._send(503, {"ok": False, "error": "busy"})
+                    return self._send(503, {"ok": False, "error": "ocupado"})
                 return self._send(202, {"ok": True, "queued": True})
             if path == "/api/rename":
                 code, payload = panel.rename(body.get("name"), body.get("label"))
@@ -544,7 +545,7 @@ def local_ipv4_addresses():
 TOKEN_REQUIRED_HTML = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>G1D teach</title></head>
 <body style="font-family:sans-serif;background:#111;color:#eee;padding:2em">
-<h2>Token necessário (token required)</h2>
+<h2>Token necessário</h2>
 <p>Abra a URL completa impressa no terminal do robô (com <code>?t=...</code>).</p>
 </body></html>"""
 

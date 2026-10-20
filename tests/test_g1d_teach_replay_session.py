@@ -420,6 +420,20 @@ def test_replay_repeat_count_reramps_safely_between_cycles_and_reports_iteration
     assert any("2/2" in message for message in session.messages)
 
 
+def test_latched_hand_protection_remains_disabled_across_loop_ramp(tmp_path):
+    session, io, clock, path, *_ = _replay_setup(tmp_path, n=4, arm_offset=0.0)
+    io.arm_q = io.arm_q.copy()
+    assert session.request_replay(str(path), repeat=2)
+    session._hand_disabled["left"] = np.array([True, False, False, False, False, False, False])
+    for _ in range(2500):
+        clock.t += DT; session.tick()
+        if session.mode == tr.Mode.HOLD:
+            break
+        if session.mode == tr.Mode.REPLAY_RAMP and session._replay_iteration >= 2:
+            assert np.all(session.io.hand_writes("left")[-1].kp[[0]] == 0.0)
+            break
+
+
 def test_continuous_replay_never_enters_terminal_hold_and_reports_continuous(tmp_path):
     session, io, clock, path, t, arm, left, right = _replay_setup(tmp_path, n=4, arm_offset=0.0)
     io.arm_q = arm[0].copy(); io.hand_q["left"] = left[0].copy(); io.hand_q["right"] = right[0].copy()
@@ -451,7 +465,7 @@ def test_replay_playback_interpolates_and_clamps_step_and_limits(tmp_path):
         arm = arm.copy()
         arm[:, 1] = arm[0, 1] + 0.5 * t            # smooth ramp, 0.5 rad/s
         arm[25:, 2] = arm[0, 2] + 1.0              # 1 rad step in one sample
-        arm[:, 3] = 5.0                             # beyond the upper limit
+        arm[:, 3] = 1.99                            # inside the validated session limit
         return arm
 
     session, io, clock, path, t, arm, left, right = _replay_setup(
@@ -561,6 +575,22 @@ def test_replay_refused_for_stale_state_or_invalid_file(tmp_path):
     session.request_replay(str(bad))
     run(session, clock, 0.05)
     assert session.mode == tr.Mode.IDLE and io.activations == 0
+
+
+def test_request_replay_validates_with_session_limits(tmp_path, monkeypatch):
+    session, io, clock, path, *_ = _replay_setup(tmp_path)
+    seen = {}
+    real = tr.load_recording
+
+    def spy(recording_path, **kwargs):
+        seen.update(kwargs)
+        return real(recording_path, **kwargs)
+
+    monkeypatch.setattr(tr, "load_recording", spy)
+    assert session.request_replay(path.name)
+    np.testing.assert_array_equal(seen["arm_lower"], session.arm_lower)
+    np.testing.assert_array_equal(seen["arm_upper"], session.arm_upper)
+    assert seen["hand_limits"] is tr.DEX3_LIMITS
 
 
 # ---------------------------------------------------------------- lifecycle

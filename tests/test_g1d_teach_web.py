@@ -33,7 +33,6 @@ class FakeSession:
         self.gate = threading.Event()
         self.gate.set()
         self.quit_flag = threading.Event()
-        self.deadman_feeds = 0
         self.busy = {"replay": None, "recording": []}
 
     def request_teach(self):
@@ -59,9 +58,6 @@ class FakeSession:
     @property
     def quit_requested(self):
         return self.quit_flag.is_set()
-
-    def feed_web_deadman(self, timeout_s):
-        self.deadman_feeds += 1
 
     def status_view(self):
         return {"mode": self.mode.value, "message": self.last_message, "messages": [],
@@ -174,6 +170,15 @@ def test_token_accepted_as_query_parameter(fake):
     _, panel = fake
     status, body = call(panel, "GET", f"/api/status?t={TOKEN}", token=None)
     assert status == 200 and body["mode"] == "idle"
+
+
+def test_session_endpoint_is_token_protected_read_only_and_exact(fake):
+    _, panel = fake
+    before = panel._controller
+    status, body = call(panel, "GET", "/api/session")
+    assert status == 200 and body == {"ok": True, "session_id": panel.session_id}
+    assert panel._controller == before
+    assert call(panel, "GET", "/api/session", token="wrong")[0] == 401
 
 
 def test_page_without_token_shows_only_token_required(fake):
@@ -399,6 +404,31 @@ def test_upload_valid_recording_promotes_atomically_and_never_queues_replay(fake
     assert session.calls == []
 
 
+def test_concurrent_uploads_same_name_never_overwrite_each_other(tmp_path):
+    payload_a = saved_file(tmp_path / "a", "20261019T100000_000000Z", n=10).read_bytes()
+    payload_b = saved_file(tmp_path / "b", "20261019T110000_000000Z", n=10).read_bytes()
+    p1 = start_panel(FakeSession(), tmp_path)
+    p2 = start_panel(FakeSession(), tmp_path)
+    results = []
+    barrier = threading.Barrier(2)
+
+    def upload(panel, payload):
+        barrier.wait()
+        results.append(upload_call(panel, "same.jsonl", payload))
+
+    try:
+        threads = [threading.Thread(target=upload, args=(p1, payload_a)),
+                   threading.Thread(target=upload, args=(p2, payload_b))]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join()
+        assert sorted(code for code, _ in results) == [201, 201]
+        names = [body["name"] for _, body in results]
+        assert len(set(names)) == 2
+        assert {(tmp_path / name).read_bytes() for name in names} == {payload_a, payload_b}
+    finally:
+        p1.stop(); p2.stop()
+
+
 @pytest.mark.parametrize("name", ["../evil.jsonl", "/tmp/evil.jsonl", "a/b.jsonl", "evil.txt"])
 def test_upload_rejects_traversal_and_bad_filename_without_partial(fake, tmp_path, name):
     session, panel = fake
@@ -415,6 +445,29 @@ def test_upload_rejects_malformed_recording_and_cleans_partial(fake, tmp_path):
     assert status == 400 and not body["ok"]
     assert session.calls == []
     assert not list(tmp_path.glob("*.part"))
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda records: records[0].__setitem__("profile", "OTHER"),
+    lambda records: records[0].__setitem__("robot", "OTHER"),
+    lambda records: records[0].__setitem__("arm_joint_names", list(reversed(tr.ARM_JOINT_NAMES))),
+    lambda records: records[0].__setitem__("hand_sides", ["right", "left"]),
+    lambda records: records[1].__setitem__("arm_q", [0.0]),
+    lambda records: records[1].__setitem__("arm_q", [99.0] + [0.0] * 13),
+    lambda records: records[1].__setitem__("left_hand_q", [99.0] + [0.0] * 6),
+    lambda records: records[1].__setitem__("t", float("nan")),
+])
+def test_upload_endpoint_rejects_schema_nonfinite_vectors_and_limits(fake, tmp_path, mutate):
+    fake[1].arm_lower = np.full(14, -2.0)
+    fake[1].arm_upper = np.full(14, 2.0)
+    source = saved_file(tmp_path / "source")
+    records = [json.loads(line) for line in source.read_text().splitlines()]
+    mutate(records)
+    payload = ("\n".join(json.dumps(record, allow_nan=True) for record in records) + "\n").encode()
+    status, body = upload_call(fake[1], "rejected.jsonl", payload)
+    assert status == 400 and not body["ok"]
+    assert not (tmp_path / "rejected.jsonl").exists()
+    assert not list(tmp_path.glob(".g1d-upload-*.part"))
 
 
 def test_delete_and_rename_refused_while_replayed_or_recorded(fake, tmp_path):
@@ -441,7 +494,7 @@ def test_session_status_view_names_busy_recordings(tmp_path):
     assert session.status_view()["recording"]["elapsed_s"] == pytest.approx(0.5)
 
 
-# ------------------------------------------------------------------ deadman
+# ------------------------------------------------------------------ replay web authority
 def _long_recording(tmp_path, session, io):
     n = 200                                    # 4 s, slow enough to play at recorded speed
     t = np.arange(n) * 0.02
@@ -455,42 +508,6 @@ def _ticks(session, clock, seconds):
     for _ in range(int(round(seconds / DT))):
         clock.t += DT
         session.tick()
-
-
-def test_web_replay_continues_when_heartbeat_is_missed(tmp_path):
-    session, io, clock = make(tmp_path)
-    path = _long_recording(tmp_path, session, io)
-    panel = start_panel(session, tmp_path)
-    try:
-        call(panel, "GET", "/api/status")
-        assert call(panel, "POST", "/api/replay", {"name": path.name})[0] == 202
-        assert wait_until(lambda: session._pending is not None)
-        _ticks(session, clock, 0.05)
-        assert session.mode == tr.Mode.REPLAY_RAMP
-        for _ in range(4):                     # browser polling keeps it alive
-            call(panel, "GET", "/api/status")
-            _ticks(session, clock, 0.5)
-            assert session.mode in (tr.Mode.REPLAY_RAMP, tr.Mode.REPLAY_PLAY)
-        _ticks(session, clock, 1.1)            # browser gone; replay is independent
-        assert session.mode in (tr.Mode.REPLAY_RAMP, tr.Mode.REPLAY_PLAY)
-        assert "web connection lost" not in session.last_message
-    finally:
-        panel.stop()
-
-
-def test_heartbeat_endpoint_also_feeds_the_deadman(tmp_path):
-    session, io, clock = make(tmp_path)
-    path = _long_recording(tmp_path, session, io)
-    panel = start_panel(session, tmp_path)
-    try:
-        call(panel, "POST", "/api/replay", {"name": path.name})
-        assert wait_until(lambda: session._pending is not None)
-        for _ in range(4):
-            assert call(panel, "POST", "/api/heartbeat", {})[0] == 200
-            _ticks(session, clock, 0.5)
-        assert session.mode in (tr.Mode.REPLAY_RAMP, tr.Mode.REPLAY_PLAY)
-    finally:
-        panel.stop()
 
 
 def test_read_only_client_polling_does_not_stop_replay(tmp_path):
@@ -507,42 +524,6 @@ def test_read_only_client_polling_does_not_stop_replay(tmp_path):
         assert session.mode in (tr.Mode.REPLAY_RAMP, tr.Mode.REPLAY_PLAY)
     finally:
         panel.stop()
-
-
-def test_terminal_replay_is_unaffected_by_the_web_deadman(tmp_path):
-    session, io, clock = make(tmp_path)
-    path = _long_recording(tmp_path, session, io)
-    panel = start_panel(session, tmp_path)
-    try:
-        call(panel, "GET", "/api/status")     # a web client exists but never feeds again
-        assert session.request_replay(str(path))
-        modes = []
-        for _ in range(int(3.0 / DT)):
-            clock.t += DT
-            session.tick()
-            modes.append(session.mode)
-        assert all(m in (tr.Mode.REPLAY_RAMP, tr.Mode.REPLAY_PLAY) for m in modes)
-        assert not any("web connection lost" in m for m in session.messages)
-    finally:
-        panel.stop()
-
-
-def test_queued_web_replay_starts_even_if_connection_was_lost(tmp_path):
-    session, io, clock = make(tmp_path)
-    path = _long_recording(tmp_path, session, io)
-    assert session.request_replay(str(path), origin="web")
-    session.feed_web_deadman(1.0)
-    clock.t += 2.0                     # dispatcher was slow; browser already gone
-    session.tick()
-    assert session.mode == tr.Mode.REPLAY_RAMP and io.activations == 1 and io.writes
-
-
-def test_deadman_in_session_has_no_effect_on_teach(tmp_path):
-    session, io, clock = make(tmp_path)
-    session.feed_web_deadman(1.0)
-    session.request_teach()
-    _ticks(session, clock, 2.0)
-    assert session.mode == tr.Mode.TEACH
 
 
 # ------------------------------------------------------------------ entrypoint wiring
@@ -575,6 +556,7 @@ def test_start_web_panel_prints_tokenized_url_and_survives_port_in_use(tmp_path)
     try:
         assert panel is not None
         assert any(f":{panel.port}/?t={panel.token}" in line for line in lines)
+        assert panel.canonical_url in "\n".join(lines)
         _, body = call(panel, "GET", "/api/status", token=panel.token)
         assert body["fresh"]["arm"] is not None and body["fresh"]["left"] is None
     finally:

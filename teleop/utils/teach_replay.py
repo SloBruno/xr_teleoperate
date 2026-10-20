@@ -126,6 +126,7 @@ def build_header(*, hand_sides: Sequence[str], rate_hz: float, extra: Mapping | 
     header = {
         "type": "header",
         "schema": RECORDING_SCHEMA,
+        "profile": "G1D",
         "robot": "G1D",
         "rate_hz": float(rate_hz),
         "clock": "monotonic_s",
@@ -136,6 +137,7 @@ def build_header(*, hand_sides: Sequence[str], rate_hz: float, extra: Mapping | 
     }
     if extra:
         header.update(dict(extra))
+    header["profile"] = "G1D"
     return header
 
 
@@ -173,6 +175,8 @@ class RecordingWriter:
         self._dropped = 0
         self._done = threading.Event()
         self._result: RecordingResult | None = None
+        self._first_t = None
+        self._last_t = None
         self._open = open_file
         self._thread = threading.Thread(target=self._run, name="teach-recorder", daemon=True)
         self._thread.start()
@@ -252,6 +256,9 @@ class RecordingWriter:
                 try:
                     handle.write(json.dumps(item) + "\n")
                     written += 1
+                    t = float(item["t"])
+                    self._first_t = t if self._first_t is None else self._first_t
+                    self._last_t = t
                 except Exception as exc:
                     error = error or f"{type(exc).__name__}: {exc}"
             with self._lock:
@@ -259,8 +266,10 @@ class RecordingWriter:
             final = None
             if handle is not None:
                 try:
+                    duration = (self._last_t - self._first_t) if written else 0.0
                     handle.write(json.dumps({"type": "footer", "status": status,
-                                             "samples": written, "dropped": dropped}) + "\n")
+                                             "samples": written, "dropped": dropped,
+                                             "duration_s": duration}) + "\n")
                     handle.flush()
                     try:
                         os.fsync(handle.fileno())
@@ -320,10 +329,11 @@ def load_recording(path, *, max_gap_s: float = 0.25, min_samples: int = 2,
         records = [json.loads(line) for line in lines]
     except (OSError, ValueError) as exc:
         raise RecordingError(f"cannot read recording {path}: {exc}") from exc
-    if not records or records[0].get("type") != "header" or records[0].get("schema") != RECORDING_SCHEMA:
+    if (not records or any(not isinstance(record, dict) for record in records)
+            or records[0].get("type") != "header" or records[0].get("schema") != RECORDING_SCHEMA):
         raise RecordingError("missing or unknown header schema")
     header = records[0]
-    if header.get("robot") != "G1D" or header.get("profile", "G1D") != "G1D":
+    if header.get("robot") != "G1D" or header.get("profile") != "G1D":
         raise RecordingError("unsupported robot/profile")
     try:
         rate_hz = float(header["rate_hz"])
@@ -334,7 +344,8 @@ def load_recording(path, *, max_gap_s: float = 0.25, min_samples: int = 2,
     if tuple(header.get("arm_joint_names", ())) != ARM_JOINT_NAMES:
         raise RecordingError("arm joint schema does not match G1D")
     declared_sides = header.get("hand_sides")
-    if not isinstance(declared_sides, list) or any(s not in HAND_SIDES for s in declared_sides):
+    if (not isinstance(declared_sides, list) or len(declared_sides) != len(set(declared_sides))
+            or declared_sides != [s for s in HAND_SIDES if s in declared_sides]):
         raise RecordingError("invalid hand sides")
     hand_names = header.get("hand_joint_names")
     if not isinstance(hand_names, dict) or any(tuple(hand_names.get(s, ())) != HAND_JOINT_NAMES[s]
@@ -345,7 +356,15 @@ def load_recording(path, *, max_gap_s: float = 0.25, min_samples: int = 2,
         raise RecordingError("missing footer (incomplete recording)")
     if footer.get("status") != "saved":
         raise RecordingError(f"footer status is {footer.get('status')!r}, not 'saved'")
-    samples = [r for r in records[1:-1] if r.get("type") == "sample"]
+    if any(r.get("type") != "sample" for r in records[1:-1]):
+        raise RecordingError("unexpected record between header and footer")
+    samples = records[1:-1]
+    if (isinstance(footer.get("samples"), bool) or not isinstance(footer.get("samples"), int)
+            or footer["samples"] < 0 or footer["samples"] != len(samples)):
+        raise RecordingError("invalid footer samples")
+    if (isinstance(footer.get("dropped"), bool) or not isinstance(footer.get("dropped"), int)
+            or footer["dropped"] < 0):
+        raise RecordingError("invalid footer dropped")
     if len(samples) < min_samples:
         raise RecordingError(f"too few samples ({len(samples)})")
     sides = tuple(s for s in HAND_SIDES if s in header.get("hand_sides", []))
@@ -355,6 +374,12 @@ def load_recording(path, *, max_gap_s: float = 0.25, min_samples: int = 2,
         raise RecordingError("sample time missing") from exc
     if not np.all(np.isfinite(t)) or np.any(np.diff(t) <= 0.0):
         raise RecordingError("sample time must be finite and strictly increasing")
+    try:
+        duration = float(footer["duration_s"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RecordingError("invalid footer duration") from exc
+    if not math.isfinite(duration) or duration <= 0.0 or not math.isclose(duration, t[-1] - t[0], rel_tol=1e-9, abs_tol=1e-9):
+        raise RecordingError("invalid footer duration")
     if np.max(np.diff(t)) > max_gap_s:
         raise RecordingError(f"time gap {np.max(np.diff(t)):.3f}s exceeds {max_gap_s}s")
     arm = _finite_matrix([s.get("arm_q") for s in samples], ARM_DOF, "arm_q")
@@ -547,10 +572,8 @@ class TeachReplaySession:
         self.play_start_time = None
         self._quit_deadline = None
         self._protectors = {}
-        # Web panel (optional): which input started the current replay and the
-        # last browser heartbeat as one atomic (session-clock time, timeout) pair.
+        # Web panel (optional): which input started the current replay.
         self._replay_origin = None
-        self._web_deadman = None
         self._writer_name = None
 
     # ---------------------------------------------------------------- input
@@ -581,14 +604,6 @@ class TeachReplaySession:
             self._pending = ("save",)
             return True
 
-    def feed_web_deadman(self, timeout_s: float) -> None:
-        """Lock-free browser heartbeat (single atomic attribute store)."""
-        self._web_deadman = (self.clock(), float(timeout_s))
-
-    def _web_connection_lost(self, now) -> bool:
-        fed = self._web_deadman
-        return fed is None or now - fed[0] > fed[1]
-
     def request_replay(self, name: str | None, *, origin: str = "terminal",
                        repeat: int = 1, continuous: bool = False) -> bool:
         try:
@@ -603,7 +618,8 @@ class TeachReplaySession:
         # File I/O outside the lifecycle lock (never stalls the control tick).
         try:
             path = resolve_replay_path(self.teach_dir, name)
-            recording = load_recording(path)
+            recording = load_recording(path, arm_lower=self.arm_lower, arm_upper=self.arm_upper,
+                                       hand_limits=DEX3_LIMITS)
         except RecordingError as exc:
             with self.lock:
                 return self._refuse_locked(f"REPLAY refused: {exc}")
@@ -1001,7 +1017,12 @@ class TeachReplaySession:
             if enable is not None:
                 mask = np.asarray(enable, dtype=bool)
                 self._latch_disabled(side, enable)
-                cmd = HandCommand(q=cmd.q, kp=np.where(mask, cmd.kp, 0.0), kd=np.where(mask, cmd.kd, 0.0))
+            else:
+                mask = np.ones(HAND_DOF, dtype=bool)
+            disabled = self._hand_disabled.get(side)
+            if disabled is not None:
+                mask = mask & ~np.asarray(disabled, dtype=bool)
+            cmd = HandCommand(q=cmd.q, kp=np.where(mask, cmd.kp, 0.0), kd=np.where(mask, cmd.kd, 0.0))
             self._write_hand(side, cmd)
             # rate limiting continues from the unprotected trajectory point
             self._last_hand_cmd[side] = HandCommand(q=np.asarray(q, dtype=float).copy(), kp=cmd.kp, kd=cmd.kd)
