@@ -25,6 +25,12 @@ export PYTHONPATH=$repo:/home/unitree/unitree_sdk2_python${PYTHONPATH:+:${PYTHON
 teach_python=${TELEIMAGER_PYTHON:-/home/unitree/.local/envs/xr-g1d/bin/python}
 
 cmd=("$teach_python" -s teach_replay_g1d.py --network-interface "$g1d_dds_interface" "$@")
+session_state=$HOME/.local/state/xr_teleoperate/teach_replay.session.json
+if [[ -f "$session_state" ]]; then
+    # The Python entrypoint validates PID/start-time/argv/session identity and
+    # prints only the live URL (or the no-web fact); stale state falls through.
+    exec "${cmd[@]}"
+fi
 echo "G1D TEACH/REPLAY: robot SUPPORTED, area clear, R3/e-stop in reach. Keys: r=teach s=save p=replay q=quit."
 echo "Optional browser panel: add --web [PORT] (default 8095); URL with token is printed below."
 echo "command: ${cmd[*]}"

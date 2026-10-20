@@ -395,6 +395,49 @@ def test_replay_ramp_in_respects_joint_velocity_caps_and_reaches_first_sample(tm
     assert times[-1] - times[0] >= 1.5 * 1.0 / 0.5 - 2 * DT        # smoothstep peak factor
 
 
+def test_replay_repeat_count_reramps_safely_between_cycles_and_reports_iteration(tmp_path):
+    session, io, clock, path, t, arm, left, right = _replay_setup(tmp_path, n=4, arm_offset=0.0)
+    io.arm_q = arm[0].copy(); io.hand_q["left"] = left[0].copy(); io.hand_q["right"] = right[0].copy()
+    assert session.request_replay(str(path), repeat=2)
+    ramp_count = 0; previous = None
+    for _ in range(2000):
+        clock.t += DT; session.tick()
+        if session.mode == tr.Mode.REPLAY_RAMP:
+            if previous != tr.Mode.REPLAY_RAMP:
+                ramp_count += 1
+            previous = session.mode
+        else:
+            previous = session.mode
+        if session.mode == tr.Mode.REPLAY_PLAY:
+            io.arm_q = io.arm_writes()[-1].q.copy()
+            io.hand_q["left"] = io.hand_writes("left")[-1].q.copy()
+            io.hand_q["right"] = io.hand_writes("right")[-1].q.copy()
+        if session.mode == tr.Mode.HOLD:
+            break
+    assert session.mode == tr.Mode.HOLD
+    assert ramp_count == 2
+    assert session.status_view()["replay"] is None
+    assert any("2/2" in message for message in session.messages)
+
+
+def test_continuous_replay_never_enters_terminal_hold_and_reports_continuous(tmp_path):
+    session, io, clock, path, t, arm, left, right = _replay_setup(tmp_path, n=4, arm_offset=0.0)
+    io.arm_q = arm[0].copy(); io.hand_q["left"] = left[0].copy(); io.hand_q["right"] = right[0].copy()
+    assert session.request_replay(str(path), continuous=True)
+    saw_second = False
+    for _ in range(2500):
+        clock.t += DT; session.tick()
+        if getattr(session, "_replay_iteration", 1) >= 2:
+            saw_second = True
+            break
+        if session.mode == tr.Mode.REPLAY_PLAY:
+            io.arm_q = io.arm_writes()[-1].q.copy()
+            io.hand_q["left"] = io.hand_writes("left")[-1].q.copy()
+            io.hand_q["right"] = io.hand_writes("right")[-1].q.copy()
+    assert saw_second and session.mode in (tr.Mode.REPLAY_RAMP, tr.Mode.REPLAY_PLAY)
+    assert session.status_view()["replay"]["total"] is None
+
+
 def test_replay_refused_when_ramp_would_be_too_long(tmp_path):
     session, io, clock, path, *_ = _replay_setup(tmp_path, arm_offset=1.0)
     session.config.ramp_max_s = 1.0

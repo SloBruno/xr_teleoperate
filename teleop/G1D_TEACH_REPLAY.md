@@ -18,7 +18,7 @@ Teclas (terminal interativo):
 |---|---|
 | `r` | TEACH: braços com kp=0, kd pequeno + feed-forward de gravidade (modelo) no q medido; Dex3 kp=0, kd=0.05. Grava q/dq a 50 Hz. |
 | `s` | para de ensinar, salva `~/.local/state/xr_teleoperate/teach/<UTC>.jsonl` e segura a pose (ganhos normais + gravidade). |
-| `p` | REPLAY da última gravação salva (ou `--replay`): rampa ≤0.5 rad/s (braço) / ≤2 rad/s (dedos) até a 1ª amostra, depois reprodução interpolada com limite de passo e de junta; segura a pose final (não volta para casa). |
+| `p` | REPLAY da última gravação salva (ou `--replay`): uma execução; rampa segura ≤0.5 rad/s (braço) / ≤2 rad/s (dedos) até a 1ª amostra, depois reprodução interpolada com limite de passo e de junta; segura a pose final (não volta para casa). |
 | `q` | para tudo: segura a pose medida com gravidade por 2 s e libera as saídas. |
 
 Segurança:
@@ -58,9 +58,17 @@ Wi-Fi). Abra no celular/Quest/PC — página única, sem internet/CDN. As teclas
 * Um navegador controla por vez; outros ficam somente leitura até o primeiro
   ficar >3 s sem consultar. PARAR é aceito de qualquer navegador com token e
   descarta ações web pendentes.
-* Deadman: replay iniciado pela web vai para **HOLD** (não solta, não sai) com
-  "web connection lost" se o navegador controlador ficar >1 s sem consultar.
-  Replay iniciado pela tecla `p` não é afetado.
+* A perda da página/heartbeat **não** interrompe replay finito ou contínuo.
+  Frescura do estado DDS, proteção das mãos, erro de rastreamento, limites,
+  ciclo de vida e **PARAR** continuam sendo gates independentes.
+* O painel permite `Repetições` (N) ou `Repetir continuamente`; cada ciclo
+  volta à primeira amostra pela mesma rampa segura a partir da pose medida.
+  Upload aceita somente JSONL G1D validado, com limite conservador de **16 MiB**;
+  o arquivo é escrito em chunks, validado e promovido atomicamente sem substituir
+  outro arquivo. Upload nunca inicia replay.
+* O estado da sessão fica em `~/.local/state/xr_teleoperate/teach_replay.session.json`
+  com modo 0600. Invocar o launcher novamente para uma sessão viva imprime
+  somente a URL existente (ou informa que não há painel), sem inicializar DDS.
 * O servidor HTTP só enfileira pedidos para os mesmos `request_*` das teclas;
   nunca faz IO/DDS e nunca espera o ciclo de controle. Se a porta estiver
   ocupada, o painel não sobe e o modo terminal segue normal.

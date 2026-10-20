@@ -312,7 +312,8 @@ def _finite_matrix(rows, width, label):
     return array
 
 
-def load_recording(path, *, max_gap_s: float = 0.25, min_samples: int = 2) -> Recording:
+def load_recording(path, *, max_gap_s: float = 0.25, min_samples: int = 2,
+                   arm_lower=None, arm_upper=None, hand_limits=None) -> Recording:
     path = Path(path)
     try:
         lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -322,6 +323,23 @@ def load_recording(path, *, max_gap_s: float = 0.25, min_samples: int = 2) -> Re
     if not records or records[0].get("type") != "header" or records[0].get("schema") != RECORDING_SCHEMA:
         raise RecordingError("missing or unknown header schema")
     header = records[0]
+    if header.get("robot") != "G1D" or header.get("profile", "G1D") != "G1D":
+        raise RecordingError("unsupported robot/profile")
+    try:
+        rate_hz = float(header["rate_hz"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RecordingError("invalid recording rate") from exc
+    if not math.isfinite(rate_hz) or rate_hz <= 0.0:
+        raise RecordingError("invalid recording rate")
+    if tuple(header.get("arm_joint_names", ())) != ARM_JOINT_NAMES:
+        raise RecordingError("arm joint schema does not match G1D")
+    declared_sides = header.get("hand_sides")
+    if not isinstance(declared_sides, list) or any(s not in HAND_SIDES for s in declared_sides):
+        raise RecordingError("invalid hand sides")
+    hand_names = header.get("hand_joint_names")
+    if not isinstance(hand_names, dict) or any(tuple(hand_names.get(s, ())) != HAND_JOINT_NAMES[s]
+                                               for s in HAND_SIDES):
+        raise RecordingError("hand joint schema does not match G1D")
     footer = records[-1]
     if footer.get("type") != "footer":
         raise RecordingError("missing footer (incomplete recording)")
@@ -342,6 +360,23 @@ def load_recording(path, *, max_gap_s: float = 0.25, min_samples: int = 2) -> Re
     arm = _finite_matrix([s.get("arm_q") for s in samples], ARM_DOF, "arm_q")
     hands = {side: _finite_matrix([s.get(f"{side}_hand_q") for s in samples], HAND_DOF, f"{side}_hand_q")
              for side in sides}
+    _finite_matrix([s.get("arm_dq") for s in samples], ARM_DOF, "arm_dq")
+    for side in sides:
+        _finite_matrix([s.get(f"{side}_hand_dq") for s in samples], HAND_DOF, f"{side}_hand_dq")
+    if arm_lower is not None or arm_upper is not None:
+        lo, hi = _finite_matrix([arm_lower], ARM_DOF, "arm_lower")[0], _finite_matrix([arm_upper], ARM_DOF, "arm_upper")[0]
+        if np.any(lo >= hi) or np.any(arm < lo) or np.any(arm > hi):
+            raise RecordingError("arm joint limit violation")
+    if hand_limits is not None:
+        for side, values in hands.items():
+            try:
+                lo, hi = hand_limits[side]
+            except (KeyError, TypeError) as exc:
+                raise RecordingError(f"missing {side} hand limits") from exc
+            lo = _finite_matrix([lo], HAND_DOF, f"{side} lower limit")[0]
+            hi = _finite_matrix([hi], HAND_DOF, f"{side} upper limit")[0]
+            if np.any(lo >= hi) or np.any(values < lo) or np.any(values > hi):
+                raise RecordingError(f"{side} hand joint limit violation")
     return Recording(path=path, header=header, t=t - t[0], arm_q=arm, hand_q=hands, hand_sides=sides)
 
 
@@ -554,7 +589,14 @@ class TeachReplaySession:
         fed = self._web_deadman
         return fed is None or now - fed[0] > fed[1]
 
-    def request_replay(self, name: str | None, *, origin: str = "terminal") -> bool:
+    def request_replay(self, name: str | None, *, origin: str = "terminal",
+                       repeat: int = 1, continuous: bool = False) -> bool:
+        try:
+            repeat = int(repeat)
+        except (TypeError, ValueError):
+            return False
+        if repeat < 1 or (continuous and repeat != 1):
+            return False
         with self.lock:
             if self._quit.is_set() or self.mode not in (Mode.IDLE, Mode.HOLD) or self._pending:
                 return self._refuse_locked("p ignored in mode " + self.mode.value)
@@ -568,7 +610,7 @@ class TeachReplaySession:
         with self.lock:
             if self._quit.is_set() or self.mode not in (Mode.IDLE, Mode.HOLD) or self._pending:
                 return self._refuse_locked("p ignored in mode " + self.mode.value)
-            self._pending = ("replay", recording, origin)
+            self._pending = ("replay", recording, origin, repeat, bool(continuous))
             return True
 
     # -------------------------------------------------------------- helpers
@@ -835,10 +877,8 @@ class TeachReplaySession:
             "hand_start": {s: hands[s].q.copy() for s in hand_goal}, "hand_goal": hand_goal,
         }, None
 
-    def _start_replay(self, now, recording: Recording, origin: str = "terminal"):
-        if origin == "web" and self._web_connection_lost(now):
-            self._say("REPLAY refused: web connection lost")
-            return
+    def _start_replay(self, now, recording: Recording, origin: str = "terminal",
+                      repeat: int = 1, continuous: bool = False):
         missing = [s for s in self.config.hand_sides if s not in recording.hand_sides]
         if missing:
             self._say(f"REPLAY refused: recording has no data for hand(s) {missing}")
@@ -871,15 +911,19 @@ class TeachReplaySession:
         self._ramp = ramp
         self._recording = recording
         self._replay_origin = origin
+        self._replay_iteration = 1
+        self._replay_total = None if continuous else int(repeat)
+        self._replay_continuous = bool(continuous)
         self._play_t = time_warp(recording.t, recording.arm_q,
                                  {s: recording.hand_q[s] for s in self.config.hand_sides},
                                  self.config.replay_arm_vmax, self.config.replay_hand_vmax)
         if not self._protectors:
             self._protectors = self._make_protectors()
         self.mode = Mode.REPLAY_RAMP
+        total_text = "contínuo" if continuous else f"1/{repeat}"
         self._say(f"REPLAY: {recording.path.name} ({recording.duration:.1f}s taught, "
                   f"{self._play_t[-1]:.1f}s at <={self.config.replay_arm_vmax} rad/s); ramp-in "
-                  f"{ramp['duration']:.1f}s at <={self.config.ramp_arm_vmax} rad/s. 'q' stops.")
+                  f"{ramp['duration']:.1f}s at <={self.config.ramp_arm_vmax} rad/s; ciclo {total_text}. 'q' stops.")
         self._replay_step(now, arm, hands)
 
     def _make_protectors(self):
@@ -966,6 +1010,17 @@ class TeachReplaySession:
                 self.mode = Mode.REPLAY_PLAY
                 self.play_start_time = now
                 self._say("REPLAY: playing recording")
+            elif self._replay_continuous or self._replay_iteration < self._replay_total:
+                self._replay_iteration += 1
+                ramp, reason = self._plan_ramp(now, arm, hands, self._recording)
+                if reason:
+                    self._enter_hold(now, f"replay loop ramp refused: {reason}", arm_q=arm_q)
+                    return
+                self._ramp = ramp
+                self.mode = Mode.REPLAY_RAMP
+                self.play_start_time = None
+                total_text = "contínuo" if self._replay_continuous else str(self._replay_total)
+                self._say(f"REPLAY: ciclo {self._replay_iteration}/{total_text}; rampa segura")
             else:
                 self._enter_hold(now, "replay finished; holding final pose (no go-home)", arm_q=arm_q)
 
@@ -1071,19 +1126,15 @@ class TeachReplaySession:
             elif kind == "save" and self.mode == Mode.TEACH:
                 self._save(now)
             elif kind == "replay" and self.mode in (Mode.IDLE, Mode.HOLD):
-                self._start_replay(now, pending[1], pending[2] if len(pending) > 2 else "terminal")
+                self._start_replay(now, pending[1], pending[2] if len(pending) > 2 else "terminal",
+                                   pending[3] if len(pending) > 3 else 1,
+                                   pending[4] if len(pending) > 4 else False)
                 if self.mode == Mode.REPLAY_RAMP:
                     return
 
         if self.mode == Mode.IDLE:
             return
         if self.mode == Mode.HOLD:
-            self._write_hold()
-            return
-        if (self.mode in (Mode.REPLAY_RAMP, Mode.REPLAY_PLAY) and self._replay_origin == "web"
-                and self._web_connection_lost(now)):
-            # Browser that started this replay vanished: hold (never release/quit).
-            self._enter_hold(now, "web connection lost (no heartbeat from the controlling browser)")
             self._write_hold()
             return
         arm, hands, reason = self._fresh_all(now)
@@ -1124,7 +1175,8 @@ class TeachReplaySession:
         if mode in (Mode.REPLAY_RAMP, Mode.REPLAY_PLAY) and recording is not None:
             view["replay_origin"] = self._replay_origin
             info = {"name": recording.path.name, "phase": "ramp" if mode == Mode.REPLAY_RAMP else "play",
-                    "progress": 0.0}
+                    "progress": 0.0, "iteration": getattr(self, "_replay_iteration", 1),
+                    "total": getattr(self, "_replay_total", 1)}
             try:
                 if mode == Mode.REPLAY_RAMP and ramp:
                     info["progress"] = min(1.0, max(0.0, (now - ramp["t0"]) / ramp["duration"]))

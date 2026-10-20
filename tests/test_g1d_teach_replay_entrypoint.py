@@ -216,3 +216,27 @@ def test_exclusive_session_lock_blocks_a_second_instance(tmp_path):
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                          env=dict(os.environ, PYTHONPATH=str(ROOT)))
     assert out.stdout.strip() == "False", out.stderr
+
+
+def test_launcher_state_recovery_returns_only_existing_full_web_url(tmp_path, monkeypatch):
+    module = _entry()
+    state = tmp_path / "session.json"
+    me = os.getpid()
+    start = module.proc_start_time(me)
+    argv = module.current_process_argv()
+    module.write_session_state(state, pid=me, proc_start_time=start, argv=argv,
+                               port=1234, token="secret", full_url="http://127.0.0.1:1234/?t=secret",
+                               web_enabled=True, session_id="s1")
+    assert module.recover_existing_session(state, proc_root="/proc", own_pid=me) == \
+        "http://127.0.0.1:1234/?t=secret"
+    assert state.exists()
+
+
+def test_launcher_state_recovery_cleans_stale_identity(tmp_path):
+    module = _entry()
+    state = tmp_path / "session.json"
+    module.write_session_state(state, pid=999999, proc_start_time=1, argv=["python", "teach_replay_g1d.py"],
+                               port=1234, token="secret", full_url="http://bad", web_enabled=True,
+                               session_id="stale")
+    assert module.recover_existing_session(state, proc_root="/proc", own_pid=os.getpid()) is None
+    assert not state.exists()

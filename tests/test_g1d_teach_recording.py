@@ -135,6 +135,52 @@ def test_load_recording_rejects_large_time_gaps(tmp_path):
         tr.load_recording(path)
 
 
+@pytest.mark.parametrize("field,bad", [
+    ("robot", "OTHER"),
+    ("arm_joint_names", list(reversed(tr.ARM_JOINT_NAMES))),
+    ("hand_joint_names", {"left": list(reversed(tr.HAND_JOINT_NAMES["left"])),
+                          "right": list(tr.HAND_JOINT_NAMES["right"])}),
+])
+def test_load_recording_rejects_wrong_robot_or_exact_joint_schema(tmp_path, field, bad):
+    writer = tr.RecordingWriter(tmp_path, _header(), name="schema")
+    writer.emit(_sample(0.0)); writer.emit(_sample(0.02))
+    path = writer.close().path
+    lines = path.read_text().splitlines()
+    header = json.loads(lines[0]); header[field] = bad; lines[0] = json.dumps(header)
+    path.write_text("\n".join(lines) + "\n")
+    with pytest.raises(tr.RecordingError, match="schema|robot|joint"):
+        tr.load_recording(path)
+
+
+def test_load_recording_rejects_out_of_limits(tmp_path):
+    writer = tr.RecordingWriter(tmp_path, _header(), name="limits")
+    sample = _sample(0.0); sample["arm_q"][0] = 99.0
+    writer.emit(sample); writer.emit(_sample(0.02))
+    path = writer.close().path
+    with pytest.raises(tr.RecordingError, match="limit"):
+        tr.load_recording(path, arm_lower=np.full(14, -2.0), arm_upper=np.full(14, 2.0),
+                          hand_limits=tr.DEX3_LIMITS)
+
+
+def test_load_recording_rejects_invalid_rate_and_duration_metadata(tmp_path):
+    writer = tr.RecordingWriter(tmp_path, _header(), name="metadata")
+    writer.emit(_sample(0.0)); writer.emit(_sample(0.02))
+    path = writer.close().path
+    lines = path.read_text().splitlines(); header = json.loads(lines[0]); header["rate_hz"] = float("nan")
+    lines[0] = json.dumps(header); path.write_text("\n".join(lines) + "\n")
+    with pytest.raises(tr.RecordingError, match="rate"):
+        tr.load_recording(path)
+
+
+def test_load_recording_rejects_wrong_velocity_vector_dimensions(tmp_path):
+    writer = tr.RecordingWriter(tmp_path, _header(), name="vectors")
+    sample = _sample(0.0); sample["arm_dq"] = [0.0]
+    writer.emit(sample); writer.emit(_sample(0.02))
+    path = writer.close().path
+    with pytest.raises(tr.RecordingError, match="arm_dq"):
+        tr.load_recording(path)
+
+
 def test_resolve_replay_path_accepts_name_in_teach_dir_and_latest(tmp_path):
     writer = tr.RecordingWriter(tmp_path, _header(), name="20261019T160000_000000Z")
     writer.emit(_sample(0.0)); writer.emit(_sample(0.02))

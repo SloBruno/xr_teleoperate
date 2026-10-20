@@ -16,12 +16,15 @@ accepted r/p only DDS subscribers exist. Launch via run_g1d_teach_replay.sh.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import queue
+import secrets
 import sys
 import threading
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -178,6 +181,73 @@ def find_conflicting_processes(proc_root="/proc", own_pid=None):
 
 
 DEFAULT_LOCK_PATH = Path.home() / ".local" / "state" / "xr_teleoperate" / "teach_replay.lock"
+DEFAULT_STATE_PATH = Path.home() / ".local" / "state" / "xr_teleoperate" / "teach_replay.session.json"
+NO_WEB_SESSION = "__G1D_TEACH_REPLAY_LIVE_NO_WEB__"
+
+
+def proc_start_time(pid, proc_root="/proc"):
+    text = Path(proc_root, str(int(pid)), "stat").read_text(encoding="utf-8")
+    return int(text.rsplit(")", 1)[1].split()[19])
+
+
+def current_process_argv(proc_root="/proc", pid=None):
+    pid = os.getpid() if pid is None else pid
+    return [arg.decode(errors="replace") for arg in Path(proc_root, str(pid), "cmdline").read_bytes().split(b"\0") if arg]
+
+
+def write_session_state(path, *, pid, proc_start_time, argv, port, token, full_url,
+                        web_enabled, session_id):
+    path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"pid": int(pid), "proc_start_time": int(proc_start_time), "argv": list(argv),
+               "port": int(port), "token": str(token), "full_url": str(full_url),
+               "web_enabled": bool(web_enabled), "session_id": str(session_id),
+               "started_at": time.time()}
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with open(temp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True); handle.flush(); os.fsync(handle.fileno())
+    os.chmod(temp, 0o600)
+    os.replace(temp, path)
+
+
+def remove_session_state(path, session_id):
+    path = Path(path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("pid") == os.getpid() and data.get("session_id") == session_id:
+            path.unlink()
+    except (OSError, ValueError):
+        pass
+
+
+def recover_existing_session(path=DEFAULT_STATE_PATH, *, proc_root="/proc", own_pid=None):
+    path = Path(path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        pid = int(data["pid"])
+        web_enabled = bool(data.get("web_enabled"))
+        if web_enabled:
+            parsed = urlsplit(str(data["full_url"]))
+            if parsed.scheme != "http" or parsed.port != int(data["port"]):
+                raise ValueError("panel URL/port mismatch")
+            if parse_qs(parsed.query).get("t", [None])[0] != str(data["token"]):
+                raise ValueError("panel URL/token mismatch")
+        if not data.get("session_id") or not isinstance(data.get("started_at"), (int, float)):
+            raise ValueError("invalid session freshness")
+        if own_pid is not None and pid == own_pid:
+            return data["full_url"] if web_enabled else NO_WEB_SESSION
+        if pid <= 0 or proc_start_time(pid, proc_root) != int(data["proc_start_time"]):
+            raise ValueError("stale process identity")
+        if current_process_argv(proc_root, pid) != list(data["argv"]):
+            raise ValueError("process argv changed")
+        if web_enabled and int(data["port"]) <= 0:
+            raise ValueError("invalid session state")
+        return data["full_url"] if web_enabled else NO_WEB_SESSION
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return None
 
 
 def acquire_session_lock(path=DEFAULT_LOCK_PATH):
@@ -240,7 +310,9 @@ def start_web_panel(session, io, sides, teach_dir, port, print_fn=print):
 
     try:
         panel = WebPanel(session, teach_dir, host="0.0.0.0", port=port,
-                         freshness_fn=make_freshness_fn(io, sides, getattr(io, "clock", time.monotonic)))
+                         freshness_fn=make_freshness_fn(io, sides, getattr(io, "clock", time.monotonic)),
+                         arm_lower=getattr(session, "arm_lower", None),
+                         arm_upper=getattr(session, "arm_upper", None))
         panel.start()
     except Exception as exc:
         print_fn(f"[teach] WEB panel NOT started ({type(exc).__name__}: {exc}); terminal keys only.")
@@ -262,6 +334,13 @@ def _wait_for_state(io, sides, timeout_s):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    recovered = recover_existing_session()
+    if recovered == NO_WEB_SESSION:
+        print("[teach] existing session is live without a web panel", flush=True)
+        return 0
+    if recovered is not None:
+        print(recovered, flush=True)
+        return 0
     sides = hand_sides_from_arg(args.hands)
     teach_dir = Path(args.teach_dir).expanduser() if args.teach_dir else default_teach_dir()
     printer = AsyncPrinter()
@@ -308,9 +387,15 @@ def main(argv=None):
     printer(f"[teach] passive (no command publisher). state: {state_line}. Press r, p or q.")
 
     panel = None
+    session_id = secrets.token_urlsafe(18)
     if args.web is not None:
         panel = start_web_panel(session, io, sides, teach_dir, args.web,
                                 print_fn=lambda m: print(m, flush=True))
+    write_session_state(DEFAULT_STATE_PATH, pid=os.getpid(), proc_start_time=proc_start_time(os.getpid()),
+                        argv=current_process_argv(), port=panel.port if panel is not None else 0,
+                        token=panel.token if panel is not None else "disabled",
+                        full_url=panel.url("127.0.0.1") if panel is not None else "",
+                        web_enabled=panel is not None, session_id=session_id)
 
     from sshkeyboard import listen_keyboard, stop_listening
     keyboard = threading.Thread(
@@ -340,6 +425,7 @@ def main(argv=None):
                 panel.stop()
             except Exception:
                 pass
+        remove_session_state(DEFAULT_STATE_PATH, session_id)
         try:
             stop_listening()
         except Exception:

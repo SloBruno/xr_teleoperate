@@ -46,9 +46,9 @@ class FakeSession:
         self.calls.append("save")
         return True
 
-    def request_replay(self, name, *, origin="terminal"):
+    def request_replay(self, name, *, origin="terminal", repeat=1, continuous=False):
         self.gate.wait(10)
-        self.calls.append(("replay", name, origin))
+        self.calls.append(("replay", name, origin, repeat, continuous))
         return True
 
     def request_quit(self):
@@ -98,6 +98,18 @@ def call(panel, method, path, body=None, token=TOKEN, client="A", timeout=3.0):
         return status, json.loads(raw)
     except ValueError:
         return status, raw.decode()
+
+
+def upload_call(panel, name, payload, token=TOKEN, client="A"):
+    headers = {"X-Client-Id": client, "X-Token": token, "Content-Type": "application/jsonl",
+               "X-Filename": name}
+    req = urllib.request.Request(f"http://127.0.0.1:{panel.port}/api/upload", data=payload,
+                                 headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read())
 
 
 def wait_until(predicate, timeout=2.0):
@@ -193,11 +205,23 @@ def test_mutations_route_to_the_session_lifecycle_methods(fake, tmp_path):
     assert wait_until(lambda: session.calls[-1] == "save")
     assert call(panel, "POST", "/api/replay", {"name": path.name})[0] == 202
     assert wait_until(lambda: isinstance(session.calls[-1], tuple))
-    kind, name, origin = session.calls[-1]
+    kind, name, origin, repeat, continuous = session.calls[-1]
     assert kind == "replay" and origin == "web"
+    assert repeat == 1 and not continuous
     assert Path(name) == tmp_path / path.name     # resolved inside the teach dir only
     assert call(panel, "POST", "/api/stop", {})[0] == 200
     assert session.calls[-1] == "quit"
+
+
+def test_web_replay_exposes_finite_repeat_and_continuous_modes(fake, tmp_path):
+    session, panel = fake
+    path = saved_file(tmp_path)
+    assert call(panel, "POST", "/api/replay", {"name": path.name, "repeat": 3})[0] == 202
+    assert wait_until(lambda: len(session.calls) == 1)
+    assert session.calls[-1][3:] == (3, False)
+    assert call(panel, "POST", "/api/replay", {"name": path.name, "continuous": True})[0] == 202
+    assert wait_until(lambda: len(session.calls) == 2)
+    assert session.calls[-1][3:] == (1, True)
 
 
 def test_status_reports_mode_message_freshness_and_controller(fake):
@@ -363,6 +387,36 @@ def test_delete_moves_into_trash_inside_teach_dir(fake, tmp_path):
     assert call(panel, "POST", "/api/delete", {"name": path.name})[0] == 404
 
 
+def test_upload_valid_recording_promotes_atomically_and_never_queues_replay(fake, tmp_path):
+    session, panel = fake
+    source = saved_file(tmp_path / "source")
+    payload = source.read_bytes()
+    status, body = upload_call(panel, "phone_take.jsonl", payload)
+    assert status == 201 and body["ok"]
+    target = tmp_path / body["name"]
+    assert target.is_file() and target.read_bytes() == payload
+    assert not list(tmp_path.glob("*.part"))
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("name", ["../evil.jsonl", "/tmp/evil.jsonl", "a/b.jsonl", "evil.txt"])
+def test_upload_rejects_traversal_and_bad_filename_without_partial(fake, tmp_path, name):
+    session, panel = fake
+    source = saved_file(tmp_path / "source")
+    status, _ = upload_call(panel, name, source.read_bytes())
+    assert status == 400
+    assert session.calls == []
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_upload_rejects_malformed_recording_and_cleans_partial(fake, tmp_path):
+    session, panel = fake
+    status, body = upload_call(panel, "bad.jsonl", b'{"type":"header"}\n')
+    assert status == 400 and not body["ok"]
+    assert session.calls == []
+    assert not list(tmp_path.glob("*.part"))
+
+
 def test_delete_and_rename_refused_while_replayed_or_recorded(fake, tmp_path):
     session, panel = fake
     path = saved_file(tmp_path)
@@ -403,7 +457,7 @@ def _ticks(session, clock, seconds):
         session.tick()
 
 
-def test_web_replay_holds_when_heartbeat_is_missed(tmp_path):
+def test_web_replay_continues_when_heartbeat_is_missed(tmp_path):
     session, io, clock = make(tmp_path)
     path = _long_recording(tmp_path, session, io)
     panel = start_panel(session, tmp_path)
@@ -417,12 +471,9 @@ def test_web_replay_holds_when_heartbeat_is_missed(tmp_path):
             call(panel, "GET", "/api/status")
             _ticks(session, clock, 0.5)
             assert session.mode in (tr.Mode.REPLAY_RAMP, tr.Mode.REPLAY_PLAY)
-        _ticks(session, clock, 1.1)            # browser gone
-        assert session.mode == tr.Mode.HOLD
-        assert "web connection lost" in session.last_message
-        assert not session.quit_requested and session.active and io.released == 0
-        held = io.arm_writes()[-1]
-        assert np.all(held.kp > 0)             # hold, never release
+        _ticks(session, clock, 1.1)            # browser gone; replay is independent
+        assert session.mode in (tr.Mode.REPLAY_RAMP, tr.Mode.REPLAY_PLAY)
+        assert "web connection lost" not in session.last_message
     finally:
         panel.stop()
 
@@ -442,7 +493,7 @@ def test_heartbeat_endpoint_also_feeds_the_deadman(tmp_path):
         panel.stop()
 
 
-def test_read_only_client_polling_does_not_feed_the_deadman(tmp_path):
+def test_read_only_client_polling_does_not_stop_replay(tmp_path):
     session, io, clock = make(tmp_path)
     path = _long_recording(tmp_path, session, io)
     panel = start_panel(session, tmp_path)
@@ -453,7 +504,7 @@ def test_read_only_client_polling_does_not_feed_the_deadman(tmp_path):
         for _ in range(4):
             call(panel, "GET", "/api/status", client="B")
             _ticks(session, clock, 0.3)
-        assert session.mode == tr.Mode.HOLD and "web connection lost" in session.last_message
+        assert session.mode in (tr.Mode.REPLAY_RAMP, tr.Mode.REPLAY_PLAY)
     finally:
         panel.stop()
 
@@ -476,15 +527,14 @@ def test_terminal_replay_is_unaffected_by_the_web_deadman(tmp_path):
         panel.stop()
 
 
-def test_queued_web_replay_refused_if_connection_already_lost(tmp_path):
+def test_queued_web_replay_starts_even_if_connection_was_lost(tmp_path):
     session, io, clock = make(tmp_path)
     path = _long_recording(tmp_path, session, io)
     assert session.request_replay(str(path), origin="web")
     session.feed_web_deadman(1.0)
     clock.t += 2.0                     # dispatcher was slow; browser already gone
     session.tick()
-    assert session.mode == tr.Mode.IDLE and io.activations == 0 and io.writes == []
-    assert "web connection lost" in session.last_message
+    assert session.mode == tr.Mode.REPLAY_RAMP and io.activations == 1 and io.writes
 
 
 def test_deadman_in_session_has_no_effect_on_teach(tmp_path):

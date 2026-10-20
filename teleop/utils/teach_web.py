@@ -14,9 +14,8 @@ DDS and never wait for the control tick.
 
 Safety: random token per process (``hmac.compare_digest``), required by every
 ``/api`` call and by the page itself; one controlling browser at a time
-(others read-only until it has been silent for ``controller_timeout_s``);
-the controller's polls/heartbeats feed the session's web deadman, which holds a
-web-started replay when the browser goes silent for ``deadman_s``.
+(others read-only until it has been silent for ``controller_timeout_s``).
+Heartbeat is authority/liveness input only; it never gates an active replay.
 """
 
 from __future__ import annotations
@@ -33,10 +32,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from teleop.utils.teach_replay import DEX3_LIMITS, RecordingError, load_recording
+
 DEFAULT_PORT = 8095
 DEADMAN_S = 1.0
 CONTROLLER_TIMEOUT_S = 3.0
 MAX_BODY = 4096
+MAX_UPLOAD_BYTES = 16 * 1024 * 1024  # conservative documented request/file limit
 TRASH_DIR = "trash"
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(\.aborted)?\.jsonl$")
@@ -120,7 +122,8 @@ def _summarize(path: Path) -> dict:
 class WebPanel:
     def __init__(self, session, teach_dir, *, host="0.0.0.0", port=DEFAULT_PORT, token=None,
                  clock=time.monotonic, freshness_fn=None, deadman_s=DEADMAN_S,
-                 controller_timeout_s=CONTROLLER_TIMEOUT_S, queue_size=4):
+                 controller_timeout_s=CONTROLLER_TIMEOUT_S, queue_size=4,
+                 arm_lower=None, arm_upper=None):
         self.session = session
         self.teach_dir = Path(teach_dir)
         self.host = host
@@ -130,6 +133,8 @@ class WebPanel:
         self.freshness_fn = freshness_fn
         self.deadman_s = float(deadman_s)
         self.controller_timeout_s = float(controller_timeout_s)
+        self.arm_lower = arm_lower
+        self.arm_upper = arm_upper
         self._actions: queue.Queue = queue.Queue(maxsize=max(1, int(queue_size)))
         self._ctl_lock = threading.Lock()
         self._controller = None          # (client_id, last_seen)
@@ -196,7 +201,8 @@ class WebPanel:
                 elif kind == "save":
                     self.session.request_save()
                 elif kind == "replay":
-                    self.session.request_replay(arg, origin="web")
+                    name, repeat, continuous = arg
+                    self.session.request_replay(name, origin="web", repeat=repeat, continuous=continuous)
             except Exception:
                 pass
 
@@ -214,7 +220,14 @@ class WebPanel:
     def queued_replay_bases(self):
         with self._actions.mutex:
             items = list(self._actions.queue)
-        return {recording_base(Path(arg).name) for kind, arg in items if kind == "replay" and arg}
+        out = set()
+        for kind, arg in items:
+            if kind != "replay" or not arg:
+                continue
+            name = arg[0] if isinstance(arg, tuple) else arg
+            if name:
+                out.add(recording_base(Path(name).name))
+        return out
 
     # ---------------------------------------------------------- controller
     def touch(self, client_id) -> bool:
@@ -302,6 +315,57 @@ class WebPanel:
             except OSError as exc:
                 return 500, {"ok": False, "error": str(exc)}
             return 200, {"ok": True}
+
+    def upload(self, filename, reader, content_length):
+        """Stream, validate, and atomically install one recording off the tick."""
+        if not isinstance(filename, str) or filename != Path(filename).name or not _NAME_RE.fullmatch(filename):
+            return 400, {"ok": False, "error": "nome de gravação inválido"}
+        try:
+            length = int(content_length)
+        except (TypeError, ValueError):
+            return 400, {"ok": False, "error": "Content-Length obrigatório"}
+        if length <= 0 or length > MAX_UPLOAD_BYTES:
+            return 413, {"ok": False, "error": "upload excede o limite de 16 MiB"}
+        self.teach_dir.mkdir(parents=True, exist_ok=True)
+        temp = None
+        try:
+            import tempfile
+            fd, temp_name = tempfile.mkstemp(prefix=".g1d-upload-", suffix=".part", dir=self.teach_dir)
+            temp = Path(temp_name)
+            remaining = length
+            with os.fdopen(fd, "wb") as handle:
+                while remaining:
+                    chunk = reader.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError("corpo truncado")
+                    handle.write(chunk)
+                    remaining -= len(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+            load_recording(temp, arm_lower=self.arm_lower, arm_upper=self.arm_upper,
+                           hand_limits=DEX3_LIMITS)
+            with self._file_lock:
+                target = self.teach_dir / filename
+                stem = Path(filename).stem
+                suffix = Path(filename).suffix
+                index = 0
+                while target.exists():
+                    index += 1
+                    target = self.teach_dir / f"{stem}_{index}{suffix}"
+                os.replace(temp, target)
+            temp = None
+            self._summary_cache.clear()
+            return 201, {"ok": True, "name": target.name}
+        except RecordingError as exc:
+            return 400, {"ok": False, "error": str(exc)}
+        except (OSError, ValueError) as exc:
+            return 400, {"ok": False, "error": str(exc)}
+        finally:
+            if temp is not None:
+                try:
+                    temp.unlink()
+                except OSError:
+                    pass
 
     # -------------------------------------------------------------- status
     def status(self, client_id):
@@ -398,6 +462,12 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/stop":                # always accepted, from any client
             panel.stop_now()
             return self._send(200, {"ok": True, "queued": False})
+        if path == "/api/upload":
+            if not panel.touch(self._client()):
+                return self._send(409, {"ok": False, "error": "somente leitura: outro navegador controla"})
+            filename = self.headers.get("X-Filename") or (query.get("name") or [""])[0]
+            code, payload = panel.upload(filename, self.rfile, self.headers.get("Content-Length"))
+            return self._send(code, payload)
         try:
             body = self._body()
         except ValueError as exc:
@@ -425,7 +495,14 @@ class _Handler(BaseHTTPRequestHandler):
                     if not target.is_file():
                         return self._send(404, {"ok": False, "error": "gravação não encontrada"})
                     arg = str(target)
-                if not panel.enqueue("replay", arg):
+                try:
+                    repeat = int(body.get("repeat", 1))
+                except (TypeError, ValueError):
+                    raise NameError_("repetições inválidas")
+                continuous = body.get("continuous", False)
+                if not isinstance(continuous, bool) or repeat < 1 or (continuous and repeat != 1):
+                    raise NameError_("modo de repetição inválido")
+                if not panel.enqueue("replay", (arg, repeat, continuous)):
                     return self._send(503, {"ok": False, "error": "busy"})
                 return self._send(202, {"ok": True, "queued": True})
             if path == "/api/rename":
@@ -507,7 +584,7 @@ small{color:#999}
   <span>Mão esq.</span><span id="f_left">-</span>
   <span>Mão dir.</span><span id="f_right">-</span>
   <span>Gravação</span><span id="rec">-</span>
-  <span>Reprodução</span><span id="rep">-</span>
+ <span>Reprodução</span><span id="rep">-</span>
  </div>
  <div class="bar" style="margin-top:8px"><div id="prog"></div></div>
 </div>
@@ -515,7 +592,11 @@ small{color:#999}
  <button id="teach">Ensinar (r)</button>
  <button id="save">Salvar (s)</button>
  <button id="replay">Reproduzir (p)</button>
+ <label>Repetições <input id="repeat" type="number" min="1" value="1" style="width:5em"></label>
+ <label><input id="continuous" type="checkbox"> Repetir continuamente</label>
 </div>
+<div class="card"><b>Enviar gravação</b><br><input id="uploadfile" type="file" accept=".jsonl">
+ <button id="upload">Enviar</button><small>Limite: 16 MiB; a gravação é validada antes de aparecer na lista.</small></div>
 <div class="card">
  <div class="row" style="justify-content:space-between;align-items:center">
   <b>Gravações</b>
@@ -550,7 +631,7 @@ function poll(){
   var f=s.fresh||{};fresh('f_arm',f.arm);fresh('f_left',f.left);fresh('f_right',f.right);
   $('rec').textContent=s.recording?(s.recording.name+' - '+s.recording.elapsed_s.toFixed(1)+' s'):'-';
   var p=s.replay?Math.round(100*s.replay.progress):0;
-  $('rep').textContent=s.replay?(s.replay.name+' ('+(s.replay.phase==='ramp'?'rampa':'reproduzindo')+') '+p+'%'+(s.replay_origin==='web'?' [web]':' [terminal]')):'-';
+  $('rep').textContent=s.replay?(s.replay.name+' ('+(s.replay.phase==='ramp'?'rampa':'reproduzindo')+') '+p+'% ciclo '+s.replay.iteration+'/'+(s.replay.total===null?'contínuo':s.replay.total)):'-';
   $('prog').style.width=p+'%';
   var m=s.mode;
   $('teach').disabled=!controller||!(m==='idle'||m==='hold');
@@ -585,7 +666,10 @@ function loadList(){
 function act(path,body){api('POST',path,body).then(function(x){if(!x.ok)$('msg').textContent='Recusado: '+(x.error||x._code);poll();});}
 $('teach').onclick=function(){act('/api/teach',{});};
 $('save').onclick=function(){act('/api/save',{});setTimeout(loadList,1500);};
-$('replay').onclick=function(){act('/api/replay',{name:selected});};
+ $('replay').onclick=function(){act('/api/replay',{name:selected,repeat:parseInt($('repeat').value||'1',10),continuous:$('continuous').checked});};
+ $('upload').onclick=function(){var f=$('uploadfile').files[0];if(!f)return;
+   fetch('/api/upload',{method:'POST',headers:{'X-Token':T,'X-Client-Id':CID,'X-Filename':f.name},body:f}).then(function(r){return r.json();}).then(function(x){if(!x.ok)alert(x.error||'upload recusado');else loadList();});
+ };
 $('stop').onclick=function(){api('POST','/api/stop',{}).then(poll).catch(function(){$('conn').style.display='block';});};
 $('showall').onchange=loadList;
 setInterval(poll,200);setInterval(loadList,5000);poll();loadList();
