@@ -239,8 +239,8 @@ def test_load_recording_rejects_invalid_rate_and_duration_metadata(tmp_path):
 
 
 @pytest.mark.parametrize("mutate,reason", [
-    (lambda h, f: h.pop("profile"), "profile"),
     (lambda h, f: h.__setitem__("profile", "OTHER"), "profile"),
+    (lambda h, f: h.__setitem__("robot", "G1_29"), "profile"),
     (lambda h, f: h.__setitem__("hand_sides", ["right", "left"]), "hand sides"),
     (lambda h, f: h.__setitem__("hand_sides", ["left", "left"]), "hand sides"),
 ])

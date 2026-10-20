@@ -67,6 +67,10 @@ DEX3_LIMITS = {
     ),
 }
 SMOOTHSTEP_PEAK_FACTOR = 1.5   # max d/ds of 3s^2 - 2s^3
+# Dex3 encoders read up to ~0.06 rad past the URDF limits at the mechanical
+# stops (measured on G1D recordings). Accept that sensor overshoot when loading;
+# commands are still clamped strictly inside the limits.
+HAND_LIMIT_MEASUREMENT_TOL_RAD = 0.10
 # A DDS callback may stamp a sample just after the tick took its time
 # reference; accept that small monotonic skew instead of a false "stale".
 STATE_FUTURE_SKEW_S = 0.01
@@ -382,7 +386,9 @@ def load_recording(path, *, max_gap_s: float = 0.25, min_samples: int = 2,
     header = records[0]
     if header.get("clock") != "monotonic_s":
         raise RecordingError("clock must be monotonic_s")
-    if header.get("robot") != "G1D" or header.get("profile") != "G1D":
+    # Recordings saved before the explicit ``profile`` field (same v1 schema)
+    # carry only ``robot``; a present profile must still be G1D.
+    if header.get("robot") != "G1D" or header.get("profile", "G1D") != "G1D":
         raise RecordingError("unsupported robot/profile")
     try:
         rate_hz = float(header["rate_hz"])
@@ -452,7 +458,11 @@ def load_recording(path, *, max_gap_s: float = 0.25, min_samples: int = 2,
                 raise RecordingError(f"missing {side} hand limits") from exc
             lo = _finite_matrix([lo], HAND_DOF, f"{side} lower limit")[0]
             hi = _finite_matrix([hi], HAND_DOF, f"{side} upper limit")[0]
-            if np.any(lo >= hi) or np.any(values < lo) or np.any(values > hi):
+            # Measured Dex3 q reads slightly past the URDF limits at the
+            # mechanical stops; replay commands are clamped inside the limits
+            # anyway (_clamp_hand), so only reject data clearly out of range.
+            tol = HAND_LIMIT_MEASUREMENT_TOL_RAD
+            if np.any(lo >= hi) or np.any(values < lo - tol) or np.any(values > hi + tol):
                 raise RecordingError(f"{side} hand joint limit violation")
     return Recording(path=path, header=header, t=t - t[0], arm_q=arm, hand_q=hands, hand_sides=sides)
 
