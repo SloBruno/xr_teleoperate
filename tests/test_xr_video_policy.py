@@ -161,3 +161,82 @@ def test_head_only_runtime_requires_binocular_camera_config():
             assert "binocular=true" in str(exc)
         else:
             raise AssertionError("head-only runtime must fail closed without binocular=true")
+
+class _FakeContext:
+    def __init__(self):
+        self.closed = False
+
+    def term(self):
+        self.closed = True
+
+
+class _FakeRequester:
+    instances = []
+
+    def __init__(self, host, port, config=None, term_ok=True):
+        self.host, self.port = host, port
+        self._config = config
+        self._term_ok = term_ok
+        self._context = _FakeContext()
+        self.closed = False
+        _FakeRequester.instances.append(self)
+
+    def request(self):
+        if isinstance(self._config, Exception):
+            raise self._config
+        return self._config
+
+    def close(self):
+        self.closed = True
+        if self._term_ok:
+            self._context.term()
+
+
+def test_one_shot_camera_config_closes_requester_and_terminates_context():
+    from teleop.utils.xr_video_policy import fetch_camera_config_once
+
+    config = {"head_camera": {"binocular": True}}
+    seen = []
+    factory = lambda host, port: seen.append(_FakeRequester(host, port, config)) or seen[-1]
+    assert fetch_camera_config_once(factory, "10.0.0.2") == config
+    assert (seen[0].host, seen[0].port) == ("10.0.0.2", 60000)
+    assert seen[0].closed and seen[0]._context.closed
+
+
+def test_one_shot_camera_config_closes_on_failure_and_fails_closed():
+    import pytest
+    from teleop.utils.xr_video_policy import fetch_camera_config_once
+
+    for bad in (None, RuntimeError("boom")):
+        seen = []
+        factory = lambda host, port: seen.append(_FakeRequester(host, port, bad)) or seen[-1]
+        with pytest.raises(RuntimeError):
+            fetch_camera_config_once(factory, "h")
+        assert seen[0].closed and seen[0]._context.closed
+
+
+def test_one_shot_camera_config_refuses_a_context_left_alive():
+    import pytest
+    from teleop.utils.xr_video_policy import fetch_camera_config_once
+
+    factory = lambda host, port: _FakeRequester(host, port, {"head_camera": {}}, term_ok=False)
+    with pytest.raises(RuntimeError, match="ZMQ context"):
+        fetch_camera_config_once(factory, "h")
+
+
+def test_subscriber_config_must_match_the_config_used_to_build_the_xr_scene():
+    import pytest
+    from teleop.utils.xr_video_policy import require_matching_camera_config
+
+    head = {"image_shape": [480, 1280], "binocular": True, "enable_zmq": True, "zmq_port": 55555}
+    wrist = {"image_shape": [480, 640], "binocular": False, "enable_zmq": True, "zmq_port": 55556}
+    expected = {"head_camera": head, "left_wrist_camera": wrist}
+    require_matching_camera_config(expected, {"head_camera": dict(head), "left_wrist_camera": dict(wrist, zmq_port=1)},
+                                   ("head_camera",))
+    require_matching_camera_config(expected, {"head_camera": dict(head), "left_wrist_camera": dict(wrist)},
+                                   ("head_camera", "left_wrist_camera"))
+    with pytest.raises(RuntimeError, match="head_camera"):
+        require_matching_camera_config(expected, {"head_camera": dict(head, image_shape=[480, 640])}, ("head_camera",))
+    with pytest.raises(RuntimeError, match="left_wrist_camera"):
+        require_matching_camera_config(expected, {"head_camera": dict(head), "left_wrist_camera": dict(wrist, binocular=True)},
+                                       ("head_camera", "left_wrist_camera"))

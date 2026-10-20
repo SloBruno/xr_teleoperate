@@ -38,7 +38,7 @@ H2_ArmController = robot_arm_module.H2_ArmController
 # G1_29 writer for a requested G1D profile in production.
 G1D_ArmController = getattr(robot_arm_module, "G1D_ArmController", None)
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK, H2_ArmIK
-from teleimager.image_client import ImageClient
+from teleimager.image_client import ImageClient, ZMQ_Requester
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper, is_walk_fsm
@@ -58,7 +58,8 @@ from teleop.utils.xr_video_plane import (
     DEFAULT_DISTANCE_M,
 )
 from teleop.utils.xr_video_policy import (
-    VideoFrameGate, service_xr_video, validate_head_only_camera,
+    VideoFrameGate, fetch_camera_config_once, require_matching_camera_config,
+    service_xr_video, validate_head_only_camera,
 )
 from teleop.utils.robot_state_monitor import RobotStateMonitor, stop_locomotion_best_effort
 from teleop.utils.teleop_status import (
@@ -539,10 +540,11 @@ if __name__ == '__main__':
     robot_monitor = None
 
     try:
-        # HYPOTHESIS (G1D pass-through: Vuer child forked, 1 thread in futex_wait, 8012 never
-        # listens). TeleVuer forks its Vuer Process in __init__; forking after DDS/keyboard/ZMQ
-        # threads exist can hand the child a locked mutex. Pass-through needs no image shape or
-        # transport, so fork the Vuer process FIRST, while this process is still single-threaded.
+        # TeleVuer forks its Vuer server Process in __init__. Forking after DDS /
+        # keyboard / ZMQ threads exist hands the child a locked mutex (G1D: child
+        # stuck in futex_wait, 8012 never listens). Build the XR wrapper FIRST, in
+        # every mode, while this process is still single-threaded; only then start
+        # DDS, the keyboard listener and the ZMQ image subscriber threads.
         if args.display_mode == 'pass-through' or args.no_video:
             tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand",
                                          binocular=False,
@@ -553,30 +555,9 @@ if __name__ == '__main__':
                                          webrtc_url=None,
                                          arm_pose_source="controller")
 
-        # setup dds communication domains id
-        if args.sim:
-            ChannelFactoryInitialize(1, networkInterface=args.network_interface)
-        else:
-            ChannelFactoryInitialize(0, networkInterface=args.network_interface)
-
-        # ipc communication mode. client usage: see utils/ipc.py
-        if args.ipc:
-            ipc_server = IPC_Server(on_press=on_press,get_state=get_state)
-            ipc_server.start()
-        # sshkeyboard communication mode
-        else:
-            listen_keyboard_thread = threading.Thread(target=listen_keyboard, 
-                                                      kwargs={"on_press": on_press, "until": None, "sequential": False,}, 
-                                                      daemon=True)
-            listen_keyboard_thread.start()
-
         if not args.no_video:
-            # image client
-            img_client = ImageClient(host=args.img_server_ip,
-                request_bgr=True,
-                camera_names=("head_camera",) if args.camera_layout == "head" else None,
-            )
-            camera_config = img_client.get_cam_config()
+            # One-shot config request: its ZMQ context is terminated before the fork.
+            camera_config = fetch_camera_config_once(ZMQ_Requester, args.img_server_ip)
             logger_mp.debug(f"Camera config: {camera_config}")
             vertical_camera_stack = args.camera_layout == 'vertical'
             if args.arm == "G1D" and args.camera_layout == "head" and args.force_zmq_video:
@@ -632,7 +613,35 @@ if __name__ == '__main__':
                                          video_plane_height=video_plane_height,
                                          video_plane_distance=video_plane_distance
                                          )
-        
+
+        # setup dds communication domains id
+        if args.sim:
+            ChannelFactoryInitialize(1, networkInterface=args.network_interface)
+        else:
+            ChannelFactoryInitialize(0, networkInterface=args.network_interface)
+
+        # ipc communication mode. client usage: see utils/ipc.py
+        if args.ipc:
+            ipc_server = IPC_Server(on_press=on_press,get_state=get_state)
+            ipc_server.start()
+        # sshkeyboard communication mode
+        else:
+            listen_keyboard_thread = threading.Thread(target=listen_keyboard, 
+                                                      kwargs={"on_press": on_press, "until": None, "sequential": False,}, 
+                                                      daemon=True)
+            listen_keyboard_thread.start()
+
+        if not args.no_video:
+            # ZMQ subscriber threads start only after the Vuer process has forked.
+            selected_cameras = ("head_camera",) if args.camera_layout == "head" else None
+            img_client = ImageClient(host=args.img_server_ip,
+                request_bgr=True,
+                camera_names=selected_cameras,
+            )
+            require_matching_camera_config(
+                camera_config, img_client.get_cam_config(),
+                selected_cameras or ("head_camera", "left_wrist_camera", "right_wrist_camera"))
+
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
         if args.motion:
             loco_wrapper = LocoClientWrapper(backend=args.loco_backend, walk_cap=walk_cap, turn_cap=turn_cap)

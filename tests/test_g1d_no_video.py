@@ -100,13 +100,14 @@ def test_teleop_integrates_nonblocking_video_policy_and_quality_controls():
     assert "force_zmq=args.force_zmq_video" in TELEOP
     assert "display_fps=args.video_fps or 30.0" in TELEOP
     assert "jpeg_quality=args.jpeg_quality" in TELEOP
-    assert 'camera_names=("head_camera",) if args.camera_layout == "head" else None' in TELEOP
+    assert 'selected_cameras = ("head_camera",) if args.camera_layout == "head" else None' in TELEOP
+    assert "camera_names=selected_cameras" in TELEOP
     assert "validate_head_only_camera(camera_config['head_camera'])" in TELEOP
     assert "args.camera_layout != 'head' or video_update.frame_fresh" in TELEOP
 
 
 def test_no_video_creates_wrapper_before_threads_and_never_derefs_none_config():
-    try_pos = TELEOP.index("\n    try:\n        # HYPOTHESIS")
+    try_pos = TELEOP.index("\n    try:\n        # TeleVuer forks its Vuer server Process")
     early = TELEOP.index("tv_wrapper = TeleVuerWrapper(", try_pos)
     assert "args.no_video" in TELEOP[try_pos:early]
     assert early < TELEOP.index("ChannelFactoryInitialize(0", try_pos)
