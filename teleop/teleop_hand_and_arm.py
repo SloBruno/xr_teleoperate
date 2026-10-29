@@ -46,6 +46,7 @@ from teleop.utils.quest_controls import (LocomotionRamp, dispatch_joystick_locom
                                          resolve_speed_caps, speed_cap_banner, loco_stick_is_fresh)
 from teleop.utils.loco_preflight import run_loco_preflight
 from teleop.utils import g1d_agv
+from teleop.utils import g1d_waist
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
 from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
 from teleop.utils.human_arm_calibration import HumanArmSweep, HumanCalibratedWristCalibrator
@@ -489,6 +490,7 @@ if __name__ == '__main__':
     parser.add_argument('--loco-request-fsm', type=str, default='none', choices=['none', '500'], help='Opt-in: in the preflight only, request FSM 500 (SetFsmId) when the robot is in 501 and confirm by polling; never 801; default none = send nothing')
     parser.add_argument('--loco-backend', type=str, default='wirelesscontroller', choices=['setvelocity', 'wirelesscontroller'], help='Walking transport: wirelesscontroller (default: continuous 20 Hz rt/wirelesscontroller joystick state; fail-safe, no silent fallback) or setvelocity (legacy RPC 7105, only when forced)')
     parser.add_argument('--g1d-agv', action='store_true', help='G1D only, launcher-controlled (G1D_AGV=1): Quest left stick drives the AGV base (vx/vyaw), right stick the lift column; cap env G1D_AGV_MAX_VX (default 0.6, max 1.5 m/s)')
+    parser.add_argument('--g1d-waist', action='store_true', help='G1D only, launcher-controlled (G1D_WAIST=1): Quest right stick horizontal axis maps to waist pitch intent and headset yaw to waist yaw intent. REFUSES TO START today: no real waist backend exists yet (see teleop/utils/g1d_waist.py). Right stick vertical axis keeps driving the AGV column unchanged.')
     parser.add_argument('--turn-rate-cap', type=float, default=None, help='Turn cap rad/s (default 0.3, hard max 1.0; env G1_TURN_RATE_CAP)')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
@@ -526,6 +528,18 @@ if __name__ == '__main__':
             agv_max_vx = g1d_agv.resolve_agv_max_vx(os.environ.get("G1D_AGV_MAX_VX") or None)
         except ValueError as error:
             parser.error(str(error))
+    if args.g1d_waist and args.arm != "G1D":
+        parser.error("--g1d-waist is only valid with --arm G1D.")
+    if args.g1d_waist and os.environ.get("G1D_WAIST") != "1":
+        parser.error("--g1d-waist is launcher-controlled: set G1D_WAIST=1 (run_g1d_quest_dex3.sh).")
+    if args.g1d_waist:
+        # Fail closed: no real rt/waistpitchcmd backend exists in this repo
+        # yet (see teleop/utils/g1d_waist.py). Refuse to start rather than
+        # silently run with a flag that has no effect.
+        try:
+            g1d_waist.make_waist_pitch_backend()
+        except g1d_waist.WaistPitchBackendUnavailable as error:
+            parser.error(f"--g1d-waist: {error}")
     if args.arm == "G1D" and not args.g1d_ik_geometry_assumption:
         parser.error("G1D reuses G1_29 arm IK geometry without G1D hardware validation; pass --g1d-ik-geometry-assumption only after validating the geometry.")
     walk_cap, turn_cap = resolve_speed_caps(args.walk_speed_cap, args.turn_rate_cap, os.environ)
@@ -552,6 +566,12 @@ if __name__ == '__main__':
     robot_monitor = None
     # Opt-in G1-D AGV/column: nothing AGV-related exists without --g1d-agv.
     agv_ctrl = None
+    # Opt-in G1-D waist pitch/yaw: nothing exists without --g1d-waist, and
+    # --g1d-waist itself always refuses to start today (see argument
+    # validation above) because no real backend exists. This stays wired so
+    # it activates automatically once make_waist_pitch_backend() stops
+    # raising -- no further teleop_hand_and_arm.py changes needed for that.
+    waist_ctrl = None
 
     try:
         # TeleVuer forks its Vuer server Process in __init__. Forking after DDS /
@@ -651,6 +671,17 @@ if __name__ == '__main__':
             logger_mp.warning(f"[agv] G1-D AGV ENABLED: left stick vx<= {agv_max_vx:.2f} m/s, "
                               f"vyaw<= {g1d_agv.AGV_MAX_VYAW_RADPS:.2f} rad/s; right stick = column; "
                               f"active only after r with a fresh controller.")
+
+        # G1-D waist pitch/yaw (opt-in, currently unreachable: argument
+        # validation above already refused to start if --g1d-waist was
+        # passed, since make_waist_pitch_backend() always raises today).
+        # Kept here so this is the only place that needs to change once a
+        # real backend lands: pass it to G1dWaistController(pitch_backend=...).
+        if args.g1d_waist:
+            waist_ctrl = g1d_waist.G1dWaistController(
+                armed_fn=lambda: START and not STOP, warn=logger_mp.warning,
+                pitch_backend=None)
+            logger_mp.warning("[waist] G1-D waist pitch/yaw ENABLED (mapping only; no real backend).")
 
         # ipc communication mode. client usage: see utils/ipc.py
         if args.ipc:
@@ -1227,6 +1258,15 @@ if __name__ == '__main__':
                     tele_data.controller_sample_timestamp,
                 )
 
+            if waist_ctrl is not None:
+                # In-memory mapping only; no real backend exists, so this
+                # never sends anything (see teleop/utils/g1d_waist.py).
+                stick_log["waist"] = waist_ctrl.submit(
+                    tele_data.right_ctrl_thumbstickValue,
+                    tele_data.head_pose,
+                    tele_data.controller_sample_timestamp,
+                )
+
             if _diag is not None: _diag.mark("locomotion")
             tracking_pressure_timestamps = (0.0, 0.0)
             if args.ee == "dex3":
@@ -1527,6 +1567,10 @@ if __name__ == '__main__':
         # arm cleanup. Never raises.
         if agv_ctrl is not None:
             agv_ctrl.shutdown(shutdown_cause or "shutdown")
+        # G1-D waist pitch/yaw: stops the pitch backend if one is armed.
+        # Never raises; no-op today (no real backend exists).
+        if waist_ctrl is not None:
+            waist_ctrl.shutdown(shutdown_cause or "shutdown")
         # G1D keeps its declared stable pose: no automatic arm home and no
         # automatic Dex3 open/close motion at q.
         if args.arm == "G1_29":

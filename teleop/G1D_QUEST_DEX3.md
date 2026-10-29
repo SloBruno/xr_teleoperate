@@ -175,3 +175,67 @@ base e coluna param sozinhas e registre aqui. Se o comando ficar travado, a
 emergência física é a única proteção contra queda do processo. Encerre sempre
 com `q`/B/Ctrl+C, nunca `kill`, e rode o launcher dentro de `tmux`/`screen`
 para que uma queda do SSH não mate o processo.
+
+## Cintura: pitch (inclinação) e yaw (rotação) do Quest/Pico (opt-in, `G1D_WAIST=1`)
+
+Desligado por padrão. **Hoje esta flag SEMPRE RECUSA A INICIAR** (exit 2):
+não existe nenhum backend DDS real de cintura neste repositório ainda. Isto
+é intencional (fail-closed) -- ver `teleop/utils/g1d_waist.py` para o
+contrato completo, os bloqueios e a justificativa.
+
+```bash
+G1D_WAIST=1 G1D_VIDEO_MODE=head bash run_g1d_quest_dex3.sh
+# G1D launcher: forwarded argument refused... NÃO -- isto roda e ENTÃO o
+# processo Python recusa com "--g1d-waist: No real rt/waistpitchcmd
+# backend is implemented in this repo yet. ..." (exit 2), antes de
+# qualquer preflight de câmera ou DDS.
+```
+
+Mapeamento (reaproveita o stick direito já usado pela coluna AGV; nenhuma
+mudança no eixo vertical):
+
+| Entrada | Intenção calculada | Faixa |
+|---|---|---|
+| stick direito eixo HORIZONTAL | pitch da cintura (inclinação do torso) | `[-1, 1]` normalizado, mesma zona morta 0.12 + curva cúbica de todo stick Quest/Pico deste repositório |
+| stick direito eixo VERTICAL | **inalterado**: continua controlando a coluna AGV (`g1d_agv.py`) | ±1 (×76.5 mm/s) |
+| giro do headset (yaw) | rotação da cintura (torso), como delta relativo ao yaw medido no instante em que o rastreamento arma (`r`) | rad, sem limite de software hoje (nenhum backend existe) |
+
+Por que a cintura usa o stick direito e não um terceiro input: o pitch e o
+yaw da cintura são dois graus de liberdade novos; o stick direito já carrega
+dois eixos (horizontal/vertical) e o headset carrega sua própria orientação,
+então nenhum controle físico adicional é necessário.
+
+Interface DDS da cintura (confirmada por leitura, NÃO testada em hardware):
+
+* **Pitch**: `rt/waistpitchcmd` (`MotorCmd_`) / `rt/waistpitchstate`
+  (`MotorState_`), domínio DDS 0 -- fora do `rt/lowcmd`, logo nunca conflita
+  com o escritor de braços do G1D. Uma iniciativa separada e isolada
+  (`/home/bruno/g1d_pitch_offline/`, NÃO faz parte deste repositório) está
+  construindo e testando (`control_session.PitchControlSession`) o motor de
+  segurança real para esse tópico: arme só com estado fresco e sem outro
+  publisher, passo/rampa limitados, parada por atraso/erro de
+  tracking/timeout, nunca rearma após parar. O modo `--real` dessa
+  ferramenta ainda é, deliberadamente, um stub que imprime os bloqueios e
+  sai com código 2; nenhum transporte real existe em lugar nenhum hoje.
+* **Yaw**: investigação passiva (2026-10-29, somente leitura, nada
+  publicado) não encontrou nenhum tópico isolado análogo ao do pitch. O
+  único caminho existente para o `WaistYaw` é o índice 12 do `rt/lowcmd`
+  padrão do corpo G1 -- exatamente o array que este perfil mantém
+  deliberadamente passivo (`command_waist = False`, `kp=kd=tau=0` nas três
+  juntas da cintura; ver `tests/test_g1d_arms_without_waist.py`), porque o
+  G1D é validado como somente-braços. Habilitar yaw de verdade exigiria
+  quebrar essa invariante de segurança de propósito, uma decisão maior do
+  que "ligar um backend" e fora do escopo desta mudança. Por isso o yaw tem
+  apenas MAPEAMENTO (intenção calculada, nunca enviada) e nenhum ponto de
+  integração de backend real existe hoje em `G1dWaistController`.
+
+Quando um backend real de pitch existir (fora desta mudança), o único ponto
+de integração necessário é passar a instância para
+`g1d_waist.G1dWaistController(pitch_backend=...)` em
+`teleop_hand_and_arm.py`; nada mais no pipeline muda. Antes disso, consulte
+os bloqueios documentados em `teleop/utils/g1d_waist.py` e em
+`/home/bruno/g1d_pitch_offline/README.md` (confirmação de fabricante do
+zero/sinal do DDS e dos ganhos, adaptador DDS real revisado, detecção real
+de publisher concorrente, suporte mecânico e E-stop validados, aprovação
+explícita do operador).
+
