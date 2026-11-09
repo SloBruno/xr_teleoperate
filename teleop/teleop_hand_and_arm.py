@@ -1565,7 +1565,7 @@ if __name__ == '__main__':
             agv_ctrl.shutdown(shutdown_cause or "shutdown")
         # G1-D waist pitch: drive to q=0.0, hold, then release; the arms keep
         # their last command meanwhile. Never released away from neutral
-        # (double Ctrl-C is the explicit operator override).
+        # (no software override; Ctrl-C is acknowledged and the wait goes on).
         if waist_pitch is not None:
             try:
                 waist_pitch.request_home_and_release(shutdown_cause or "teleop stop")

@@ -282,7 +282,6 @@ class WaistPitchSupervisor:
         self._arm_requested = False
         self._home_reason = None
         self.failsafe_latched = False
-        self.abandoned = False
         self.state = IDLE
         self.last_reason = None
         self._arm_t0 = None
@@ -293,6 +292,8 @@ class WaistPitchSupervisor:
         self._moving = False
         self._last_home_cmd_t = None
         self._last_arm_stamp = None
+        self._arm_sample_bad = False
+        self._bus_closed = False
         self._n = 0
         self._tick_errors = 0
         self.admission_refusals = 0
@@ -333,11 +334,7 @@ class WaistPitchSupervisor:
 
     @property
     def finished(self):
-        return self.state in FINISHED_STATES or self.abandoned
-
-    def abandon(self):
-        """Operator override (double Ctrl-C): stop publishing NOW."""
-        self.abandoned = True
+        return self.state in FINISHED_STATES
 
     # ---- helpers ------------------------------------------------------------
     def _say(self, level, msg):
@@ -362,7 +359,10 @@ class WaistPitchSupervisor:
         s = _finite(stamp)
         if states is not None and s is not None and s != self._last_arm_stamp:
             self._last_arm_stamp = s
-            self.arm_filter.ingest(states, s)
+            self._arm_sample_bad = not self.arm_filter.ingest(states, s)
+        if self._arm_sample_bad:
+            q, dq, ddq = self.arm_filter.get()
+            return q, dq, ddq, False
         # Re-anchor: a sample stamped after this cycle's `now` (subscriber
         # thread) is fresh, not "negative age".
         stamp_now = self.arm_filter.stamp
@@ -377,6 +377,17 @@ class WaistPitchSupervisor:
         self.last_reason = reason
         self._say(level, f"{state.upper()}: {reason}")
         self._close_jsonl()
+        self._close_bus()
+
+    def _close_bus(self):
+        # only in a finished state: released at neutral, or never published
+        if self._bus_closed or self.state not in FINISHED_STATES:
+            return
+        self._bus_closed = True
+        try:
+            self.bus.close()
+        except Exception as error:
+            self._say("warning", f"falha ao fechar o barramento do pitch: {error!r}")
 
     # ---- one control cycle --------------------------------------------------
     def step(self, now=None):
@@ -421,14 +432,31 @@ class WaistPitchSupervisor:
         if not arms_fresh:
             self.last_reason = "sem estado fresco dos braços (rt/lowstate)"
             return False
+        q0 = _finite(getattr(st, "q", None))
+        if q0 is None or not (-0.05 <= q0 <= PITCH_Q_MAX + 0.02):
+            self._finish(REFUSED, f"q medido {q0} fora de [0, {PITCH_Q_MAX:.2f}] rad: traga o tronco ao neutro "
+                                  "com a ferramenta do pitch antes de usar o teleop")
+            return False
         if not self._writer_created:
-            foreign = self.bus.foreign_writers()
+            try:
+                foreign = self.bus.foreign_writers()
+            except Exception as error:
+                self._finish(REFUSED, f"descoberta DDS falhou ({error!r})")
+                return False
             if foreign:
                 self._finish(REFUSED, f"outro publisher em rt/waistpitchcmd: {foreign!r}")
                 return False
             self._writer_created = True
             if not self.bus.create_cmd_writer():
                 self._finish(REFUSED, "GUID do nosso publisher não confirmado")
+                return False
+            try:
+                foreign = self.bus.foreign_writers()
+            except Exception as error:
+                self._finish(REFUSED, f"descoberta DDS falhou ({error!r})")
+                return False
+            if foreign:
+                self._finish(REFUSED, f"outro publisher em rt/waistpitchcmd: {foreign!r}")
                 return False
             now = self._clock()
             st, stamp, ok = self._fresh_state(now)
@@ -458,20 +486,17 @@ class WaistPitchSupervisor:
         self._last_t = now
         self._n += 1
 
-        if self.abandoned:
-            return None
-
         # foreign writer appeared: go home, never drop the torso
         if self._n % FOREIGN_CHECK_EVERY == 0 and self.state == ACTIVE:
             try:
                 foreign = self.bus.foreign_writers()
-            except Exception:
-                foreign = []
+            except Exception as error:
+                foreign = [f"descoberta DDS falhou: {error!r}"]
             if foreign:
                 self.request_home_and_release(f"outro publisher em rt/waistpitchcmd {foreign!r}")
                 home_reason = home_reason or "foreign writer"
 
-        st, stamp, _ok = self._fresh_state(now)
+        st, stamp, state_fresh = self._fresh_state(now)
         aq, adq, addq, arms_fresh = self._update_arms(now)
         if arms_fresh:
             ctrl.set_body_state(aq, adq, addq, True)
@@ -484,12 +509,18 @@ class WaistPitchSupervisor:
             except Exception:
                 temp = None
 
+        if self.state == ACTIVE and ctrl.homing_then_release and home_reason is None and not failsafe:
+            # the controller started its own home+release (thermal 78 C,
+            # session cap): adopt it so stick input can never cancel it
+            home_reason = "controlador iniciou volta ao neutro (térmico/tempo de sessão)"
+            self.request_home_and_release(home_reason)
         if self.state == ACTIVE and (failsafe or home_reason is not None):
             why = "FAIL-SAFE (Y esquerdo)" if failsafe else home_reason
             self.state = HOMING
             self.last_reason = why
             self._accum, self._moving = 0.0, False
-            ctrl.safe_shutdown(now)
+            if not ctrl.homing_then_release:
+                ctrl.safe_shutdown(now)
             self._last_home_cmd_t = now
             self._say("warning", f"{why}: voltando a q={PITCH_HOME_Q:.1f} e soltando só no neutro.")
         elif self.state == HOMING:
@@ -498,7 +529,7 @@ class WaistPitchSupervisor:
                 ctrl.safe_shutdown(now)          # clears lockout, re-targets 0.0
                 self._last_home_cmd_t = now
         elif self.state == ACTIVE:
-            self._apply_stick(now, xy, ts, st, temp, dt)
+            self._apply_stick(now, xy, ts, st if state_fresh else None, temp, dt)
 
         try:
             cmd = ctrl.tick(now, st, stamp, temp)
@@ -562,18 +593,23 @@ class WaistPitchSupervisor:
                 self._say("info", f"avanço recusado: {why}")
 
     # ---- thread -------------------------------------------------------------
+    def _guarded_step(self):
+        try:
+            return self.step()
+        except Exception as error:   # never die silently while leaned
+            self._say("error", f"erro inesperado no ciclo: {error!r}")
+            self.request_home_and_release(f"erro no ciclo do pitch: {error!r}")
+            if self._last_cmd is not None and self.state in (ACTIVE, HOMING):
+                try:
+                    self.bus.publish_cmd(WRITER_ID, self._last_cmd, self._clock())
+                except Exception:
+                    pass
+            return self._last_cmd
+
     def _run(self):
         next_t = self._clock()
         while not self.finished:
-            try:
-                self.step()
-            except Exception as error:   # never die silently while leaned
-                self._say("error", f"erro inesperado no ciclo: {error!r}")
-                if self._last_cmd is not None and self.state in (ACTIVE, HOMING) and not self.abandoned:
-                    try:
-                        self.bus.publish_cmd(WRITER_ID, self._last_cmd, self._clock())
-                    except Exception:
-                        pass
+            self._guarded_step()
             next_t += CTRL_DT
             delay = next_t - self._clock()
             if delay > 0:
@@ -581,6 +617,7 @@ class WaistPitchSupervisor:
             else:
                 next_t = self._clock()
         self._close_jsonl()
+        self._close_bus()
 
     # ---- telemetry (pitch thread only) --------------------------------------
     def _open_jsonl(self):
@@ -654,14 +691,15 @@ def create_waist_pitch_supervisor(arm_ctrl, log, jsonl_path=None, wait_state_s=2
 
 def finish_waist_pitch(sup, log, sleep=time.sleep, poll_s=0.1, report_every_s=2.0, max_wait_s=None):
     """Teleop shutdown: home to 0.0, hold, release; block until done.
-    One Ctrl-C is ignored (with a warning); a second one abandons (operator
-    override: the torso can fall if it is not at neutral)."""
+    There is deliberately NO software override that stops publishing away
+    from neutral: Ctrl-C is acknowledged and the wait continues (the pitch
+    thread is non-daemon and keeps holding/homing). A return that cannot
+    complete HOLDS; the operator uses the physical support / E-stop."""
     if sup is None:
         return "absent"
     sup.request_home_and_release("teleop stop")
     if sup._thread is None and sup.state == IDLE:
         sup.step()
-    interrupts = 0
     waited = 0.0
     next_report = 0.0
     while not sup.finished:
@@ -670,17 +708,13 @@ def finish_waist_pitch(sup, log, sleep=time.sleep, poll_s=0.1, report_every_s=2.
         try:
             if waited >= next_report:
                 next_report += report_every_s
-                log("warning", f"[waist-pitch] aguardando o pitch voltar ao neutro (estado={sup.state}); "
-                               "Ctrl-C duas vezes força a saída (o tronco pode CAIR).")
+                log("warning", f"[waist-pitch] aguardando o pitch voltar ao neutro q=0.0 (estado={sup.state}); "
+                               "ele só solta no neutro.")
             sleep(poll_s)
             waited += poll_s
         except KeyboardInterrupt:
-            interrupts += 1
-            if interrupts >= 2:
-                sup.abandon()
-                log("critical", "[waist-pitch] SAÍDA FORÇADA: parando de publicar o pitch; se não estiver "
-                                "no neutro o tronco pode CAIR.")
-                return "forced"
-            log("warning", "[waist-pitch] pitch ainda voltando ao neutro; Ctrl-C de novo força a saída "
-                           "(o tronco pode CAIR).")
+            log("warning", "[waist-pitch] Ctrl-C ignorado: o pitch continua voltando/segurando e só solta no "
+                           "neutro q=0.0. Se ele não volta, segure o tronco/use a parada de emergência.")
+    if sup._thread is None:
+        sup._close_bus()
     return sup.state

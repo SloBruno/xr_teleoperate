@@ -91,6 +91,7 @@ class PlantBus:
         self.create_ok = create_ok
         self.foreign = list(foreign or [])
         self.state_stale = False
+        self.closed = False
         self.temperature = (35, 36)
         self._last_t = clock()
         self._stamp = clock()
@@ -123,7 +124,7 @@ class PlantBus:
         self.plant.cmd = cmd
 
     def close(self):
-        pass
+        self.closed = True
 
 
 def make(q0=0.0, arms=None, **bus_kw):
@@ -586,6 +587,28 @@ def test_thermal_home_temperature_drives_home_and_release():
     _assert_released_only_at_neutral(env)
 
 
+def test_thermal_home_cannot_be_cancelled_by_releasing_the_stick():
+    env = make()
+    arm_now(env)
+    run(env, 2.5, stick=(1.0, 0.0))
+    env.bus.temperature = (40, 79)
+    run(env, 0.1, stick=(1.0, 0.0))
+    env.bus.temperature = (40, 60)
+    run(env, 12.0, stick=(0.0, 0.0))          # stick released while homing
+    _assert_released_only_at_neutral(env)
+
+
+def test_no_jog_while_pitch_state_is_stale():
+    env = make()
+    arm_now(env)
+    run(env, 1.0, stick=(0.0, 0.0))
+    env.bus.state_stale = True
+    t0 = env.ctrl.target
+    run(env, 1.0, stick=(1.0, 0.0))
+    assert env.ctrl.target == t0
+    assert not env.ctrl.locked_out
+
+
 def test_hot_motor_refuses_forward_but_allows_return():
     env = make()
     arm_now(env)
@@ -644,20 +667,100 @@ def test_real_thread_arms_and_finishes_after_stop_with_wall_clock():
         stop_plant.set()
 
 
-def test_finish_requires_two_interrupts_to_abandon():
+def test_ctrl_c_never_abandons_the_pitch_away_from_neutral():
     env = make()
     arm_now(env)
-    sleeps = {"n": 0}
+    run(env, 2.0, stick=(1.0, 0.0))
+    calls = {"n": 0}
 
     def sleeper(_):
-        sleeps["n"] += 1
-        if sleeps["n"] in (1, 2):
-            raise KeyboardInterrupt
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise KeyboardInterrupt          # operator hammers Ctrl-C
+        env.clock.t += wp.CTRL_DT
+        env.bus.advance()
+        env.sup.step()
     logs = []
-    result = wp.finish_waist_pitch(env.sup, log=lambda *a, **k: logs.append(a), sleep=sleeper)
-    assert result == "forced"
-    assert env.sup.abandoned
-    assert any("CAIR" in str(m) for m in logs)
+    result = wp.finish_waist_pitch(env.sup, log=lambda *a: logs.append(a), sleep=sleeper, poll_s=wp.CTRL_DT)
+    assert result == wp.RELEASED
+    assert abs(env.bus.plant.q) <= 0.012
+    assert env.bus.closed
+    assert not hasattr(env.sup, "abandon")
+
+
+def test_unexpected_cycle_exception_requests_home_and_keeps_holding():
+    env = make()
+    arm_now(env)
+    run(env, 2.0, stick=(1.0, 0.0))
+    real_read = env.bus.read_state
+    env.bus.read_state = lambda: (_ for _ in ()).throw(RuntimeError("dds read died"))
+    n0 = len(env.bus.published)
+    for _ in range(10):
+        env.clock.t += wp.CTRL_DT
+        env.bus.advance()
+        env.sup._guarded_step()
+    assert len(env.bus.published) >= n0 + 10              # last command re-published (hold)
+    assert env.sup._home_reason is not None
+    env.bus.read_state = real_read
+    run(env, 12.0, stick=None)
+    _assert_released_only_at_neutral(env)
+
+
+def test_bus_closed_after_release_and_after_refusal():
+    env = make()
+    arm_now(env)
+    env.sup.request_home_and_release("teleop stop")
+    run(env, 5.0, stick=None)
+    assert env.sup.state == wp.RELEASED and env.bus.closed
+    env2 = make(create_ok=False)
+    env2.sup.request_arm(start_thread=False)
+    run(env2, 0.5, stick=None)
+    assert env2.sup.state == wp.REFUSED and env2.bus.closed
+
+
+def test_foreign_writer_appearing_with_our_writer_refuses_before_first_publish():
+    env = make()
+    original = env.bus.create_cmd_writer
+
+    def create():
+        ok = original()
+        env.bus.foreign.append("raced-in")
+        return ok
+    env.bus.create_cmd_writer = create
+    env.sup.request_arm(start_thread=False)
+    run(env, 0.5, stick=None)
+    assert env.sup.state == wp.REFUSED and env.bus.published == []
+
+
+def test_discovery_failure_fails_closed():
+    env = make()
+    env.bus.foreign_writers = lambda: (_ for _ in ()).throw(RuntimeError("discovery broke"))
+    env.sup.request_arm(start_thread=False)
+    run(env, 0.5, stick=None)
+    assert env.sup.state == wp.REFUSED and env.bus.published == []
+    env2 = make()
+    arm_now(env2)
+    run(env2, 2.0, stick=(1.0, 0.0))
+    env2.bus.foreign_writers = lambda: (_ for _ in ()).throw(RuntimeError("discovery broke"))
+    run(env2, 12.0, stick=(1.0, 0.0))
+    _assert_released_only_at_neutral(env2)
+
+
+@pytest.mark.parametrize("q0", [0.40, 0.8])
+def test_arming_refused_when_torso_already_beyond_cap(q0):
+    env = make(q0=q0)
+    env.sup.request_arm(start_thread=False)
+    run(env, 0.5, stick=None)
+    assert env.sup.state == wp.REFUSED and env.bus.published == [] and env.bus.create_calls == 0
+
+
+def test_invalid_newer_arm_sample_blocks_forward_immediately():
+    env = make()
+    arm_now(env)
+    env.arms.arms["left_elbow_joint"] = float("nan")
+    t0 = env.ctrl.target
+    run(env, 1.0, stick=(1.0, 0.0))
+    assert env.ctrl.target <= t0 + 1e-9
 
 
 def test_finish_absent_supervisor_is_noop():

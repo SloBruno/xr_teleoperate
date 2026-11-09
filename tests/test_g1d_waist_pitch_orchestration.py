@@ -51,8 +51,6 @@ class RecordingSupervisor:
                 self.log.append("pitch_released")
         return self.state in wp.FINISHED_STATES
 
-    def abandon(self):
-        self.log.append("pitch_abandon")
 
 
 def _run(monkeypatch, tmp_path, script, *, pitch=True):

@@ -187,7 +187,7 @@ G1D_WAIST_PITCH=1 XR_TELEOP_VUER_IP=10.0.0.50 bash teleop/run_g1d_quest_dex3.sh
 |---|---|
 | stick direito **horizontal** | velocidade do pitch: direita = inclinar para frente, esquerda = voltar; zona morta 0,12 + curva cúbica, máx **0,10 rad/s**; soltar o stick = **segura** |
 | **Y esquerdo** | **FAIL-SAFE**: segurado numa amostra fresca (≤ 0,25 s) trava; o pitch volta ao neutro **q = 0,0 rad** em velocidade controlada, segura e só então para de publicar. Funciona com o stick velho e com o controlador bloqueado; não para braços, mãos, AGV nem o teleop. Para usar o pitch de novo, reinicie o teleop |
-| `q` / B direito / Ctrl-C / erro | o pitch volta a q = 0,0 e solta **antes** de soltar os braços. Ctrl-C uma vez é ignorado com aviso; duas vezes força a saída (o tronco pode CAIR se não estiver no neutro) |
+| `q` / B direito / Ctrl-C / erro | o pitch volta a q = 0,0 e solta **antes** de soltar os braços. Durante essa volta Ctrl-C é ignorado (com aviso): não existe saída por software que solte o tronco fora do neutro; se a volta travar ele SEGURA — use o suporte físico / parada de emergência |
 
 - Stick direito **vertical** continua sendo a coluna (com `G1D_AGV=1`); o stick esquerdo a base.
 - Amostra do Quest velha (> 0,25 s): velocidade 0, segura, sem movimento.
