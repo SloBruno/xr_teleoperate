@@ -175,3 +175,31 @@ base e coluna param sozinhas e registre aqui. Se o comando ficar travado, a
 emergência física é a única proteção contra queda do processo. Encerre sempre
 com `q`/B/Ctrl+C, nunca `kill`, e rode o launcher dentro de `tmux`/`screen`
 para que uma queda do SSH não mate o processo.
+
+## Inclinação da cintura (pitch) pelo Quest (opt-in, `G1D_WAIST_PITCH=1`)
+
+```bash
+G1D_WAIST_PITCH=1 XR_TELEOP_VUER_IP=10.0.0.50 bash teleop/run_g1d_quest_dex3.sh
+# combina com G1D_AGV=1 e com qualquer G1D_VIDEO_MODE
+```
+
+| Entrada | Ação |
+|---|---|
+| stick direito **horizontal** | velocidade do pitch: direita = inclinar para frente, esquerda = voltar; zona morta 0,12 + curva cúbica, máx **0,10 rad/s**; soltar o stick = **segura** |
+| **Y esquerdo** | **FAIL-SAFE**: segurado numa amostra fresca (≤ 0,25 s) trava; o pitch volta ao neutro **q = 0,0 rad** em velocidade controlada, segura e só então para de publicar. Funciona com o stick velho e com o controlador bloqueado; não para braços, mãos, AGV nem o teleop. Para usar o pitch de novo, reinicie o teleop |
+| `q` / B direito / Ctrl-C / erro | o pitch volta a q = 0,0 e solta **antes** de soltar os braços. Ctrl-C uma vez é ignorado com aviso; duas vezes força a saída (o tronco pode CAIR se não estiver no neutro) |
+
+- Stick direito **vertical** continua sendo a coluna (com `G1D_AGV=1`); o stick esquerdo a base.
+- Amostra do Quest velha (> 0,25 s): velocidade 0, segura, sem movimento.
+- Limite: **q ≤ 0,30 rad**. Pior caso de retorno (qualquer pose de braço nos limites do URDF,
+  inclusive esticados à frente, mãos Dex3 do URDF, lei de descolamento medida 2,14|g|+3,9 com
+  `ct_params.json`): 76,8 N·m; com +0,25 kg por mão 83,0 N·m (≤ 85). Em 0,80 rad o mesmo pior caso
+  seria ~133 N·m. Além disso, a admissão por torque computado com os braços MEDIDOS recusa avançar
+  quando o retorno previsto passa de 74 N·m.
+- Nada é publicado em `rt/waistpitchcmd` antes do `r`/A; recusa armar com outro publisher, sem
+  estado fresco do pitch/braços ou sem confirmar o próprio GUID. Outro publisher no meio da sessão
+  => volta ao neutro e solta (nunca derruba). Térmico: ≥70 °C só aceita voltar; ≥78 °C volta e solta.
+- Controle reutilizado de `g1d_pitch_offline` (785a29d), copiado byte a byte em
+  `teleop/third_party/g1d_pitch` (sha256 em `VENDORED.json`, verificado na inicialização).
+- Log por ciclo: `~/.local/state/xr_teleoperate/waist-pitch-<data>.jsonl` (ou `XR_TELEOP_PITCH_LOG`).
+- Simulação offline: `python tools/g1d_waist_pitch_sim.py --tau-limit 85`.

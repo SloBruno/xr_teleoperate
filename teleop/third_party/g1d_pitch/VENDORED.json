@@ -1,0 +1,18 @@
+{
+ "ct_params_source": "robot ~/g1d_pitch_offline/ct_params.json (identified 2026-10-30 from sombra1.jsonl)",
+ "policy": "byte-identical copies; do not edit here. Update by re-copying and regenerating this manifest.",
+ "sha256": {
+  "body_model.py": "ba9a37cc4ba77ceb154f3c2434614fc1bc8b5c79c741f1fa945d39ff641d69ac",
+  "body_state.py": "f9b075a01e90fb7a38b581995eb439e1c30c48238464f5e9263bb707925988b8",
+  "ct_params.json": "22156ac391713e587ac92f26a9bb21a2011bf3be11966b6313c1db83fdfc3399",
+  "ct_sim/body_plant.py": "69ac3e637b23b5ef4b42357378e8860794d859269dc60de37e9118ffebcacf2f",
+  "g1_d.urdf": "46527573a7140c7129c3587ba5591f269974deb893a0b095ebca500028b8bf40",
+  "g1d_dds_fake.py": "521f794641acafd62069a30cf5dbd2145aef7bc4b2c8b6bb959d32f569e4cca5",
+  "g1d_dds_real.py": "a6a8b0559879c67abdb5579127b13482d6b50cb92b7525ab56139d7b5a0edb82",
+  "gravity_model.py": "a9020e506d83eb447a5808458a2b788862060c1573771ce3385f28b1ad9b52e9",
+  "pitch_controller.py": "392c019db40d7d29347463ba3dc3a87a00c6511861c82cd22dff48ee3e2b5e23",
+  "pitch_ct.py": "e19a4d51ab8d779dc91cab2a6f82cf601228db4b6539179152ea4d8308b43555"
+ },
+ "source_commit": "785a29d",
+ "source_repo": "/home/bruno/g1d_pitch_offline (robot mirror ~/g1d_pitch_offline)"
+}

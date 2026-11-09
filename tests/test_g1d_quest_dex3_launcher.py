@@ -177,6 +177,8 @@ def _run_launcher(tmp_path, *args, extra_env=None):
         "XR_TELEOP_CERT": str(cert),
         "XR_TELEOP_KEY": str(key),
         "TELEIMAGER_PYTHON": str(_fake_python(tmp_path)),
+        # never touch the operator's real ~/.local/state/xr_teleoperate (quest_url)
+        "XR_TELEOP_STATE_DIR": str(tmp_path / "state"),
     }
     env.update(extra_env or {})
     env.pop("G1D_LAUNCHER_SKIP_TELEOP", None)

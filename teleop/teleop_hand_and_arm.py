@@ -46,6 +46,7 @@ from teleop.utils.quest_controls import (LocomotionRamp, dispatch_joystick_locom
                                          resolve_speed_caps, speed_cap_banner, loco_stick_is_fresh)
 from teleop.utils.loco_preflight import run_loco_preflight
 from teleop.utils import g1d_agv
+from teleop.utils import g1d_waist_pitch
 from teleop.utils.quest_safety import controller_sample_is_fresh, fresh_controller_value
 from teleop.utils.controller_wrist_calibration import ControllerWristCalibrator
 from teleop.utils.human_arm_calibration import HumanArmSweep, HumanCalibratedWristCalibrator
@@ -488,6 +489,7 @@ if __name__ == '__main__':
     parser.add_argument('--walk-speed-cap', type=float, default=None, help='Walk cap m/s (default 0.3, hard max 0.6; env G1_WALK_SPEED_CAP)')
     parser.add_argument('--loco-request-fsm', type=str, default='none', choices=['none', '500'], help='Opt-in: in the preflight only, request FSM 500 (SetFsmId) when the robot is in 501 and confirm by polling; never 801; default none = send nothing')
     parser.add_argument('--loco-backend', type=str, default='wirelesscontroller', choices=['setvelocity', 'wirelesscontroller'], help='Walking transport: wirelesscontroller (default: continuous 20 Hz rt/wirelesscontroller joystick state; fail-safe, no silent fallback) or setvelocity (legacy RPC 7105, only when forced)')
+    parser.add_argument('--g1d-waist-pitch', action='store_true', help='G1D only, launcher-controlled (G1D_WAIST_PITCH=1): Quest right stick HORIZONTAL = waist pitch rate (<=0.10 rad/s, cap 0.30 rad); LEFT Y = fail-safe back to q=0.0 then release')
     parser.add_argument('--g1d-agv', action='store_true', help='G1D only, launcher-controlled (G1D_AGV=1): Quest left stick drives the AGV base (vx/vyaw), right stick the lift column; cap env G1D_AGV_MAX_VX (default 0.6, max 1.5 m/s)')
     parser.add_argument('--turn-rate-cap', type=float, default=None, help='Turn cap rad/s (default 0.3, hard max 1.0; env G1_TURN_RATE_CAP)')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
@@ -520,6 +522,12 @@ if __name__ == '__main__':
         parser.error("--g1d-agv is only valid with --arm G1D.")
     if args.g1d_agv and os.environ.get("G1D_AGV") != "1":
         parser.error("--g1d-agv is launcher-controlled: set G1D_AGV=1 (run_g1d_quest_dex3.sh).")
+    if args.g1d_waist_pitch and args.arm != "G1D":
+        parser.error("--g1d-waist-pitch is only valid with --arm G1D.")
+    if args.g1d_waist_pitch and os.environ.get("G1D_WAIST_PITCH") != "1":
+        parser.error("--g1d-waist-pitch is launcher-controlled: set G1D_WAIST_PITCH=1 (run_g1d_quest_dex3.sh).")
+    if args.g1d_waist_pitch and args.sim:
+        parser.error("--g1d-waist-pitch has no simulation backend; it is refused with --sim.")
     agv_max_vx = None
     if args.g1d_agv:
         try:
@@ -552,6 +560,11 @@ if __name__ == '__main__':
     robot_monitor = None
     # Opt-in G1-D AGV/column: nothing AGV-related exists without --g1d-agv.
     agv_ctrl = None
+    # Opt-in G1-D waist pitch: nothing pitch-related exists without --g1d-waist-pitch.
+    waist_pitch = None
+
+    def _waist_pitch_log(level, message):
+        _log_best_effort(level, message)
 
     try:
         # TeleVuer forks its Vuer server Process in __init__. Forking after DDS /
@@ -715,6 +728,18 @@ if __name__ == '__main__':
             arm_ik = G1_29_ArmIK()
             arm_ctrl = G1D_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
             arm_calibration = HumanCalibratedWristCalibrator(ControllerWristCalibrator())
+            if args.g1d_waist_pitch:
+                # Passive only (rt/waistpitchstate reader + DDS discovery);
+                # fails closed here, before any preparation motion.
+                waist_pitch = g1d_waist_pitch.create_waist_pitch_supervisor(
+                    arm_ctrl, log=_waist_pitch_log,
+                    jsonl_path=os.environ.get("XR_TELEOP_PITCH_LOG") or os.path.join(
+                        os.environ.get("XR_TELEOP_POSE_LOG_DIR", "/home/unitree/.local/state/xr_teleoperate"),
+                        time.strftime("waist-pitch-%Y%m%d-%H%M%S.jsonl")))
+                logger_mp.warning(
+                    f"[waist-pitch] ENABLED: right stick HORIZONTAL = pitch (right = bend forward), "
+                    f"<= {g1d_waist_pitch.PITCH_RATE_MAX:.2f} rad/s, cap {g1d_waist_pitch.PITCH_Q_MAX:.2f} rad; "
+                    f"LEFT Y = fail-safe to q=0.0 then release; active only after r.")
         elif args.arm == "G1_23":
             arm_ik = G1_23_ArmIK()
             arm_ctrl = G1_23_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
@@ -1060,6 +1085,11 @@ if __name__ == '__main__':
                 agv_start_cancelled = STOP
             if not agv_start_cancelled:
                 agv_ctrl.activate()
+        if waist_pitch is not None:
+            with LIFECYCLE_LOCK:
+                pitch_start_cancelled = STOP
+            if not pitch_start_cancelled:
+                waist_pitch.request_arm()
         arm_ctrl.speed_gradual_max()
 
         head_img = None
@@ -1226,6 +1256,12 @@ if __name__ == '__main__':
                     tele_data.right_ctrl_thumbstickValue,
                     tele_data.controller_sample_timestamp,
                 )
+            if waist_pitch is not None:
+                # In-memory post only; the pitch thread owns rt/waistpitchcmd.
+                try:
+                    waist_pitch.submit(*g1d_waist_pitch.extract_quest_inputs(tele_data))
+                except Exception as error:
+                    logger_mp.warning(f"[waist-pitch] input post failed: {error!r}")
 
             if _diag is not None: _diag.mark("locomotion")
             tracking_pressure_timestamps = (0.0, 0.0)
@@ -1527,6 +1563,16 @@ if __name__ == '__main__':
         # arm cleanup. Never raises.
         if agv_ctrl is not None:
             agv_ctrl.shutdown(shutdown_cause or "shutdown")
+        # G1-D waist pitch: drive to q=0.0, hold, then release; the arms keep
+        # their last command meanwhile. Never released away from neutral
+        # (double Ctrl-C is the explicit operator override).
+        if waist_pitch is not None:
+            try:
+                waist_pitch.request_home_and_release(shutdown_cause or "teleop stop")
+                pitch_result = g1d_waist_pitch.finish_waist_pitch(waist_pitch, log=_waist_pitch_log)
+                _log_best_effort("warning", f"[waist-pitch] shutdown result: {pitch_result}")
+            except BaseException as error:
+                _log_best_effort("error", f"[waist-pitch] shutdown error: {error!r}")
         # G1D keeps its declared stable pose: no automatic arm home and no
         # automatic Dex3 open/close motion at q.
         if args.arm == "G1_29":

@@ -7,8 +7,8 @@ set -euo pipefail
 # Refuse anything that could change the validated G1D profile or enable motion.
 for g1d_extra_arg in "$@"; do
     case "$g1d_extra_arg" in
-        --motion|--motion=*|--g1d-a|--g1d-a=*|--g1d-ag|--g1d-ag=*|--g1d-agv|--g1d-agv=*|--arm|--arm=*|--ee|--ee=*|--input-mode|--input-mode=*|--network-interface|--network-interface=*|--camera-layout|--camera-layout=*|--force-zmq-video|--video-fps|--video-fps=*|--jpeg-quality|--jpeg-quality=*)
-            echo "G1D launcher: forwarded argument refused: $g1d_extra_arg (safety/profile flags are fixed; use G1D_VIDEO_MODE, G1D_HEAD_* and G1D_AGV settings)." >&2
+        --motion|--motion=*|--g1d-a|--g1d-a=*|--g1d-ag|--g1d-ag=*|--g1d-agv|--g1d-agv=*|--g1d-w*|--arm|--arm=*|--ee|--ee=*|--input-mode|--input-mode=*|--network-interface|--network-interface=*|--camera-layout|--camera-layout=*|--force-zmq-video|--video-fps|--video-fps=*|--jpeg-quality|--jpeg-quality=*)
+            echo "G1D launcher: forwarded argument refused: $g1d_extra_arg (safety/profile flags are fixed; use G1D_VIDEO_MODE, G1D_HEAD_*, G1D_AGV and G1D_WAIST_PITCH settings)." >&2
             exit 2
             ;;
     esac
@@ -78,6 +78,21 @@ case "$G1D_AGV" in
         echo "G1D AGV ENABLED: left stick = base (G1D_AGV_MAX_VX=$G1D_AGV_MAX_VX m/s, turn 0.6 rad/s), right stick = lift column; active only after r."
         ;;
     *) echo "G1D launcher: G1D_AGV must be 0 or 1." >&2; exit 2 ;;
+esac
+
+# Opt-in G1-D waist pitch (rt/waistpitchcmd): right stick HORIZONTAL = pitch
+# rate, LEFT Y = fail-safe back to q=0.0 then release. Only this environment
+# switch adds --g1d-waist-pitch; the flag itself is never user-forwardable.
+G1D_WAIST_PITCH=${G1D_WAIST_PITCH:-0}
+g1d_pitch_args=()
+case "$G1D_WAIST_PITCH" in
+    0|"") ;;
+    1)
+        export G1D_WAIST_PITCH
+        g1d_pitch_args=(--g1d-waist-pitch)
+        echo "G1D WAIST PITCH ENABLED: right stick HORIZONTAL = bend (right = forward, left = back), max 0.30 rad, 0.10 rad/s; release stick = hold; LEFT Y = back to neutral q=0.0 then release; q / right B also return to neutral before exit. Active only after r."
+        ;;
+    *) echo "G1D launcher: G1D_WAIST_PITCH must be 0 or 1." >&2; exit 2 ;;
 esac
 
 # Print the Quest URL before any Python/DDS preflight.  Unlike the G1 helper,
@@ -212,6 +227,7 @@ if [[ "$g1d_video_mode" == head ]]; then
       --img-server-ip "$teleimager_host" \
       --network-interface "$g1d_dds_interface" \
       ${g1d_agv_args[@]+"${g1d_agv_args[@]}"} \
+      ${g1d_pitch_args[@]+"${g1d_pitch_args[@]}"} \
       "$@"
 fi
 if [[ "$g1d_video_mode" == vertical ]]; then
@@ -229,6 +245,7 @@ if [[ "$g1d_video_mode" == vertical ]]; then
       --img-server-ip "$teleimager_host" \
       --network-interface "$g1d_dds_interface" \
       ${g1d_agv_args[@]+"${g1d_agv_args[@]}"} \
+      ${g1d_pitch_args[@]+"${g1d_pitch_args[@]}"} \
       "$@"
 fi
 
@@ -246,4 +263,5 @@ exec "$teleimager_python" -s teleop_hand_and_arm.py \
   --no-video \
   --network-interface "$g1d_dds_interface" \
   ${g1d_agv_args[@]+"${g1d_agv_args[@]}"} \
+  ${g1d_pitch_args[@]+"${g1d_pitch_args[@]}"} \
   "$@"
