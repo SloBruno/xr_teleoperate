@@ -67,6 +67,33 @@ def _fk_matches_target(arm_ik, q, target):
     return True
 
 
+def _hold_gravity_model(arm_ik):
+    """``(gravity_tauff, tau_limit)`` for the C1 gravity hold, or ``(None, None)``.
+
+    Only IK models that expose a static gravity term (``G1_29_ArmIK``, used by
+    both G1_29 and G1D) enable it; every other profile keeps the legacy
+    measured-q / zero-torque hold.  The bound is the model's own per-joint
+    effort limit, the same model that produces the tracking feed-forward.
+    """
+    gravity = getattr(arm_ik, "gravity_tauff", None)
+    if not callable(gravity):
+        return None, None
+    try:
+        limit = np.asarray(arm_ik.reduced_robot.model.effortLimit, dtype=float).copy()
+        if limit.ndim != 1 or not np.all(np.isfinite(limit)) or np.any(limit <= 0.0):
+            limit = None
+    except Exception:
+        limit = None
+    return gravity, limit
+
+
+def _hold_gravity_scale(enable_ramp):
+    """Feed-forward scale for a hold: the ramp's own tauff factor while running."""
+    if enable_ramp is None or not enable_ramp.started or enable_ramp.complete:
+        return 1.0
+    return float(enable_ramp.alpha)
+
+
 @dataclass(frozen=True)
 class ArmTrackingCycleResult:
     target_accepted: bool
@@ -195,6 +222,7 @@ def run_arm_tracking_cycle(
             command_q, command_tauff, ramp_alpha = blended
 
     final_sample_fresh = sample_fresh and controller_sample_is_fresh(sample_timestamp, now)
+    hold_gravity, hold_tau_limit = _hold_gravity_model(arm_ik)
     command = publish_arm_command(
         arm_ctrl,
         command_q,
@@ -204,6 +232,9 @@ def run_arm_tracking_cycle(
         lifecycle_lock=lifecycle_lock,
         is_started=is_started,
         is_stopped=is_stopped,
+        hold_gravity_tauff=hold_gravity,
+        hold_tau_limit=hold_tau_limit,
+        hold_gravity_scale=_hold_gravity_scale(enable_ramp),
     )
     if command.published and rate_limiter is not None and limiter_bands is not None:
         rate_limiter.commit()
@@ -245,7 +276,8 @@ def build_arm_recording_actions(cycle: ArmTrackingCycleResult):
     """Build JSON-ready arm actions from this cycle's selected command.
 
     ``selected_*`` is the command decision passed to the actuator, including
-    a measured-q/zero-torque hold. It is pre-controller-limit telemetry;
+    a hold (last published q + gravity for G1_29/G1D, measured q / zero
+    torque for profiles without a gravity model). It is pre-controller-limit telemetry;
     post-limit snapshots can be added separately without changing this record.
 
     Serialization contract: every qpos field returned here is a plain Python
