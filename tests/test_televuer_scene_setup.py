@@ -1,5 +1,7 @@
 import asyncio
 import importlib
+from collections import deque
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,9 +14,15 @@ class StopAfterSceneSetup(Exception):
 class FakeSession:
     def __init__(self):
         self.upserts = []
+        # Match the pinned Vuer session: scene setup is queued before uplink
+        # drains it. Video must not overwrite those Hands/Controllers messages.
+        self.uplink_queue = deque(maxlen=3)
+        transport = SimpleNamespace(get_write_buffer_size=lambda: 0)
+        self.socket = SimpleNamespace(closed=False, _writer=SimpleNamespace(transport=transport))
 
     def upsert(self, component, **kwargs):
         self.upserts.append((component, kwargs))
+        self.uplink_queue.append(component)
 
 
 @pytest.mark.parametrize(
