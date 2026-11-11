@@ -24,6 +24,14 @@ the anchor in the closing direction the command is ``q`` (zero implicit torque,
 no heating, no extra squeeze); pushed back in the opening direction the command
 stays at the anchor, so the implicit torque ``kp*(anchor - q)`` restores it,
 capped by the closing ceiling times the thermal derate (0 when hot).
+The ceiling has priority over the open-pose clamp: if the joint is pushed so
+far behind the open pose that reaching it would exceed the ceiling, q_cmd sits
+behind open by that amount but always pushes forward at exactly the ceiling;
+it never pulls a joint further back than its measured q. The ceiling bounds the
+position-error term kp*err only (as everywhere in this module); the -kd*dq
+term is damping that opposes the push and is unchanged. Physical caveat: the
+restoring term is a kp=1.5 N*m/rad spring, so a sustained push P settles about
+P/kp behind the anchor (at most close_err_max = 0.5 rad for the thumb).
 
 Evidence (session pose-telemetry-20260930T190939, 287 s, both hands):
   * Free-following joints: error is transient (command steps, finger follows),

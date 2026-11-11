@@ -779,3 +779,67 @@ def test_finger_hold_never_follows_backdrive_beyond_entry():
     # restoring kp*1.0 rad = 1.5 N*m exceeds the 1.2 N*m hold step, stays under the 1.8 ceiling
     assert implicit == pytest.approx(min(dp.DEX3_KP * 1.0, dp.CLOSE_TORQUE_CEILING_NM[3]))
     assert implicit > dp.GRIP_HOLD_TORQUE_NM[3]
+
+
+def test_left_thumb_backdrive_sign_mirrors_right():
+    """Left hand closes the thumb positive: back-drive is toward negative q."""
+    p = Dex3HandProtector(OPEN)
+    lq = tuple(-v for v in TQ)
+    res = run(p, 0.0, dp.STALL_TIME_S + 0.3, -RCLOSED, lambda t: tblocked(t, q=lq))
+    assert res.stall[1] and res.stall[2]
+    t = dp.STALL_TIME_S + 0.3
+    res = p.update(t, -RCLOSED, tblocked(t, q=lq))
+    assert res.q_cmd[1] == pytest.approx(lq[1])                     # static: zero torque
+    res = p.update(t + 0.01, -RCLOSED, tblocked(t + 0.01, q=(0.0, 0.3, 0.4, 0, 0, 0, 0)))
+    assert res.q_cmd[1] == pytest.approx(0.6) and res.q_cmd[2] == pytest.approx(0.6)  # held at entry
+    res = p.update(t + 0.02, -RCLOSED, tblocked(t + 0.02, q=(0.0, -0.9, 0.8, 0, 0, 0, 0)))
+    assert res.q_cmd[1] == pytest.approx(-0.4)                        # ceiling-bounded restoring
+    assert res.q_cmd[2] == pytest.approx(0.8)                         # further closed: follows
+
+
+def test_anchor_resets_on_release_and_relatches_at_new_stall_pose():
+    p = Dex3HandProtector(OPEN)
+    t = _thumb_engage(p)
+    res = run(p, t, dp.STALL_RELEASE_DEBOUNCE_S + 0.1, OPEN, lambda tt: tblocked(tt))
+    assert not res.stall[1]
+    t2 = t + 1.0
+    q2 = (0.0, -0.4, -1.2, 0, 0, 0, 0)       # new stall pose (old anchor was -0.6 / -0.6)
+    res = run(p, t2, dp.STALL_TIME_S + 0.3, RCLOSED, lambda tt: tblocked(tt, q=q2))
+    assert res.stall[1] and res.stall[2] and res.q_cmd[1] == pytest.approx(-0.4)
+    t3 = t2 + dp.STALL_TIME_S + 0.4
+    res = p.update(t3, RCLOSED, tblocked(t3, q=(0.0, -0.2, -1.0, 0, 0, 0, 0)))
+    assert res.q_cmd[1] == pytest.approx(-0.4) and res.q_cmd[2] == pytest.approx(-1.2)   # new anchor
+
+
+def test_missing_q_while_stalled_fails_open_then_hold_resumes():
+    p = Dex3HandProtector(OPEN)
+    t = _thumb_engage(p)
+    st = tblocked(t, q=(0.0, None, -0.3, 0, 0, 0, 0))
+    res = p.update(t, RCLOSED, st)
+    assert res.q_cmd[1] == pytest.approx(0.0)                         # unchanged fail-safe: open
+    res = p.update(t + 0.01, RCLOSED, tblocked(t + 0.01, q=(0.0, -0.3, -0.3, 0, 0, 0, 0)))
+    assert res.stall[1] and res.q_cmd[1] == pytest.approx(-0.6)
+
+
+def test_stalled_command_never_pulls_back_and_respects_ceiling_property():
+    """Randomised: while stalled, the command never lies further back than q and the
+    implicit position-error torque never exceeds the derated closing ceiling. When the
+    joint is pushed behind the open pose by more than the ceiling allows, the ceiling
+    wins (q_cmd may sit behind open, but always pushes forward at exactly the cap)."""
+    rng = np.random.default_rng(3)
+    for _ in range(20):
+        p = Dex3HandProtector(OPEN)
+        t = _thumb_engage(p)
+        for k in range(100):
+            qk = (0.0, rng.uniform(-1.0, 1.2), rng.uniform(-1.7, 1.2), 0, 0, 0, 0)
+            temp = rng.choice([40.0, 70.0, 75.0])
+            t += 0.01
+            res = p.update(t, RCLOSED, tblocked(t, q=qk, temp=temp))
+            for i in (1, 2):
+                assert res.stall[i]
+                hs = -1.0
+                assert hs * (res.q_cmd[i] - qk[i]) >= -1e-12              # never pulls back
+                implicit = dp.DEX3_KP * abs(res.q_cmd[i] - qk[i])
+                assert implicit <= dp.CLOSE_TORQUE_CEILING_NM[i] * res.derate[i] + 1e-9
+                if hs * (res.q_cmd[i] - 0.0) < -1e-12:                     # cmd behind open
+                    assert implicit == pytest.approx(dp.CLOSE_TORQUE_CEILING_NM[i] * res.derate[i])
