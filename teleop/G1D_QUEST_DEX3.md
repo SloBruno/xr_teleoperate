@@ -199,6 +199,24 @@ G1D_WAIST_PITCH=1 XR_TELEOP_VUER_IP=10.0.0.50 bash teleop/run_g1d_quest_dex3.sh
 - Nada é publicado em `rt/waistpitchcmd` antes do `r`/A; recusa armar com outro publisher, sem
   estado fresco do pitch/braços ou sem confirmar o próprio GUID. Outro publisher no meio da sessão
   => volta ao neutro e solta (nunca derruba). Térmico: ≥70 °C só aceita voltar; ≥78 °C volta e solta.
+- Armar só com o tronco medido em **[-0,01; 0,30] rad** (fora disso recusa, sem publicar): armar
+  segura o q medido e nunca puxa o tronco para dentro da faixa.
+- Soltar o stick / amostra velha = **segura no q MEDIDO** (`stop()` do controlador): a referência é
+  re-ancorada no q medido (pode recuar até ~0,03 rad de referência adiantada; nunca um alvo novo para frente).
+- Outro publisher em `rt/waistpitchcmd` é verificado a cada ciclo (50 Hz). Falha de publicação: alarme
+  (1ª vez e a cada 0,5 s/50 s, sem spam) e, após 0,5 s seguidos, volta ao neutro e solta.
+- Volta automática ao neutro **só** para o pitch e só em: Y esquerdo, `q`/B/Ctrl-C/erro (decisão do
+  operador: "fail-safe e parada do teleop levam o pitch a q = 0,0, seguram e só então soltam"), térmico
+  78 °C/tempo de sessão, outro publisher, falha de publicação, morte da thread principal. Braços e mãos
+  continuam sem home automático (pose estável declarada). O pedido de volta é feito no início da
+  finalização, antes de qualquer passo de limpeza que possa falhar.
+- Risco residual (sem solução em software): se a própria thread do pitch travar dentro do DDS
+  (escrita confiável do Cyclone bloqueia no máx. `max_blocking_time`, padrão 100 ms) ou o processo
+  morrer por `kill -9`, ninguém mais publica; o comportamento do motor sem comando não foi medido.
+  Primeiro teste sempre com o robô no suporte e a parada de emergência na mão.
+- Braços são relativos ao corpo: ao inclinar o tronco as mãos (e a câmera da cabeça) inclinam junto;
+  não há compensação de IK pelo pitch.
+- Replay offline com telemetria real do Quest: `python tools/g1d_waist_pitch_replay.py <status.jsonl[.gz]>`.
 - Controle reutilizado de `g1d_pitch_offline` (785a29d), copiado byte a byte em
   `teleop/third_party/g1d_pitch` (sha256 em `VENDORED.json`, verificado na inicialização).
 - Log por ciclo: `~/.local/state/xr_teleoperate/waist-pitch-<data>.jsonl` (ou `XR_TELEOP_PITCH_LOG`).

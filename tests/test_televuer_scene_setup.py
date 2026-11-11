@@ -47,6 +47,9 @@ def test_hand_tracking_scene_upserts_hands_and_motion_controllers(monkeypatch, s
     viewer.img_width = 2
     viewer.aspect_ratio = 1.0
     viewer.webrtc_url = "https://example.invalid/offer"
+    # __new__ skips __init__: mirror its video-plane defaults (televuer.py __init__)
+    viewer.video_plane_height = 1.0
+    viewer.video_plane_distance = 1.0
     session = FakeSession()
 
     with pytest.raises(StopAfterSceneSetup):

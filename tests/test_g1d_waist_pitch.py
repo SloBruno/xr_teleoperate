@@ -746,12 +746,28 @@ def test_discovery_failure_fails_closed():
     _assert_released_only_at_neutral(env2)
 
 
-@pytest.mark.parametrize("q0", [0.40, 0.8])
-def test_arming_refused_when_torso_already_beyond_cap(q0):
+@pytest.mark.parametrize("q0", [-0.0105, 0.3005, 0.40, 0.8])
+def test_arming_refused_when_torso_outside_operating_band(q0):
+    # Arming must never move the torso by itself and never hold beyond the
+    # cap: the controller clips its first target into [0, cap], so a start
+    # pose above the cap, or more than ARM_Q_TOL behind upright (the
+    # gravity-safe side), is refused instead of being pulled into the band.
     env = make(q0=q0)
     env.sup.request_arm(start_thread=False)
     run(env, 0.5, stick=None)
     assert env.sup.state == wp.REFUSED and env.bus.published == [] and env.bus.create_calls == 0
+
+
+@pytest.mark.parametrize("q0", [-0.009, 0.0015, 0.15, 0.2995])
+def test_arming_inside_band_holds_measured_pose_without_auto_motion(q0):
+    assert wp.ARM_Q_TOL <= 0.01
+    env = make(q0=q0)
+    arm_now(env)
+    run(env, 2.0, stick=(0.0, 0.0))
+    assert env.sup.state == wp.ACTIVE
+    assert abs(env.bus.plant.q - q0) <= wp.ARM_Q_TOL + 0.003
+    for _, cmd in env.bus.published:
+        assert abs(cmd.q - q0) <= wp.ARM_Q_TOL + 1e-6
 
 
 def test_invalid_newer_arm_sample_blocks_forward_immediately():
@@ -792,3 +808,64 @@ def test_vendored_files_match_manifest():
 def test_stack_is_loaded_from_pinned_vendor_dir():
     assert Path(STACK.pitch_controller.__file__).resolve().parent == wp.VENDOR_DIR.resolve()
     assert Path(STACK.pitch_ct.__file__).resolve().parent == wp.VENDOR_DIR.resolve()
+
+
+def test_foreign_writer_is_checked_every_cycle_after_arming():
+    env = make()
+    arm_now(env)
+    env.bus.foreign = ["late-guid"]
+    run(env, wp.CTRL_DT, stick=(1.0, 0.0))
+    assert env.sup.state == wp.HOMING
+    run(env, 15.0, stick=(1.0, 0.0))
+    _assert_released_only_at_neutral(env)
+
+
+def test_sustained_publish_failure_raises_alarm_rate_limited_and_homes():
+    logs = []
+    env = make()
+    env.sup._log = lambda level, msg: logs.append((level, msg))
+    arm_now(env)
+    run(env, 1.0, stick=(1.0, 0.0))
+    good = env.bus.publish_cmd
+
+    def broken(*a, **k):
+        raise RuntimeError("dds write failed")
+    env.bus.publish_cmd = broken
+    run(env, 2.0, stick=(1.0, 0.0))
+    assert env.sup.publish_failures >= int(2.0 / wp.CTRL_DT) - 1
+    alarms = [m for lvl, m in logs if "publicar" in m]
+    assert 1 <= len(alarms) <= 4, alarms          # loud but not 50 Hz spam
+    assert env.sup.state == wp.HOMING            # transport degraded -> end at neutral
+    env.bus.publish_cmd = good                    # transport recovers: home completes
+    run(env, 15.0, stick=(1.0, 0.0))
+    _assert_released_only_at_neutral(env)
+    assert env.sup.publish_failures == 0          # consecutive counter resets on success
+
+
+@pytest.mark.parametrize("exc", [SystemExit(3), KeyboardInterrupt()])
+def test_base_exception_in_pitch_cycle_requests_home_and_keeps_holding(exc):
+    env = make()
+    arm_now(env)
+    run(env, 2.0, stick=(1.0, 0.0))
+    q_before = env.bus.plant.q
+    n_pub = len(env.bus.published)
+    real_tick = env.ctrl.tick
+    calls = {"n": 0}
+
+    def tick_once_raising(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise exc
+        return real_tick(*a, **k)
+    env.ctrl.tick = tick_once_raising
+    env.clock.t += wp.CTRL_DT
+    env.bus.advance()
+    env.sup._guarded_step()                      # must not propagate
+    assert len(env.bus.published) == n_pub + 1   # last command re-published (hold)
+    assert env.sup._home_reason is not None
+    for _ in range(int(15.0 / wp.CTRL_DT)):
+        env.clock.t += wp.CTRL_DT
+        env.bus.advance()
+        env.sup._guarded_step()
+    assert q_before > 0.05
+    _assert_released_only_at_neutral(env)

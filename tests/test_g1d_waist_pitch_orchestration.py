@@ -14,6 +14,7 @@ import tests.test_g1d_agv_orchestration as harness  # noqa: E402
 from teleop.utils import g1d_waist_pitch as wp  # noqa: E402
 
 PITCH_ARGV = harness.BASE_ARGV + ["--g1d-waist-pitch"]
+_LAST = {}          # events/supervisors of the latest _run, readable after it raised
 
 
 class RecordingSupervisor:
@@ -69,6 +70,7 @@ def _run(monkeypatch, tmp_path, script, *, pitch=True):
         events.append("pitch_create")
         return sup
     events, sups = [], []
+    _LAST.update(events=events, sups=sups)
     monkeypatch.setattr(wp, "create_waist_pitch_supervisor", factory)
     monkeypatch.setattr(harness, "BASE_ARGV", PITCH_ARGV if pitch else harness.BASE_ARGV)
     if pitch:
@@ -152,3 +154,34 @@ def test_televuer_forwards_left_y_and_right_stick_in_hand_and_controller_modes()
     src = (ROOT / "teleop" / "televuer" / "src" / "televuer" / "tv_wrapper.py").read_text(encoding="utf-8")
     assert src.count("left_ctrl_bButton=self.tvuer.left_ctrl_bButton") >= 2
     assert src.count("right_ctrl_thumbstickValue=self.tvuer.right_ctrl_thumbstickValue") >= 2
+
+
+def test_pitch_home_requested_before_any_other_shutdown_step_can_fail(monkeypatch, tmp_path):
+    """Codex review: a raising cleanup step before the pitch hook must not
+    skip the return to q=0.0. The O(1) home request is the first fallible
+    shutdown step (the non-daemon pitch thread completes it on its own);
+    observed at the first later cleanup call without aborting the harness
+    (an aborted in-process finally would leak threads into later tests)."""
+    import teleop.utils.robot_state_monitor as rsm
+    original = rsm.stop_locomotion_best_effort
+    seen = []
+
+    def observing_stop(*a, **k):
+        sups = _LAST.get("sups") or []
+        seen.append(bool(sups and sups[0].home_reasons))
+        return original(*a, **k)
+    monkeypatch.setattr(rsm, "stop_locomotion_best_effort", observing_stop)
+    _, events, sups, _, _ = _run(monkeypatch, tmp_path, _forward(6, lambda i: {"q": True}))
+    assert seen, "shutdown cleanup step not reached"
+    assert seen[0] is True, "pitch home was not requested before the first other cleanup step"
+    assert sups[0].state == wp.RELEASED
+
+
+def test_pitch_implies_no_locomotion_wrapper(monkeypatch, capsys):
+    """loco_wrapper is provably None whenever the pitch exists (G1D refuses
+    --motion), so no StopMove call precedes the pitch home request."""
+    monkeypatch.setenv("G1D_WAIST_PITCH", "1")
+    monkeypatch.setattr(sys, "argv", PITCH_ARGV + ["--motion"])
+    with pytest.raises(SystemExit):
+        harness._run_parse_only(monkeypatch)
+    assert "--motion is not supported" in capsys.readouterr().err

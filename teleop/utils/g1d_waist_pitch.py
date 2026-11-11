@@ -6,7 +6,9 @@ Quest mapping (G1D profile)
   * RIGHT stick HORIZONTAL axis -> waist pitch RATE (right = bend forward,
     left = come back). Deadzone 0.12 + cubic shaping (quest_controls), rate
     <= PITCH_RATE_MAX = 0.10 rad/s. Releasing the stick HOLDS. Stale controller
-    sample (> 0.25 s) -> rate 0 (hold, no motion). The right stick VERTICAL
+    sample (> 0.25 s) -> rate 0 (hold, no motion). Hold = the vendored
+    controller's stop(): reference re-anchored on the MEASURED q (removes the
+    profiled lead, never a new forward target). The right stick VERTICAL
     axis stays the lift column (G1D_AGV=1) and the left stick the base; neither
     is read here.
   * LEFT Y (``left_ctrl_bButton``) = FAIL-SAFE. Held on a FRESH controller
@@ -17,8 +19,10 @@ Quest mapping (G1D profile)
     stale stick input and with the controller locked out; never stops arms,
     hands, AGV or the teleop. The latch is one-way for the session.
   * Terminal q / right B (teleop stop), Ctrl-C, exceptions, main-thread death,
-    a foreign rt/waistpitchcmd writer, thermal (78 C) and the 30 min session
-    cap all do the same: home to 0.0, then release. The torso is never
+    a foreign rt/waistpitchcmd writer (checked every cycle), 0.5 s of failed
+    writes, thermal (78 C) and the 30 min session cap all do the same: home to
+    0.0, then release (operator decision: teleop stop drives the PITCH to
+    q=0.0; arms/hands keep their declared stable pose, no automatic home). The torso is never
     released away from neutral (gravity drops it); a stalled return HOLDS.
 
 Control is NOT re-implemented here. It reuses, vendored byte-identical under
@@ -87,8 +91,15 @@ TARGET_LEAD_MAX = 0.03        # target may lead measured q by this (jog directio
 MIN_JOG_STEP = 0.001          # rad: integrate the stick until this much
 HOME_RETRY_S = 1.0            # re-issue home after a fault-hold while homing
 ARM_TIMEOUT_S = 3.0
+ARM_Q_TOL = 0.01              # rad: arming accepts q in [-tol, cap] (tol only on the
+                              # gravity-safe side behind upright; vendor min -0.0436). The
+                              # controller clips its first target into [0, cap], so this
+                              # bounds any arming-time correction to <= tol, never above cap.
+PUBLISH_FAIL_HOME_N = 25      # consecutive failed writes (0.5 s) -> end the pitch at neutral
 STATE_MAX_AGE_S = 0.1
-FOREIGN_CHECK_EVERY = 10
+FOREIGN_CHECK_EVERY = 1       # every cycle (in-memory registry lookup); the residual
+                              # window is one cycle, the arming re-check is right before
+                              # the first publish
 WRITER_ID = "g1d_teleop_pitch"
 REFUSAL_LOG_PERIOD_S = 1.0
 
@@ -296,6 +307,7 @@ class WaistPitchSupervisor:
         self._bus_closed = False
         self._n = 0
         self._tick_errors = 0
+        self.publish_failures = 0
         self.admission_refusals = 0
         self._last_refusal_log = -1e9
         self._thread = None
@@ -433,8 +445,8 @@ class WaistPitchSupervisor:
             self.last_reason = "sem estado fresco dos braços (rt/lowstate)"
             return False
         q0 = _finite(getattr(st, "q", None))
-        if q0 is None or not (-0.05 <= q0 <= PITCH_Q_MAX + 0.02):
-            self._finish(REFUSED, f"q medido {q0} fora de [0, {PITCH_Q_MAX:.2f}] rad: traga o tronco ao neutro "
+        if q0 is None or not (-ARM_Q_TOL <= q0 <= PITCH_Q_MAX):
+            self._finish(REFUSED, f"q medido {q0} fora de [{-ARM_Q_TOL:.2f}, {PITCH_Q_MAX:.2f}] rad: traga o tronco ao neutro "
                                   "com a ferramenta do pitch antes de usar o teleop")
             return False
         if not self._writer_created:
@@ -552,13 +564,23 @@ class WaistPitchSupervisor:
         self._last_cmd = cmd
         try:
             self.bus.publish_cmd(WRITER_ID, cmd, now)
+            self.publish_failures = 0
         except Exception as error:
-            self._say("error", f"falha ao publicar: {error!r}")
+            self._publish_failed(error)
         for ev in ctrl.drain_events():
             if ev.kind != "verified":
                 self._say("info", f"[{ev.kind}] {ev.msg}")
         self._write_jsonl(now, st, cmd, temp, xy, ts, arms_fresh)
         return cmd
+
+    def _publish_failed(self, error):
+        self.publish_failures += 1
+        n = self.publish_failures
+        if n == 1 or n == PUBLISH_FAIL_HOME_N or n % 2500 == 0:
+            self._say("error", f"ALARME: falha ao publicar rt/waistpitchcmd ({n}x seguidas): {error!r}. "
+                               "Se o tronco não responder, segure-o / use a parada de emergência.")
+        if n >= PUBLISH_FAIL_HOME_N and self.state == ACTIVE:
+            self.request_home_and_release(f"falha de publicação ({n}x seguidas)")
 
     def _apply_stick(self, now, xy, ts, st, temp, dt):
         ctrl = self.ctrl
@@ -596,7 +618,8 @@ class WaistPitchSupervisor:
     def _guarded_step(self):
         try:
             return self.step()
-        except Exception as error:   # never die silently while leaned
+        except BaseException as error:   # never die silently while leaned (incl. SystemExit/
+            # KeyboardInterrupt raised inside this thread): request home, keep holding
             self._say("error", f"erro inesperado no ciclo: {error!r}")
             self.request_home_and_release(f"erro no ciclo do pitch: {error!r}")
             if self._last_cmd is not None and self.state in (ACTIVE, HOMING):

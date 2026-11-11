@@ -1557,6 +1557,13 @@ if __name__ == '__main__':
         # shutdown to cancel it. Retried again after the arm shutdown below.
         if getattr(loco_wrapper, "stop_move_sender", None) is not None:
             loco_wrapper.stop_move_sender()
+        # G1-D waist pitch: start the return to q=0.0 before any other cleanup
+        # step can fail (O(1) request; the non-daemon pitch thread completes it).
+        if waist_pitch is not None:
+            try:
+                waist_pitch.request_home_and_release(shutdown_cause or "teleop stop")
+            except BaseException as error:
+                _log_best_effort("error", f"[waist-pitch] home request error: {error!r}")
         stop_locomotion_best_effort(loco_wrapper, shutdown_cause or "shutdown")
         # G1-D AGV/column (loco_wrapper is always None for G1D): immediate
         # Move(0)/HeightAdjust(0) burst + bounded sender join, before any slow
