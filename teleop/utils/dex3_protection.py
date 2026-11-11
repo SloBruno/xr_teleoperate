@@ -7,9 +7,23 @@ grow when a finger is blocked, and stops commanding a motor that is hot,
 stalled, or disabled.
 
 Trigger ownership is unchanged: the input target still comes from the
-trigger interpolation (rest = open, proportional closure). Protection can only
-move the commanded q toward the measured q / open pose, never beyond the
-trigger target.
+trigger interpolation (rest = open, proportional closure). Outside a stall,
+protection can only move the commanded q toward the measured q / open pose,
+never beyond the trigger target.
+
+No back-drive while stalled (fix/g1d-thumb-no-backdrive): a stalled joint that
+is "relaxed" (thumb always; long fingers after GRIP_HOLD_MAX_S or when the hold
+torque has faded to zero) does NOT command ``q_cmd = q`` any more. That
+followed the measured position, so an object (or the sibling thumb joint) could
+push the joint all the way back - past the open pose - with zero resistance
+(session pose-telemetry-20261109T215544: right Thumb2 stalled at -0.60 rad and
+was pushed to -0.02 with q_cmd tracking it; right Thumb1 stalled at -0.17 and
+ended at +0.57, behind the open pose). Instead the measured q at stall latch is
+kept as an anchor (never beyond the open pose on the far side): at or beyond
+the anchor in the closing direction the command is ``q`` (zero implicit torque,
+no heating, no extra squeeze); pushed back in the opening direction the command
+stays at the anchor, so the implicit torque ``kp*(anchor - q)`` restores it,
+capped by the closing ceiling times the thermal derate (0 when hot).
 
 Evidence (session pose-telemetry-20260930T190939, 287 s, both hands):
   * Free-following joints: error is transient (command steps, finger follows),
@@ -78,7 +92,8 @@ STALL_TIME_S = 0.75
 # reduced implicit torque instead of relaxing to q_meas (relaxing lets a held
 # object push the finger back and the box slips). Time-limited, fades with the
 # thermal derate factor, never while faulted. Calibrar no teste fisico.
-# Thumb = 0.0: thumb keeps the old relax-on-stall behaviour (thermal history).
+# Thumb = 0.0: the thumb does not squeeze while stalled (thermal history); it is
+# held at its stall-entry pose against back-drive only (see module docstring).
 # Hold torque raised 0.8 -> 1.2 N*m (calibrar no teste fisico).
 GRIP_HOLD_TORQUE_NM = (0.0, 0.0, 0.0, 1.2, 1.2, 1.2, 1.2)
 # Hold time limit 10 -> 30 s; the real defence is the thermal derate (hold torque
@@ -218,6 +233,8 @@ class Dex3HandProtector:
         self._stall_start: list[float | None] = [None] * n
         self._release_since: list[float | None] = [None] * n
         self._stall_sign = [0.0] * n
+        # measured q at stall latch, clamped so it is never behind the open pose
+        self._stall_anchor = [0.0] * n
         self._hot = [False] * n
         self._derate_prev = [1.0] * n
         self._last_temp: list[float | None] = [None] * n
@@ -352,19 +369,28 @@ class Dex3HandProtector:
                     self._stall[i] = True
                     self._stall_mag[i] = abs(target - open_q)
                     self._stall_sign[i] = float(sign)
+                    # anchor: never on the far side of the open pose
+                    self._stall_anchor[i] = (open_q + float(sign) * max(0.0, float(sign) * (q - open_q)))
                     self._release_since[i] = None
                     self._stall_start[i] = now
             else:
                 self._stall_since[i] = None
         if self._stall[i]:
             res.stall[i] = True
+            hs = self._stall_sign[i]  # direction latched at entry (trigger dropout must not flip it)
+            # No back-drive: if the joint has been pushed back (opening direction)
+            # behind the stall anchor, command toward the anchor with a restoring
+            # error bounded by the derated closing ceiling (0 at d=0). At/closer than
+            # the anchor: 0 (static stall -> q_cmd == q, no heating, no squeeze).
+            back = hs * (self._stall_anchor[i] - q)
+            restore = min(back, float(self.close_err_max[i]) * d) if back > 0.0 else 0.0
             hold_err = GRIP_HOLD_TORQUE_NM[i] / self.kp * d
             held = (self._stall_start[i] is not None
                     and now - self._stall_start[i] <= GRIP_HOLD_MAX_S and hold_err > 1e-9)
             if held:
-                # keep a reduced, thermally-faded squeeze toward the target
-                step = hold_err
-                hs = self._stall_sign[i]  # direction latched at entry (trigger dropout must not flip it)
+                # keep a reduced, thermally-faded squeeze toward the target; if
+                # pushed back past the anchor, the restoring error may exceed it
+                step = max(hold_err, restore)
                 q_hold = q + hs * step
                 lim = GRIP_HOLD_CMD_LIMIT_RAD[i]
                 if lim > 0.0:
@@ -380,9 +406,11 @@ class Dex3HandProtector:
                     f"{JOINT_NAMES[i]} travado (err {abs(err):.2f} rad): segurando pegada a "
                     f"{step * self.kp:.2f} N*m implicitos (max {GRIP_HOLD_MAX_S:.0f} s)")
             else:
-                res.q_cmd[i] = q  # relax: zero implicit torque
+                # relax without squeeze, but never follow back-drive past the anchor
+                res.q_cmd[i] = q + hs * restore
                 res.active[("stall", i)] = (
-                    f"{JOINT_NAMES[i]} travado (err {abs(err):.2f} rad, dq~0, tau alto): aliviando ate soltar/reduzir trigger")
+                    f"{JOINT_NAMES[i]} travado (err {abs(err):.2f} rad, dq~0, tau alto): sem aperto, "
+                    f"segurando posicao contra retrocesso ({restore * self.kp:.2f} N*m) ate soltar/reduzir trigger")
             self._limit_since[i] = None
             return
 
